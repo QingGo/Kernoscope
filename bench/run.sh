@@ -32,6 +32,24 @@ CUDA_BIN="${CUDA_BIN:-/usr/local/cuda/bin}"
 NVCC="$(command -v nvcc || echo "$CUDA_BIN/nvcc")"
 NSYS="$(command -v nsys || true)"
 
+# 工具"发现"了还不够 —— 子进程是按 PATH 找的：
+#   * tools/probes 的 Makefile 直接调 `nvcc`
+#   * NVBit 官方 mem_trace 需要 `cuobjdump`
+# 在 CUDA bin 不在 PATH 的机器上（本机就是：ncu/nvcc/cuobjdump 都在 CUDA bin 里），
+# 这两处会分别以 `make: nvcc: No such file or directory` 和
+# `ERROR: cuobjdump not found on PATH!!!` 失败，而主流程照样 rc=0 ——
+# 于是产物里留下几个 rc=1 的步骤，却没有人知道是"发现到了但没用上"。
+# 所以把发现的目录真的放进 PATH（doctor 的多路径发现解决"找得到"，这里解决"用得上"）。
+if [[ -d "$CUDA_BIN" ]]; then
+  export PATH="$CUDA_BIN:$PATH"
+fi
+if [[ -n "$NSYS" ]]; then
+  NSYS_DIR="$(dirname "$NSYS")"
+  [[ -d "$NSYS_DIR" ]] && export PATH="$NSYS_DIR:$PATH"
+fi
+command -v nvcc >/dev/null 2>&1 || echo "[bench] warn: PATH 里仍然没有 nvcc —— probes 会编译失败"
+command -v cuobjdump >/dev/null 2>&1 || echo "[bench] warn: PATH 里没有 cuobjdump —— NVBit mem_trace 会失败"
+
 # 稳态时长：DRAM 代理要求"窗口被负载主导"，所以迭代数由**目标秒数**反推
 # （ledger_probe --target-s 会先量一次每-launch 耗时再定迭代数）。
 TARGET_BIG="${TARGET_BIG:-8}"      # 代理精度 / 账本对拍
