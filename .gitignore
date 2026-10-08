@@ -10,6 +10,9 @@ __pycache__/
 
 docs/
 
+# 同步到不带 .git 的远端时，用这个文件承载修订号（它是每次部署产生的，不入库）
+/REVISION
+
 # NVBit 工具的构建产物（源码在仓库里，产物不入库）
 tools/probes/nvbit_memtrace/*.so
 tools/probes/nvbit_memtrace/*.o
