@@ -42,15 +42,24 @@ def memtrace_main(argv: list[str]) -> int:
     ap.add_argument("--json", action="store_true", help="以 JSON 输出")
     args = ap.parse_args(argv)
 
+    # L2 容量：优先显式参数，其次本机 nvidia-smi，最后留空（分析器会拒绝给 DRAM 字节并说明原因）
+    l2_bytes = args.l2_bytes or 0
+    if not l2_bytes:
+        try:
+            from .backends.nsys import device_info_from_smi
+
+            l2_bytes = int(device_info_from_smi().l2_mib * 2 ** 20)
+        except Exception:  # noqa: BLE001
+            l2_bytes = 0
     try:
-        trace = load_memtrace_auto(args.src, sm_count=args.sm_count, l2_bytes=args.l2_bytes or 0,
+        trace = load_memtrace_auto(args.src, sm_count=args.sm_count, l2_bytes=l2_bytes,
                                    kernel_filter=args.kernel or "")
     except (OSError, MemTraceError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
     st = analyze_memtrace(
-        trace, l2_bytes=args.l2_bytes or trace.l2_bytes or None,
+        trace, l2_bytes=l2_bytes or trace.l2_bytes or None,
         l1_bytes=args.l1_bytes or 128 * 1024,
         line_bytes=args.line_bytes, l1_ways=args.l1_ways, l2_ways=args.l2_ways,
         max_accesses=args.max_accesses)

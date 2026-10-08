@@ -13,7 +13,21 @@
 #    表现为"程序正常跑完但一条记录都没有"。
 set -euo pipefail
 
-: "${NVBIT_MEMTRACE_SO:?请设置 NVBIT_MEMTRACE_SO=/path/to/mem_trace.so（NVBit 官方工具，需自行构建）}"
+# 自动发现官方工具：$NVBIT_PATH/tools/build/mem_trace/mem_trace.so（NVBit 自带的示例）
+if [ -z "${NVBIT_MEMTRACE_SO:-}" ] && [ -n "${NVBIT_PATH:-}" ]; then
+  for cand in "$NVBIT_PATH/tools/build/mem_trace/mem_trace.so" \
+              "$NVBIT_PATH/tools/build/mem_trace/mem_trace.so" \
+              "$NVBIT_PATH/tools/build/mem_trace/*.so"; do
+    if [ -f "$cand" ]; then NVBIT_MEMTRACE_SO="$cand"; break; fi
+  done
+fi
+: "${NVBIT_MEMTRACE_SO:?请设置 NVBIT_MEMTRACE_SO=/path/to/mem_trace.so，或用 NVBIT_PATH 指向 NVBit 安装目录（工具需自行构建）}"
+if [ ! -f "$NVBIT_MEMTRACE_SO" ]; then
+  echo "！NVBIT_MEMTRACE_SO 指向的文件不存在: $NVBIT_MEMTRACE_SO" >&2
+  echo "  构建官方工具（在 NVBit 目录下）：" >&2
+  echo "    make -C tools/mem_trace    # 产出 tools/build/mem_trace/mem_trace.so" >&2
+  exit 2
+fi
 OUT="${KS_MEMTRACE_OUT:-memtrace-official.txt}"
 
 if [ "${1:-}" = "--" ]; then shift; fi

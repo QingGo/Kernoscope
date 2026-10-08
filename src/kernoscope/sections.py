@@ -256,7 +256,7 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                 f"{'/'.join(str(b) for b in blocks)}）：单一数值会误导，故报 n/a"))
             s.add(Metric.exact("ks__grid_sizes_observed", "|".join(str(g) for g in grids), "",
                                source="distinct grid sizes in CUPTI activity",
-                               note="取值集合口径（R-04）；逐组时长见 LaunchConfigs"))
+                               note="取值集合口径；逐组时长与 occupancy 见 LaunchConfigs section"))
             s.add(Metric.exact("ks__block_sizes_observed", "|".join(str(b) for b in blocks), "",
                                source="distinct block sizes in CUPTI activity"))
         else:
@@ -398,13 +398,13 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                     "拒绝用该标定算 roofline 拐点：" + (caliber_note or
                     "machine-profile.json 的 measured_matmul_tflops 缺少 acc_caliber / "
                     "precision_settings / method 字段。请用新版 tools/machine-profile.py 重新标定"),
-                    source="calibration caliber check (R-09)"))
+                    source="calibration caliber check"))
                 s.add(Metric.unavailable(
                     "est__pct_of_measured_compute_peak",
-                    "同上：缺累加口径字段的 matmul 峰值不能用于拐点判定（R-09）"))
+                    "同上：缺累加口径字段的 matmul 峰值不能用于拐点判定"))
                 s.add(Metric.unavailable(
                     "est__bound",
-                    "同上：compute roof 不可用，无法判定 compute/memory bound（R-09）"))
+                    "同上：compute roof 不可用，无法判定 compute/memory bound"))
             s.add(Metric.estimated("est__arithmetic_intensity", round(sol.arithmetic_intensity, 2),
                                    "FLOP/B", source="user-provided workload"))
         else:

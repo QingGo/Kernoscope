@@ -177,6 +177,8 @@ class DramEstimate:
         if name in ("est__dram_bytes_per_launch",):
             fails = self._attribution_failures()
             return "；".join(fails) or "无法归因到单个 launch（未知原因）"
+        if name in ("est__dram_throughput_pct_of_peak",):
+            return "；".join(self._total_failures()) or "无法给出吞吐占比（未知原因）"
         if name == "est__dram_bytes_per_launch_trace":
             return self.trace_unavailable_reason or "轨迹未提供 per-launch 字节"
         if name == "est__dram_vs_ledger_err_pct":
@@ -188,7 +190,7 @@ class DramEstimate:
     def _ledger_failure(self, basis: str, need: str, want_total: bool | None = None) -> str:
         why = "；".join(self._total_failures() if want_total else self._attribution_failures()) \
             or "对拍口径不成立"
-        hint = ("；可以加 --ks-memtrace <file> 换用**轨迹口径**的 per-launch 字节"
+        hint = ("；可以加 --ks-memtrace <trace> 换用**轨迹口径**的 per-launch 字节"
                 if not self.trace_available else "")
         return f"{need}行无法给出：{why}{hint}"
 
@@ -527,6 +529,6 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
                     est.range_verdict_for(basis), ""))
         if est.range_verdict_for(basis):
             out.append(("ks__ledger_range_verdict", est.range_verdict_for(basis), "",
-                        "由区间位置与两条口径推出（R-05）",
+                        "由区间位置与两条口径推出",
                         "靠下界 ⇒ 账本预测的流量偏大/O(S²) 口径成立；靠上界 ⇒ 账本可能漏项", ""))
     return out

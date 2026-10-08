@@ -233,7 +233,12 @@ class Report:
         return hist
 
     # ---- 序列化 ----
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, include_launches: bool = True) -> dict[str, Any]:
+        """`include_launches=False` 让报告体积与 iteration 数解耦（R-22）。
+
+        2000 次 launch 的 JSON 实测 901 KB，主体就是 `launches[]`；只关心聚合读数时
+        没必要把它带上。需要逐 launch 数据时用 `--launch-csv` 单独出表。
+        """
         return {
             "schema_version": self.schema_version,
             "tool": "kernoscope",
@@ -275,7 +280,7 @@ class Report:
                         }
                         for s in k.sections
                     ],
-                    "launches": [
+                    "launches": [] if not include_launches else [
                         {
                             "start_ns": l.start_ns,
                             "end_ns": l.end_ns,
@@ -297,8 +302,9 @@ class Report:
             ],
         }
 
-    def to_json(self, indent: int = 2) -> str:
-        return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
+    def to_json(self, indent: int = 2, include_launches: bool = True) -> str:
+        return json.dumps(self.to_dict(include_launches=include_launches), indent=indent,
+                          ensure_ascii=False)
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "Report":

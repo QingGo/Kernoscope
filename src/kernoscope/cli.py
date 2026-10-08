@@ -143,9 +143,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="从首个采样点起再丢掉 N 秒（跳过启动/JIT；与 --ks-window 叠加）")
     k.add_argument("--ks-window-s", type=float, default=None,
                    help="只保留从采样起点算起的 N 秒窗口（成本可预算）")
+    k.add_argument("--ks-json-no-launches", action="store_true",
+                   help="JSON 里不写逐 launch 数组：报告体积与 iteration 数解耦；"
+                        "需要逐 launch 数据时用 --launch-csv")
     k.add_argument("--ks-memtrace", default=None,
-                   help="NVBit 访存轨迹（ks-memtrace v1）：给出 sectors/request、合并效率、"
-                        "L1/L2 命中率模型与 trace 口径的 DRAM 字节")
+                   help="NVBit 访存轨迹：给出 sectors/request、合并效率、L1/L2 命中率模型"
+                        "与 trace 口径的 per-launch DRAM 字节（支持 ks-memtrace v1 与 NVBit "
+                        "官方 mem_trace 输出，自动判别）")
     k.add_argument("--ks-l2-bytes", type=int, default=0, help="覆盖 L2 容量（字节）")
     k.add_argument("--ks-keep-intermediate", action="store_true",
                    help="保留 nsys 中间产物（.nsys-rep/.sqlite）；给了 -o 时默认保留在其旁边")
@@ -384,7 +388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.ks_dtype,
         )
         peaks.profile_path = args.ks_calibration or ""
-        log("warn: 峰值被 --ks-peak-* 覆盖：来源不是本机标定，roofline 拐点判定按 R-09 置为不可用")
+        log("warn: 峰值被 --ks-peak-* 覆盖：来源不是本机标定，因此不用于 roofline 拐点判定")
     workload = None
     workload_note = ""
     if args.ks_gemm:
@@ -464,19 +468,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     memtrace_stats = {}
     trace_bytes_per_launch = None
     trace_kernel = ""
-    trace_reason = "未提供访存轨迹：加 --ks-memtrace <file> 可换用轨迹口径（R-33）"
+    trace_reason = ("未提供访存轨迹：加 --ks-memtrace <trace> 可换用轨迹口径，在 NVML 代理口径不成立时仍能完成账本对拍")
     if args.ks_memtrace:
         from .analyze.memtrace import analyze_memtrace
-        from .backends.memtrace import MemTraceError, load_memtrace
+        from .backends.memtrace import MemTraceError, load_memtrace_auto
 
         try:
-            _tr = load_memtrace(args.ks_memtrace)
-            _st = analyze_memtrace(_tr, l2_bytes=args.ks_l2_bytes or None)
-            memtrace_stats[_st.kernel] = _st
-            trace_kernel = _st.kernel
-            trace_bytes_per_launch = _st.dram_bytes_per_launch
-            trace_reason = _st.dram_bytes_unavailable_reason
-            log(f"memtrace: {_st.kernel} 载入 {_st.records} 条记录")
+            l2_bytes = args.ks_l2_bytes or int(device.l2_mib * 2 ** 20)
+            trace = load_memtrace_auto(args.ks_memtrace, sm_count=sm_count, l2_bytes=l2_bytes)
+            st = analyze_memtrace(trace, l2_bytes=l2_bytes or None)
+            memtrace_stats[st.kernel] = st
+            trace_kernel = st.kernel
+            trace_bytes_per_launch = st.dram_bytes_per_launch
+            trace_reason = st.dram_bytes_unavailable_reason
+            log(f"memtrace: {st.kernel} 载入 {st.records} 条记录"
+                f"（L2={l2_bytes / 2**20:.0f} MiB"
+                + (f"，来源 {args.ks_memtrace}" if not args.ks_l2_bytes else
+                   "，用本机 L2 容量定容；device 未报 L2 时用 --ks-l2-bytes 指定")
+                + "）")
         except (OSError, MemTraceError) as e:
             log(f"error: 访存轨迹读取失败: {e}")
             return 1
@@ -728,7 +737,7 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         if p.exists() and not args.force_overwrite:
             print(f"error: {json_path} exists (pass -f to overwrite)", file=sys.stderr)
             return 1
-        p.write_text(rep.to_json())
+        p.write_text(rep.to_json(include_launches=not args.ks_json_no_launches))
         rep.meta["out_json"] = json_path
         if getattr(args, "launch_csv", False):
             lp = base + ".launches.csv"
@@ -755,6 +764,19 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
                           metrics=metrics, print_details=args.print_details,
                           print_units=args.print_units,
                           print_metric_name=args.print_metric_name))
+
+    # 成本可预算（R-22）：报告体积与时长要能被看见、能被限流
+    sizes = {k: os.path.getsize(v) for k, v in
+             (("json", rep.meta.get("out_json")), ("perfetto", rep.meta.get("out_perfetto")),
+              ("launch_csv", rep.meta.get("out_launch_csv"))) if v and os.path.exists(v)}
+    if sizes:
+        blob = " / ".join(f"{k} {v / 1024:.0f} KB" for k, v in sizes.items())
+        print(f"==PROF== 输出体积: {blob}"
+              f"（{sum(len(k.launches) for k in rep.kernels)} 次 launch）", file=sys.stderr)
+        if sum(sizes.values()) > 2 * 1024 * 1024 or sum(len(k.launches) for k in rep.kernels) > 1000:
+            print("==PROF== 提示：体积主要来自逐 launch 记录。要限流可用 -c <N>（每个 kernel 只报 "
+                  "N 次）、--ks-json-no-launches（JSON 不带逐 launch 数组）、或 --launch-csv 单独出表",
+                  file=sys.stderr)
 
     if args.log_file:
         Path(args.log_file).write_text("\n".join(logged) + "\n")
