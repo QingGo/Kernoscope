@@ -163,6 +163,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="发射槽上界用的 SM 时钟（默认取 NVML 实测均值）")
     k.add_argument("--ks-keep-intermediate", action="store_true",
                    help="保留 nsys 中间产物（.nsys-rep/.sqlite）；给了 -o 时默认保留在其旁边")
+    k.add_argument("--packet", default=None,
+                   help="写出决策包 JSON（判词/前提/未测到/代价，默认 <4 KB）；"
+                        "`-` 表示写到 stdout。比完整报告小两个数量级，给 agent 用")
+    k.add_argument("--screen", default="auto", choices=["auto", "only", "off"],
+                   help="结论优先的一屏：auto=铺在完整报告前面（默认；--csv/--launch-csv/"
+                        "--packet - 时自动关闭以保持机器格式纯净）；only=只打一屏；"
+                        "off=只打完整报告。与 --packet 同一证据模型（同一份判词）")
+    k.add_argument("--ks-selfcheck", default=None,
+                   help="本机自检文件（kernoscope selftest 产出）：给判词带上误差带与 MDD，"
+                        "diff 才能区分真改进与噪声")
     k.add_argument("--strict", action="store_true",
                    help="请求了不可得数据时 exit 2（CI 卡门）；空转选项也视为错误")
 
@@ -387,7 +397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.strict and problems:
             _report_strict(problems)
             return 2
-        return _emit(rep, args, compat_mode, logged)
+        return _emit(rep, args, compat_mode, logged, packet_ctx={})
 
     if args.list_sets:
         from .sections import SET_SECTIONS
@@ -398,6 +408,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nSections that require GPU performance counters are always reported as "
               "unavailable with a reason (never as substituted numbers).")
         return 0
+
+    # ---------- 能力探测（W1/W5）----------
+    # 便宜（只读 /proc + 多路径查工具，不跑 ncu 探测）但必须先做：它决定这次能给出什么，
+    # 也决定要不要降级。做完缓存起来，组包（packet）与摘要共用同一份结论。
+    from .capabilities import env_from_doctor, evaluate
+    from .doctor import run_doctor
+
+    cap = evaluate(env_from_doctor(run_doctor(probe_counters=False)))
+
+    selfcheck = None
+    if args.ks_selfcheck:
+        try:
+            selfcheck = json.loads(Path(args.ks_selfcheck).read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            log(f"warn: --ks-selfcheck 读取失败（{e}）：本次判词不带误差带/MDD")
 
     # ---------- 采集 ----------
     sampler_ctx = Sampler(enabled=not args.ks_no_nvml)
@@ -796,7 +821,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             log(f"warn: --metrics 里有 {len(missing)} 个指标不存在、已忽略：{', '.join(missing)}")
 
     # ---------- 输出 ----------
-    rc = _emit(rep, args, compat_mode, logged)
+    rc = _emit(rep, args, compat_mode, logged,
+               packet_ctx={"capabilities": cap, "selfcheck": selfcheck})
 
     # ---------- --strict ----------
     if args.strict:
@@ -906,7 +932,8 @@ def _collect_metric_names(rep: Report) -> set[str]:
     return {m.name for k in rep.kernels for s in k.sections for m in s.metrics}
 
 
-def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list[str]) -> int:
+def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list[str],
+          packet_ctx: dict[str, Any] | None = None) -> int:
     if compat_mode and not args.quiet:
         print("==PROF== kernoscope running in ncu compatibility mode "
               "(symlinked as 'ncu'); data sources differ from NVIDIA Nsight Compute.",
@@ -941,8 +968,46 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         Path(args.ks_perfetto).write_text(render_perfetto(rep))
         rep.meta["out_perfetto"] = args.ks_perfetto
 
+    # ---------- W2/W4：决策包（机器视图）与一屏（人视图）----------
+    # 两者都由同一份 packet 渲染：人视图只是 packet 的一种排版，不是另一条代码路径。
+    screen = getattr(args, "screen", "auto")
+    if getattr(args, "packet", None) == "-" and screen == "auto":
+        # stdout 上不能混着两种格式：要包就只给包
+        screen = "off"
+    if (args.csv or getattr(args, "launch_csv", False)) and screen == "auto":
+        # CSV 是机器格式，前面铺一屏人话会破坏它；要一屏请显式 --screen only
+        screen = "off"
+    packet = None
+    if getattr(args, "packet", None) or screen != "off":
+        from .packet import build, dumps, render_onepage, write_packet
+
+        ctx = packet_ctx or {}
+        packet = build(rep, capabilities=ctx.get("capabilities"),
+                       selfcheck=ctx.get("selfcheck"),
+                       basis=str(rep.meta.get("ledger_basis") or ""),
+                       report_path=rep.meta.get("out_json", ""))
+        blob = dumps(packet)
+        if getattr(args, "packet", None) == "-":
+            sys.stdout.write(blob + "\n")
+        elif getattr(args, "packet", None):
+            write_packet(packet, args.packet)
+            print(f"==PROF== 决策包: {args.packet} "
+                  f"({len(blob.encode('utf-8'))} B)", file=sys.stderr)
+        if screen in ("auto", "only"):
+            print(render_onepage(packet))
+            if screen == "auto" and not (args.csv or getattr(args, "launch_csv", False)):
+                print("")
+                print("=" * 100)
+                print("完整报告（上面的判词都出自这里的数据；每个数字都带出处）")
+                print("=" * 100)
+
     # 标准输出
-    if getattr(args, "launch_csv", False):
+    if getattr(args, "packet", None) == "-":
+        # 要包就只给包：stdout 上不混两种格式（谁要报告谁自己加 -o）
+        pass
+    elif screen == "only" and not (args.csv or getattr(args, "launch_csv", False)):
+        pass
+    elif getattr(args, "launch_csv", False):
         sys.stdout.write(render_launch_csv(rep))
     elif args.csv:
         sys.stdout.write(render_csv(rep, metrics))

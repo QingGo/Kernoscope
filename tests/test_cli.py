@@ -14,6 +14,18 @@ def run(capsys, *argv):
     return rc, out.out, out.err
 
 
+def report_part(text: str) -> str:
+    """取出完整报告部分（一屏在它前面）。
+
+    一屏（W4）默认铺在报告前面，所以"按行解析报告"的地方要先按这个分隔横幅切开。
+    横幅本身是稳定接口（README 里也写了），所以这里可以依赖它。
+    """
+    marker = "完整报告（上面的判词都出自这里的数据"
+    if marker in text:
+        return text.split(marker, 1)[1].split("\n", 2)[2]
+    return text
+
+
 def test_synthetic_text_output(capsys):
     rc, out, err = run(capsys, "--ks-synthetic", "--ks-no-nvml", "--set", "basic")
     assert rc == 0
@@ -67,7 +79,7 @@ def test_kernel_filter_and_launch_count(capsys):
     assert "synthetic_elementwise" in out
     assert "synthetic_gemm" not in out
     # -c 3 只保留 3 次 launch
-    line = [l for l in out.splitlines() if "synthetic_elementwise" in l][0]
+    line = [l for l in report_part(out).splitlines() if "synthetic_elementwise" in l][0]
     assert line.split()[1] == "3"  # launches 列
 
 

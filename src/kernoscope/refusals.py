@@ -76,6 +76,68 @@ class RefusalCode(str, Enum):
     INTERNAL_UNKNOWN = "internal_unknown"      # 兜底：未分类的拒绝（出现即为 bug 信号）
 
 
+# 每个 code 的**静态**一句话说明。它不进决策包（每次都一样，而包里的字节要花在每次都变
+# 的东西上），但人视图要用它把「code」翻成人话 —— 所以它是 code 的一部分，不是文档。
+CODE_TITLES: dict["RefusalCode", str] = {
+    RefusalCode.NO_GPU: "本机没有 NVIDIA GPU",
+    RefusalCode.NO_NVML: "nvidia-smi / pynvml 不可用",
+    RefusalCode.NO_NVML_SAMPLES: "没有 NVML 采样点（采样被关掉或不可用）",
+    RefusalCode.NSYS_MISSING: "没有 nsys：kernel 级数据不可得",
+    RefusalCode.CUOBJDUMP_MISSING: "没有 cuobjdump：静态资源/SASS 不可得",
+    RefusalCode.NO_STATIC_INPUT: "没有提供 cubin/.so",
+    RefusalCode.NVBIT_MISSING: "未配置 NVBit：指令级/访存轨迹不可得",
+    RefusalCode.NO_MEMTRACE: "没有提供访存轨迹文件",
+    RefusalCode.NO_INSTR_HIST: "没有提供指令直方图",
+    RefusalCode.NO_OCCUPANCY_PROBE: "没跑 occupancy 探针",
+    RefusalCode.NO_SASS_SOURCE: "SASS/源码逐行对照未实现",
+    RefusalCode.NO_COUNTERS: "硬件计数器被权限/驱动策略拒绝",
+    RefusalCode.COUNTERS_UNKNOWN: "无法判定计数器是否可用（不等于被拒绝）",
+    RefusalCode.COUNTERS_NOT_INSTALLED: "没有 ncu，无法判定计数器是否可用",
+    RefusalCode.SAMPLING_UNAVAILABLE: "PC 采样（PmSampling/SourceCounters）不可得",
+    RefusalCode.INSTRUMENTATION_MISSING: "需要插桩/多趟重放的通道不可得",
+    RefusalCode.NO_NVLINK: "没有 NVLink 硬件/NVML 支持",
+    RefusalCode.NOT_APPLICABLE: "该指标在本设备上无定义",
+    RefusalCode.MIXED_LAUNCH_CONFIG: "同名 kernel 有多组 launch 配置，单值会误导",
+    RefusalCode.NO_CLOCK_READING: "没有 SM 时钟读数",
+    RefusalCode.NO_LAUNCH_ACTIVITY: "没有采到任何 kernel 活动",
+    RefusalCode.NO_KERNEL_MATCH: "过滤后没有匹配的 kernel",
+    RefusalCode.NO_KERNELS: "报告里没有 kernel",
+    RefusalCode.MULTI_KERNEL_WINDOW: "窗口里不止一个 kernel，per-launch 不可归因",
+    RefusalCode.COVERAGE_TOO_LOW: "采样窗口没被被测负载主导",
+    RefusalCode.SHARE_TOO_LOW: "被匹配的 kernel 不是窗口主角",
+    RefusalCode.SHARE_UNKNOWN: "逐 launch 时长为空，份额无法判定",
+    RefusalCode.BELOW_RESOLUTION: "读数低于仪器分辨率下限",
+    RefusalCode.MEM_BUSY_ZERO: "显存忙碌恒为 0",
+    RefusalCode.TRACE_UNAVAILABLE: "访存轨迹给不出字节数",
+    RefusalCode.TRACE_TOO_MANY_ACCESSES: "访问数超过分析上限",
+    RefusalCode.LEDGER_BASIS_UNAVAILABLE: "账本对拍口径不成立",
+    RefusalCode.NO_CALIBRATION: "缺少本机实测峰值（未标定）",
+    RefusalCode.CALIBRATION_CALIBER_MISMATCH: "标定口径与本次测量不可比",
+    RefusalCode.NO_WORKLOAD: "没有给工作量（FLOPs/bytes）",
+    RefusalCode.UNKNOWN_ARCH: "未知架构，算不出上界",
+    RefusalCode.NO_SELFTEST_BAND: "没有本机误差带与 MDD",
+    RefusalCode.MDD_UNKNOWN: "误差带里没有这个指标的 MDD",
+    RefusalCode.PROTOCOL_MISMATCH: "两次运行的协议不同，不可比",
+    RefusalCode.METRIC_ABSENT: "请求的指标不存在",
+    RefusalCode.LEGACY_REPORT: "旧报告没有结构化拒绝信息",
+    RefusalCode.INTERNAL_UNKNOWN: "未分类的拒绝（属于本工具缺陷）",
+}
+
+
+def code_title(code: "RefusalCode | str") -> str:
+    """code → 一句话人话（静态；查不到时退回 code 本身，绝不编造）。"""
+    if isinstance(code, str):
+        try:
+            code = RefusalCode(code)
+        except ValueError:
+            return code
+    return CODE_TITLES.get(code, code.value)
+
+
+def missing_titles() -> list[str]:
+    return [c.value for c in RefusalCode if c not in CODE_TITLES]
+
+
 @dataclass(frozen=True)
 class Remedy:
     """补救动作 + 代价估计。`cost_s` 是**用户侧额外等待**的秒数（0=几乎免费）。
@@ -372,5 +434,6 @@ def legacy_refusal(message: str) -> Refusal:
                    severity="blocking")
 
 
-__all__ = ["Refusal", "RefusalCode", "Remedy", "DEFAULT_REMEDIES",
-           "default_remedy", "missing_remedies", "legacy_refusal", "combined_refusal"]
+__all__ = ["CODE_TITLES", "Refusal", "RefusalCode", "Remedy", "code_title",
+           "combined_refusal", "default_remedy", "legacy_refusal", "missing_remedies",
+           "missing_titles"]
