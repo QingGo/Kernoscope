@@ -1,0 +1,711 @@
+{
+  "schema_version": 1,
+  "tool": "kernoscope",
+  "tool_version": "0.2.0",
+  "tier": {
+    "level": 3,
+    "name": "instrumented",
+    "gives": "指令级：访存轨迹（sectors/request、L2 命中模型）、动态指令数、发射槽利用率上界"
+  },
+  "next_tier": {
+    "level": 4,
+    "name": "counters",
+    "needs": "ncu 可用权限（CAP_SYS_ADMIN / RmProfilingAdminOnly=0）",
+    "gives": "与 ncu 同源的硬件计数器：精确 DRAM 字节、各 pipe 利用率、stall 周期细分"
+  },
+  "env": {
+    "has_gpu": true,
+    "gpu_name": "NVIDIA GeForce RTX 4090",
+    "has_nvml": true,
+    "has_nsys": false,
+    "has_cuobjdump": true,
+    "has_ncu": true,
+    "counter_state": "denied",
+    "has_nvbit": true,
+    "has_calibration": false,
+    "has_workload": false,
+    "has_memtrace": false,
+    "has_instr_hist": false,
+    "has_occupancy_probe": false,
+    "has_cubin": false,
+    "nvml_disabled_by_user": false
+  },
+  "matrix": {
+    "kernel_time": "refused",
+    "launch_configs": "refused",
+    "static_resources": "refused",
+    "theoretical_occupancy": "refused",
+    "device_busy": "available",
+    "dram_bytes": "degraded",
+    "roofline": "degraded",
+    "achieved_occupancy": "refused",
+    "dram_bytes_trace": "refused",
+    "issue_slot": "refused",
+    "l2_locality": "refused",
+    "static_mix": "refused",
+    "stall_breakdown": "refused",
+    "exact_dram": "refused",
+    "pipe_utilization": "refused",
+    "nvlink": "refused"
+  },
+  "answers": [
+    {
+      "id": "kernel_time",
+      "question": "哪个 kernel 最耗时、每次跑多久",
+      "state": "refused",
+      "tier_required": 2,
+      "outputs": [
+        "gpu__time_duration.sum",
+        "ks__launch_time_mean"
+      ],
+      "how": "缺少 nsys（CUPTI activity 的唯一来源）",
+      "refusal": {
+        "code": "nsys_missing",
+        "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+          "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+          "cost_s": 0.0,
+          "cost_kind": "manual",
+          "then_answers": [
+            "kernel_times",
+            "launch_configs"
+          ]
+        }
+      }
+    },
+    {
+      "id": "launch_configs",
+      "question": "同名 kernel 有几组 launch 配置，各自多快",
+      "state": "refused",
+      "tier_required": 2,
+      "outputs": [
+        "ks__launch_time_mean",
+        "launch__grid_size",
+        "launch__block_size"
+      ],
+      "how": "缺少 nsys（CUPTI activity 的唯一来源）",
+      "refusal": {
+        "code": "nsys_missing",
+        "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+          "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+          "cost_s": 0.0,
+          "cost_kind": "manual",
+          "then_answers": [
+            "kernel_times",
+            "launch_configs"
+          ]
+        }
+      }
+    },
+    {
+      "id": "static_resources",
+      "question": "静态寄存器/共享内存，以及谁是 occupancy 限制因素",
+      "state": "refused",
+      "tier_required": 2,
+      "outputs": [
+        "ks__registers_used_for_occupancy",
+        "ks__occupancy_limiter"
+      ],
+      "how": "缺少 nsys（CUPTI activity 的唯一来源）",
+      "alternative": "用 --ks-cubin 做纯静态分析（不需要 GPU）",
+      "refusal": {
+        "code": "nsys_missing",
+        "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+          "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+          "cost_s": 0.0,
+          "cost_kind": "manual",
+          "then_answers": [
+            "kernel_times",
+            "launch_configs"
+          ]
+        }
+      }
+    },
+    {
+      "id": "theoretical_occupancy",
+      "question": "occupancy 理论上界是多少",
+      "state": "refused",
+      "tier_required": 2,
+      "outputs": [
+        "ks__theoretical_occupancy_pct",
+        "ks__blocks_per_sm"
+      ],
+      "how": "缺少 nsys（CUPTI activity 的唯一来源）",
+      "refusal": {
+        "code": "nsys_missing",
+        "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+          "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+          "cost_s": 0.0,
+          "cost_kind": "manual",
+          "then_answers": [
+            "kernel_times",
+            "launch_configs"
+          ]
+        }
+      }
+    },
+    {
+      "id": "device_busy",
+      "question": "这段时间 GPU 显存子系统有多忙（实测）",
+      "state": "available",
+      "tier_required": 1,
+      "outputs": [
+        "meas__nvml_mem_busy_mean_pct",
+        "meas__device_energy_j"
+      ],
+      "how": ""
+    },
+    {
+      "id": "dram_bytes",
+      "question": "DRAM 搬了多少字节 / 是不是 DRAM bound（NVML 代理口径）",
+      "state": "degraded",
+      "tier_required": 1,
+      "outputs": [
+        "est__dram_bytes_total",
+        "ks__sampler_window_coverage_pct"
+      ],
+      "how": "没有本机标定：代理口径缺少实测峰值，roofline/DRAM 字节会拒绝给数而不是用规格表顶替",
+      "alternative": "轨迹口径 dram_bytes_trace（只测被追踪的 kernel）"
+    },
+    {
+      "id": "roofline",
+      "question": "离 roofline 多远、compute 还是 memory bound",
+      "state": "degraded",
+      "tier_required": 1,
+      "outputs": [
+        "est__achieved_gbs",
+        "est__bound",
+        "est__roofline_efficiency_pct"
+      ],
+      "how": "没有给工作量（FLOPs/bytes）：只能给带宽与时长侧",
+      "alternative": "给 --ks-gemm 或 --ks-flops/--ks-bytes 才能算"
+    },
+    {
+      "id": "achieved_occupancy",
+      "question": "实际达到的 occupancy（不是上界）",
+      "state": "refused",
+      "tier_required": 3,
+      "outputs": [
+        "meas__achieved_occupancy_pct"
+      ],
+      "how": "没跑 occupancy 探针",
+      "alternative": "用探针区间重叠重建；没有探针时只给理论上界",
+      "refusal": {
+        "code": "no_occupancy_probe",
+        "message": "没跑 occupancy 探针：实际达到的 occupancy 需要 (smid, globaltimer) 探针",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
+          "command": "kernoscope occupancy --records <probe-records> -o occ.json",
+          "cost_s": 600.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": [
+            "achieved_occupancy"
+          ]
+        }
+      }
+    },
+    {
+      "id": "dram_bytes_trace",
+      "question": "DRAM 字节的第二条口径（访存轨迹 + 缓存模型）",
+      "state": "refused",
+      "tier_required": 3,
+      "outputs": [
+        "est__dram_bytes_per_launch_trace",
+        "meas__sectors_per_request"
+      ],
+      "how": "没有提供 --ks-memtrace 轨迹文件",
+      "alternative": "NVML 代理口径 dram_bytes",
+      "refusal": {
+        "code": "no_memtrace",
+        "message": "没有提供轨迹文件：加 --ks-memtrace <trace> 换轨迹口径",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响",
+          "command": "kernoscope --ks-memtrace ks-memtrace.txt ...",
+          "cost_s": 600.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": [
+            "dram_bytes_trace",
+            "l2_hit_rate"
+          ]
+        }
+      }
+    },
+    {
+      "id": "issue_slot",
+      "question": "发射槽用了多少、瓶颈方向是 latency 还是 throughput",
+      "state": "refused",
+      "tier_required": 3,
+      "outputs": [
+        "est__issue_slot_utilization_pct",
+        "est__stall_direction"
+      ],
+      "how": "没有提供 --ks-instr-hist 直方图",
+      "alternative": "上界口径 + 方向性判断，不是 stall 周期细分",
+      "refusal": {
+        "code": "no_instr_hist",
+        "message": "没有提供指令直方图：加 --ks-instr-hist <file>",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界",
+          "command": "kernoscope --ks-instr-hist opcode_hist.txt ...",
+          "cost_s": 600.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": [
+            "issue_slot_upper_bound"
+          ]
+        }
+      }
+    },
+    {
+      "id": "l2_locality",
+      "question": "L1/L2 命中率与工作集是否驻留",
+      "state": "refused",
+      "tier_required": 3,
+      "outputs": [
+        "est__l2_hit_rate_pct",
+        "est__working_set_bytes"
+      ],
+      "how": "没有提供 --ks-memtrace 轨迹文件",
+      "refusal": {
+        "code": "no_memtrace",
+        "message": "没有提供轨迹文件：加 --ks-memtrace <trace> 换轨迹口径",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响",
+          "command": "kernoscope --ks-memtrace ks-memtrace.txt ...",
+          "cost_s": 600.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": [
+            "dram_bytes_trace",
+            "l2_hit_rate"
+          ]
+        }
+      }
+    },
+    {
+      "id": "static_mix",
+      "question": "静态 SASS 指令混合（哪些指令占多数）",
+      "state": "refused",
+      "tier_required": 2,
+      "outputs": [
+        "ks__static_sass_instructions",
+        "ks__static_sass_share_*"
+      ],
+      "how": "没有 cubin/.so（SASS 混合的来源）",
+      "alternative": "需要 --ks-cubin <file.so|.cubin>；不需要 GPU",
+      "refusal": {
+        "code": "no_static_input",
+        "message": "没有 cubin/.so：加 --ks-cubin <file> 才能给静态指令混合",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS",
+          "command": "kernoscope --ks-cubin build/app.so ...",
+          "cost_s": 0.0,
+          "cost_kind": "manual",
+          "then_answers": [
+            "static_resources",
+            "sass_mix"
+          ]
+        }
+      }
+    },
+    {
+      "id": "stall_breakdown",
+      "question": "warp 到底在等什么（stall 周期细分）",
+      "state": "refused",
+      "tier_required": 4,
+      "outputs": [
+        "smsp__warp_issue_stalled_*_per_warp_active.pct"
+      ],
+      "how": "硬件计数器状态：denied",
+      "alternative": "issue_slot 的方向性判断（latency vs throughput）",
+      "refusal": {
+        "code": "counters_denied",
+        "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "unavailable",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "exact_dram",
+      "question": "DRAM 字节/L2 命中率的精确值（与 ncu 同源）",
+      "state": "refused",
+      "tier_required": 4,
+      "outputs": [
+        "dram__bytes.sum",
+        "lts__t_sector_hit_rate.pct"
+      ],
+      "how": "硬件计数器状态：denied",
+      "alternative": "dram_bytes（代理，带误差带）或 dram_bytes_trace（模型）",
+      "refusal": {
+        "code": "counters_denied",
+        "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "unavailable",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "pipe_utilization",
+      "question": "各 pipe（FP32/INT/Tensor）的动态利用率",
+      "state": "refused",
+      "tier_required": 4,
+      "outputs": [
+        "sm__pipe_*.avg.pct_of_peak_sustained_elapsed"
+      ],
+      "how": "硬件计数器状态：denied",
+      "alternative": "issue_slot 的上界口径 + roofline 的达成百分比",
+      "refusal": {
+        "code": "counters_denied",
+        "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "unavailable",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "nvlink",
+      "question": "NVLink 的流量与利用率",
+      "state": "refused",
+      "tier_required": 4,
+      "outputs": [
+        "nvlink__*"
+      ],
+      "how": "需要 NVLink 硬件与 NVML 支持",
+      "alternative": "单卡/无 NVLink 实例上这个问题不适用",
+      "refusal": {
+        "code": "no_nvlink",
+        "message": "NVLink 计数不可得（单卡实例上这个问题本来就不适用）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "unavailable",
+          "then_answers": []
+        }
+      }
+    }
+  ],
+  "next_actions": [
+    {
+      "code": "nsys_missing",
+      "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+      "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+      "cost_kind": "manual",
+      "cost_s": 0.0,
+      "unlocks": [
+        "kernel_time",
+        "launch_configs",
+        "static_resources",
+        "theoretical_occupancy"
+      ]
+    },
+    {
+      "code": "no_static_input",
+      "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS",
+      "command": "kernoscope --ks-cubin build/app.so ...",
+      "cost_kind": "manual",
+      "cost_s": 0.0,
+      "unlocks": [
+        "static_mix"
+      ]
+    },
+    {
+      "code": "no_memtrace",
+      "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响",
+      "command": "kernoscope --ks-memtrace ks-memtrace.txt ...",
+      "cost_kind": "wall_seconds",
+      "cost_s": 600.0,
+      "unlocks": [
+        "dram_bytes_trace",
+        "l2_locality"
+      ]
+    },
+    {
+      "code": "no_instr_hist",
+      "action": "加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界",
+      "command": "kernoscope --ks-instr-hist opcode_hist.txt ...",
+      "cost_kind": "wall_seconds",
+      "cost_s": 600.0,
+      "unlocks": [
+        "issue_slot"
+      ]
+    },
+    {
+      "code": "no_occupancy_probe",
+      "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
+      "command": "kernoscope occupancy --records <probe-records> -o occ.json",
+      "cost_kind": "wall_seconds",
+      "cost_s": 600.0,
+      "unlocks": [
+        "achieved_occupancy"
+      ]
+    }
+  ],
+  "refusals": [
+    {
+      "code": "nsys_missing",
+      "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+        "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+        "cost_s": 0.0,
+        "cost_kind": "manual",
+        "then_answers": [
+          "kernel_times",
+          "launch_configs"
+        ]
+      }
+    },
+    {
+      "code": "nsys_missing",
+      "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+        "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+        "cost_s": 0.0,
+        "cost_kind": "manual",
+        "then_answers": [
+          "kernel_times",
+          "launch_configs"
+        ]
+      }
+    },
+    {
+      "code": "nsys_missing",
+      "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+        "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+        "cost_s": 0.0,
+        "cost_kind": "manual",
+        "then_answers": [
+          "kernel_times",
+          "launch_configs"
+        ]
+      }
+    },
+    {
+      "code": "nsys_missing",
+      "message": "缺少 nsys：kernel 级精确量（时长/launch 配置）拿不到；设备级读数仍然可用",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite",
+        "command": "kernoscope --ks-sqlite <kernels.sqlite>",
+        "cost_s": 0.0,
+        "cost_kind": "manual",
+        "then_answers": [
+          "kernel_times",
+          "launch_configs"
+        ]
+      }
+    },
+    {
+      "code": "no_occupancy_probe",
+      "message": "没跑 occupancy 探针：实际达到的 occupancy 需要 (smid, globaltimer) 探针",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
+        "command": "kernoscope occupancy --records <probe-records> -o occ.json",
+        "cost_s": 600.0,
+        "cost_kind": "wall_seconds",
+        "then_answers": [
+          "achieved_occupancy"
+        ]
+      }
+    },
+    {
+      "code": "no_memtrace",
+      "message": "没有提供轨迹文件：加 --ks-memtrace <trace> 换轨迹口径",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响",
+        "command": "kernoscope --ks-memtrace ks-memtrace.txt ...",
+        "cost_s": 600.0,
+        "cost_kind": "wall_seconds",
+        "then_answers": [
+          "dram_bytes_trace",
+          "l2_hit_rate"
+        ]
+      }
+    },
+    {
+      "code": "no_instr_hist",
+      "message": "没有提供指令直方图：加 --ks-instr-hist <file>",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界",
+        "command": "kernoscope --ks-instr-hist opcode_hist.txt ...",
+        "cost_s": 600.0,
+        "cost_kind": "wall_seconds",
+        "then_answers": [
+          "issue_slot_upper_bound"
+        ]
+      }
+    },
+    {
+      "code": "no_memtrace",
+      "message": "没有提供轨迹文件：加 --ks-memtrace <trace> 换轨迹口径",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响",
+        "command": "kernoscope --ks-memtrace ks-memtrace.txt ...",
+        "cost_s": 600.0,
+        "cost_kind": "wall_seconds",
+        "then_answers": [
+          "dram_bytes_trace",
+          "l2_hit_rate"
+        ]
+      }
+    },
+    {
+      "code": "no_static_input",
+      "message": "没有 cubin/.so：加 --ks-cubin <file> 才能给静态指令混合",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS",
+        "command": "kernoscope --ks-cubin build/app.so ...",
+        "cost_s": 0.0,
+        "cost_kind": "manual",
+        "then_answers": [
+          "static_resources",
+          "sass_mix"
+        ]
+      }
+    },
+    {
+      "code": "counters_denied",
+      "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+        "command": "",
+        "cost_s": 0.0,
+        "cost_kind": "unavailable",
+        "then_answers": []
+      }
+    },
+    {
+      "code": "counters_denied",
+      "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+        "command": "",
+        "cost_s": 0.0,
+        "cost_kind": "unavailable",
+        "then_answers": []
+      }
+    },
+    {
+      "code": "counters_denied",
+      "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+        "command": "",
+        "cost_s": 0.0,
+        "cost_kind": "unavailable",
+        "then_answers": []
+      }
+    },
+    {
+      "code": "no_nvlink",
+      "message": "NVLink 计数不可得（单卡实例上这个问题本来就不适用）",
+      "severity": "blocking",
+      "observed": {},
+      "threshold": {},
+      "remedy": {
+        "action": "需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用",
+        "command": "",
+        "cost_s": 0.0,
+        "cost_kind": "unavailable",
+        "then_answers": []
+      }
+    }
+  ],
+  "probe_note": "本次未做计数器实测探测（静态推断）：要实测结论请加 --probe"
+}

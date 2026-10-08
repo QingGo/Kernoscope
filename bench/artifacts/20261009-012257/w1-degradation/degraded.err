@@ -1,0 +1,3 @@
+note: 没有 nsys —— 退到设备级模式（只用 NVML 采样），继续运行目标命令：<python> -c import time; time.sleep(1.5)
+note: 本次没有任何 kernel 记录（设备级模式）；报告只含设备级读数与「装上 nsys 会多出什么」
+==PROF== 决策包: /tmp/w1b/degraded.packet.json (3759 B)

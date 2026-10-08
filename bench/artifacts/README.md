@@ -24,6 +24,22 @@
   也不是"跑失败了"。
 - `probe-*.log`：微基准的解析真值（`ANALYTIC` 行，不需要 GPU 也能重算）。
 - `machine-profile.json`：本机峰值 + 累加口径 + 口径离散度 + 逐变体设置。
+### `w1-degradation/`：同一台机器、同一修订的「缺 nsys」降级证据
+
+W1 的验收条件是"缺件时也要成功"。这一份是 `bench/degradation-check.sh`（把 nsys 临时
+移开、trap 保证恢复、需要显式同意）在同一台机器、同一修订上跑出来的：
+
+* `capabilities-full.json` / `capabilities-no-nsys.json`：移开前后各一份能力清单
+  （`has_nsys` 从 true 变 false；`kernel_time` 从能答变被拒并带 `nsys_missing`；
+  `device_busy` 仍然可用）；
+* `degraded.packet.json`：决策包（3759 B），里面 `environment_refusals=[nsys_missing]`、
+  `env.blocked_by` 列出缺哪些依赖 —— 机器可读地说明"这台机器少了什么"；
+* `degraded.onepage.txt`：一屏，结论优先 + "怎么办"；
+* `degraded.err`：整个过程只有 note/warn，没有裸错误；**退出码 0**。
+
+它不在 `manifest.json` 的步骤表里（那是 `run.sh` 的步骤），因为"把 nsys 移开"这一步
+不适合放进任何人都会跑的复现脚本里；产物本身（能力清单与包）与其它证据同样可复核。
+
 ### 现行产物里的两处裁剪（如实说明）
 
 - 逐 launch 的大 JSON、`.nsys-rep`、`.sqlite` 与 NVBit 的原始轨迹**不入库**（体积大、按需重采），

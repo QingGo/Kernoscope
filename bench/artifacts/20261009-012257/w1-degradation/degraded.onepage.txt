@@ -1,0 +1,31 @@
+Kernoscope 0.2.0 · 协议 97c26c3a99b4 · 层 3 (instrumented)
+------------------------------------------------------------------------------------------------
+[no  ] 不给数字：缺少本机实测峰值（未标定）
+        前提 窗口是否被被测负载主导：0.0%（门槛 50.0%）→ **不满足**
+        前提 参与积分的窗口内显存忙碌均值：0.0%
+        怎么办：跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）（代价 ≈60s）  [kernoscope selftest --out machine-profile.json]
+[no  ] 不给数字：缺少本机实测峰值（未标定）
+        前提 窗口是否被被测负载主导：0.0%（门槛 80.0%）→ **不满足**
+        前提 被匹配 kernel 是否占窗口 kernel 时间 ≥95%：**无法判定**（门槛 95.0%） → **不满足**
+        怎么办：跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）（代价 ≈60s）  [kernoscope selftest --out machine-profile.json]
+[no  ] 不给数字：访存轨迹给不出字节数
+        怎么办：轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --…（代价 ≈20s）
+
+本机缺件（不是这次没测，而是这台机器没有）：
+  - nsys_missing（没有 nsys：kernel 级数据不可得）；怎么办：安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .…  [kernoscope --ks-sqlite <kernels.sqlite>]
+
+没测到什么（共 7 个指标，按原因归组）：
+  - 3 个 no_calibration（缺少本机实测峰值（未标定））（例：est__dram_bytes_total, est__dram_bytes_per_launch）；怎么办：跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）（代价 ≈60s）
+  - 3 个 share_unknown（逐 launch 时长为空，份额无法判定）（例：ks__matched_kernel_kernel_share_pct, ks__matched_kernel_window_share_pct）；怎么办：逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kern…（代价 ≈5s）
+  - 1 个 trace_unavailable（访存轨迹给不出字节数）（例：est__dram_bytes_per_launch_trace）；怎么办：轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --…（代价 ≈20s）
+  - 本机缺件 no_instr_hist（没有提供指令直方图）；怎么办：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发…
+  - 本机缺件 no_memtrace（没有提供访存轨迹文件）；怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…
+  - 本机缺件 no_occupancy_probe（没跑 occupancy 探针）；怎么办：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…
+  - 本机缺件 no_static_input（没有提供 cubin/.so）；怎么办：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…
+  - 本机缺件 nsys_missing（没有 nsys：kernel 级数据不可得）；怎么办：安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .…
+
+本次代价：wall 1.563s · 包 3759B · 无本机误差带（跑 kernoscope selftest 后 diff 才有 MDD）
+建议的下一步：
+  - dram_bytes：跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）  [kernoscope selftest --out machine-profile.json]
+  - dram_bytes_trace：轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --…
+  - unmeasured：逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kern…  [kernoscope --ks-sqlite kernels.sqlite]
