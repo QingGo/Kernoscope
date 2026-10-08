@@ -147,6 +147,37 @@ if [[ -x "$PROBE" ]]; then
   done
 fi
 
+# ------------------- 3b) 代理精度 vs 稳态段长度（R-35）
+# 误差带不能只给一个数：它得说明「在什么口径、什么边界下」测出来的。需求方实测到
+# 覆盖率 88.2%（过了 80% 门槛）时误差 −9.8%，而 45 秒负载只有 −0.6% —— 精度本身
+# 随稳态段长度变。所以这里把同一个已知答案负载在 4 个时长上各测一遍，落成一张表。
+echo "== 3b) 代理精度 vs 稳态段长度（同一个已知答案负载，4 个时长）=="
+if [[ -x "$PROBE" ]]; then
+  "$PROBE" --kernel copy --mb "$MB" --iters "$ITERS_HINT" --analyze-only \
+      > "$HOSTDIR/probe-sweep.log" 2>&1
+  SWEEP_ANALYTIC="$(grep -m1 '^ANALYTIC' "$HOSTDIR/probe-sweep.log" || true)"
+  SWEEP_BPL="$(echo "$SWEEP_ANALYTIC" | sed -n 's/.*bytes_per_launch=\([0-9.]*\).*/\1/p')"
+  if [[ -n "$SWEEP_BPL" ]]; then
+    SWEEP_LEDGER="$(awk -v b="$SWEEP_BPL" 'BEGIN{printf "%.4f", b/1e6}')"
+    echo "target_s,coverage_pct,mem_busy_pct,window_share_pct,kernel_share_pct,bias_est_pct,est_per_launch_mb,ledger_per_launch_mb,err_pct,basis" \
+        > "$HOSTDIR/proxy-duration-sweep.csv"
+    for T in 1.2 3 8 20; do
+      SOUT="$HOSTDIR/sweep-$T"
+      KSC --set basic --ks-calibration "$CAL" --ks-window auto \
+          --ks-ledger-mb "$SWEEP_LEDGER" -k regex:copy_k -o "$SOUT" -f \
+          -- "$PROBE" --kernel copy --mb "$MB" --target-s "$T" \
+          > "$SOUT.txt" 2> "$SOUT.err"
+      record "sweep-$T" $?
+      if [[ -f "$SOUT.ksreport.json" ]]; then
+        "$PY" bench/sweep_row.py "$SOUT.ksreport.json" "$T" "$SWEEP_LEDGER" \
+            >> "$HOSTDIR/proxy-duration-sweep.csv" 2>> "$SOUT.err"
+      fi
+    done
+    echo "  时长扫描（误差 vs 稳态段长度）："
+    column -s, -t "$HOSTDIR/proxy-duration-sweep.csv" 2>/dev/null || cat "$HOSTDIR/proxy-duration-sweep.csv"
+  fi
+fi
+
 # --------------------------- 4) 口径不成立时裁决行不许消失（且 --strict 要能红）
 echo "== 4) per-launch 账本 + 覆盖率不足 ⇒ 裁决行必须存在，且 --strict 变红 =="
 if [[ -x "$PROBE" ]]; then
