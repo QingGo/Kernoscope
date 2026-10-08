@@ -1,0 +1,74 @@
+==PROF== Kernoscope 0.2.0 - provenance-honest profile (no performance counters required)
+==PROF== Target: bench/artifacts/.build/ledger_probe --kernel norm --mb 256 --target-s 1.2
+==PROF== DRAM 估算 909037.9 MB（窗口显存忙碌 71.4%／整进程 22.7% × 峰值 908 GB/s，窗口覆盖率 71.4%；参与估算的是 ks__dram_window_mem_busy_mean_pct）；窗口主导性 100.0%（内核时间份额，门槛 95%） → per-launch 不给：窗口覆盖率 71% < 80%：无法把 909038 MB 总量归因到每个 launch；把稳态循环延长到约 2 秒，或加 --ks-window auto
+==PROF== Kernel time: 1231.660 ms of 4543.116 ms wall (27.1%)
+==PROF== Window: mode=auto（已裁剪） 采样 7 点 / 参与积分 1.4 s / 裁掉 3.1 s / 进程 wall 4.5 s
+==PROF== source[kernel activity]: nsys sqlite CUPTI_ACTIVITY_KIND_KERNEL (no counters needed)
+==PROF== source[device counters]: pynvml (energy/PCIe/mem-busy are management counters, available without admin)
+==PROF== source[static]: not used
+==PROF== source[peaks]: measured calibration (bench/artifacts/20261008-235142/machine-profile.json)
+
+Kernel: norm_k(const float *, const float *, float *, long)
+  nsys short name: norm_k
+  1925 launch(es), 1231.6605 ms total, 0.6398 ms mean
+
+  Section: Duration                           [exact]
+    gpu__time_duration.sum                                1231.66 ms       [exact]
+    ks__launch_time_mean                                   0.6398 ms       [exact]
+    ks__launch_time_min                                    0.6331 ms       [exact]
+    ks__launch_time_max                                    0.6584 ms       [exact]
+    ks__launch_count                                         1925          [exact]
+
+  Section: LaunchStats                        [exact]
+    launch__grid_size                                        1024          [exact]
+    launch__block_size                                        256          [exact]
+    launch__thread_count                                   262144          [exact]
+    launch__registers_per_thread                               34          [exact]
+    ks__registers_used_for_occupancy                           34          [exact]
+    launch__shared_mem_per_block_static                         0 B        [exact]
+    launch__shared_mem_per_block_dynamic                        0 B        [exact]
+    launch__local_mem_per_thread                                0 B        [exact]
+    ks__cuda_graph_capture                                    yes          [exact]
+
+  Section: Occupancy                          [exact] (+1 n/a)
+    ks__theoretical_occupancy_pct                             100 %        [exact]
+    ks__blocks_per_sm                                           6          [exact]
+    ks__warps_per_sm                                           48          [exact]
+    ks__occupancy_limiter                          registers+threads+warps          [exact]  (并列的限制因素用 + 连接)
+    sm__maximum_warps_per_active_cycle_pct                    n/a          [unavailable]  requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+
+  Section: SpeedOfLight                       [unavailable] (+2 n/a)
+    est__achieved_tflops                                      n/a          [unavailable]  workload not provided: pass --ks-gemm M,N,K or --ks-flops/--ks-bytes (plus --ks-calibration machine-profile.json for measured peaks)
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            n/a          [unavailable]  requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+
+----------------------------------------------------------------------------------------------------
+Kernel: (device)
+  0 launch(es), 0.0000 ms total, 0.0000 ms mean
+
+  Section: DeviceStatistics                   [estimated]
+    meas__nvml_mem_busy_mean_pct                             22.7 %        [measured]  [resolution 1 %（整数百分比）]  (区间平均；是「显存子系统忙碌占比」，不是 DRAM 吞吐本身。读数 0.0% 只说明低于分辨率下限，不等于「DRAM 完全没动」；必须让 GPU 保持饱和，否则会被宿主间隙稀释（实测 96.8% vs 6.3%）)
+    est__dram_busy_equivalent_gbs                           206.5 GB/s     [estimated]  [resolution 1 %]  (等效带宽口径；与按字节/时间的口径略有差异)
+    meas__sm_clock_mean_mhz                                1844.3 MHz      [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__sm_clock_max_mhz                                   2775 MHz      [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__power_max_w                                       233.6 W        [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__device_energy_j                                 448.065 J        [measured]  [resolution 1 mJ]  (ncu 不提供能耗指标)
+
+  Section: DramTraffic                        [estimated] (+2 n/a)
+    est__dram_bytes_total                                  909.04 GB       [estimated]  [resolution 1 %]  (窗口已按首个/末个忙碌采样点裁到稳态段（--ks-window auto）：参与积分 1.4 s，裁掉约 3.1 s 启动/JIT/空闲；用 --ks-window full 可关闭；窗口覆盖率 71%（SM≥5% 或显存≥20% 的采样点占比）；采样覆盖时间不足窗口一半：采样器可能启动过晚或提前退出；采样周期 200 ms、区间平均（utilization.memory 分辨率 1 个百分点）；字节 = Σ(mem_util×Δt)×实测峰值带宽)
+    est__dram_bytes_per_launch                                n/a          [unavailable]  窗口覆盖率 71% < 80%：无法把 909038 MB 总量归因到每个 launch；把稳态循环延长到约 2 秒，或加 --ks-window auto
+    est__dram_throughput_pct_of_peak                         71.4 %        [estimated]  [resolution 1 %]  (忙碌时间占比口径，与按字节/时间的口径略有差异)
+    ks__sampler_window_coverage_pct                          71.4 %        [derived]  [resolution 1 个采样点]  (前提①「窗口被被测负载主导」：<80% 不给 per-launch 归因，<50% 连总量也不给)
+    ks__matched_kernel_kernel_share_pct                       100 %        [derived]  [resolution 0.1 %]  (前提②「窗口被被匹配的 kernel 主导」：<95% 不给 per-launch 归因。空闲时段贡献 0 字节，所以判据用内核时间份额而不是墙钟份额：单 kernel 的窗口无论有多少空闲都是 100%)
+    ks__matched_kernel_window_share_pct                      87.9 %        [derived]  [resolution 0.1 %]  (与覆盖率同量纲的对照量（95% 门槛用的是内核时间份额）；通常 ≤ 覆盖率，差值就是窗口里的空闲；本次分子含窗口外的同名 launch（窗口被裁过），所以它是**上界**，可能高于覆盖率，不能当作保守估计)
+    ks__attribution_bias_estimate_pct                           0 %        [derived]  [resolution 0.1 %]  (实测校验：k_fused 内核时间份额 44.9% → 估计 +123%，而那次观测误差是 +146.9% —— 观测值比估计更高，因为该 kernel 的字节密度低于窗口里其他 kernel。所以这是**估计而非严格上界**：字节强度不一致的混合窗口必须换轨迹口径)
+    ks__window_busy_segments                                    1 段        [derived]  [resolution 1 段]  (多段 ⇒ 窗口可能是多个阶段/变体拼接（例如先跑正确性再跑性能、依次跑 v1/v2/v3），此时 per-launch 归因需谨慎：这是启发式信号，不是判据)
+    ks__dram_window_mem_busy_mean_pct                        71.4 %        [derived]  [resolution 1 %]  (这就是摘要里那个「窗口显存忙碌」，也是字节估算真正用到的那个数；整进程均值另见 meas__nvml_mem_busy_mean_pct，两者不可互换)
+    est__dram_bytes_per_launch_trace                          n/a          [unavailable]  未提供访存轨迹：加 --ks-memtrace <trace> 可换用轨迹口径，在 NVML 代理口径不成立时仍能完成账本对拍
+
+----------------------------------------------------------------------------------------------------
+
+Provenance summary: exact=18, derived=6, measured=5, estimated=3, unavailable=5
+Legend: exact=与 ncu 同源 | derived=本机实测标定/模型 | measured=我们的探针实测 | estimated=采样或代理(附误差) | unavailable=需要硬件计数器，只报 n/a
+Output(json): bench/artifacts/20261008-235142/rep-compute.ksreport.json
+Output(perfetto): bench/artifacts/20261008-235142/rep-compute.perfetto.json
+Open the timeline at https://ui.perfetto.dev -> Load trace -> the file above

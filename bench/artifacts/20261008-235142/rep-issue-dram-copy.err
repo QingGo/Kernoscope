@@ -1,0 +1,4 @@
+calibration: bench/artifacts/20261008-235142/machine-profile.json @ 2026-10-08 23:51:58, dtype=bf16, bw=908 GB/s, compute=167.3 TFLOP/s, 累加口径=bf16 (fp32 accumulate), 口径离散=3.8%
+instr-hist: 载入 121 条 launch 记录，1 个 kernel
+==PROF== 输出体积: json 33 KB / perfetto 948 KB（1918 次 launch）
+==PROF== 提示：体积主要来自逐 launch 记录。要限流可用 -c <N>（每个 kernel 只报 N 次）、--ks-json-no-launches（JSON 不带逐 launch 数组）、或 --launch-csv 单独出表

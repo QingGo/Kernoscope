@@ -23,46 +23,79 @@ python tools/machine-profile.py --out bench/machine-profile.json
   "schema_version": 2,
   "gpu": "NVIDIA GeForce RTX 4090",
   "cc": "8.9", "sm_count": 128, "l2_mib": 72.0,
-  "nvidia_smi": "580.105, 3105, 450.00, 4, 16",     // driver, maxSM, power, pcie gen, width
-  "measured_dram": {"copy_gbs": 909.2, "read_gbs": 905.8, "write_gbs": 940.0},
-  "l2_info": {"l2_resident_max_mb": 64, "l2_drop_mb": 96, "l2_read_peak_gbs": 2211.7},
+  "nvidia_smi": "580.105.08, 3105, 450.00, 2, 16",   // driver, maxSM, power, pcie gen, width
+  "measured_dram": {"copy_gbs": 908.5, "read_gbs": 904.5, "write_gbs": 942.0},
+  "l2_info": {"l2_resident_max_mb": 64, "l2_drop_mb": 96, "l2_read_peak_gbs": 2180.1},
   "measured_matmul_tflops": {
     "torch.bfloat16": {
-      "tflops": 169.0, "size": 16384, "ms": 52.1,
+      "tflops": 167.3, "size": 16384, "ms": 52.5,
       "acc_caliber": "bf16 (fp32 accumulate)",
+      "tflops_protocol": "default",          // 这个头条读数**就是**哪个变体测出来的
+      "tflops_is_variant_reading": true,
       "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
                              "fp32_precision": "none", "allow_tf32": true},
       "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
-      "caliber_variants_tflops": {"default": 169.0,
-                                  "reduced_precision_reduction_off": 167.3,
-                                  "fp32_ieee": 162.6},
-      "caliber_spread_pct": 3.9,
+      "caliber_variants_tflops": {"default": 167.3,
+                                  "reduced_precision_reduction_off": 167.2,
+                                  "fp32_ieee": 160.9},
+      "caliber_variant_settings": {          // 每个变体自己的设置，不再只留一个快照
+        "default": {"allow_fp16_reduced_precision_reduction": true,
+                    "fp32_precision": "none"},
+        "reduced_precision_reduction_off": {"allow_fp16_reduced_precision_reduction": false,
+                                            "fp32_precision": "none"},
+        "fp32_ieee": {"allow_fp16_reduced_precision_reduction": true,
+                      "fp32_precision": "ieee"}
+      },
+      "caliber_probe_size": 16384,
+      "caliber_probe_method": "torch.matmul, 3 iters best-of, 同一尺寸 16384",
+      "caliber_spread_pct": 3.8,
+      "caliber_distinguishable": true
+    },
+    "torch.float16": {
+      "tflops": 166.9, "size": 4096, "ms": 0.82,
+      "acc_caliber": "fp16 (fp32 accumulate; 允许 reduced-precision reduction)",
+      "tflops_protocol": "fp32_ieee",        // 头条可能来自任一胜出协议，必须写清
+      "tflops_is_variant_reading": true,
+      "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
+                             "fp32_precision": "ieee", "allow_tf32": false},
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {"default": 144.8,
+                                  "reduced_precision_reduction_off": 159.4,
+                                  "fp32_ieee": 166.9},
+      "caliber_probe_size": 4096,
+      "caliber_spread_pct": 13.2,
       "caliber_distinguishable": true
     },
     "torch.float32": {
-      "tflops": 57.3, "size": 8192, "ms": 19.2,
+      "tflops": 54.6, "size": 8192, "ms": 19.7,
       "acc_caliber": "fp32 (fp32 accumulate)",
-      "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
-                             "fp32_precision": "none", "allow_tf32": true},
+      "tflops_protocol": "reduced_precision_reduction_off",
+      "tflops_is_variant_reading": true,
+      "precision_settings": {"allow_fp16_reduced_precision_reduction": false,
+                             "fp32_precision": "none", "allow_tf32": false},
       "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
-      "caliber_variants_tflops": {"default": 57.3,
-                                  "reduced_precision_reduction_off": 57.1,
-                                  "fp32_ieee": 57.3},
-      "caliber_spread_pct": 0.4,
+      "caliber_variants_tflops": {"default": 54.4,
+                                  "reduced_precision_reduction_off": 54.6,
+                                  "fp32_ieee": 54.2},
+      "caliber_probe_size": 8192,
+      "caliber_spread_pct": 0.7,
       "caliber_distinguishable": false
     }
   },
   "precision_settings_at_end": { "...": "..." },
-  "clocks_during_measurement": {"sm_clock_min": 1980, "sm_clock_max": 2775,
-                                "sm_clock_mean": 2397, "power_max": 450.7, "util_mean": 88.1},
+  "clocks_during_measurement": {"sm_clock_min": 1815.0, "sm_clock_max": 2625.0,
+                                "sm_clock_mean": 2356.5, "power_max": 457.7,
+                                "util_mean": 89.8, "n_samples": 10},
   "bandwidth_sweep": [{"size_mb": 128, "copy_gbs": 900.2, "...": "..."}],
   "torch": "2.12.1+cu130",
-  "ts": "2026-10-08 22:56:00",
+  "ts": "2026-10-08 23:47:41",
   "tool": "tools/machine-profile.py"
 }
 ```
 
-（以上取自一次真机标定，原始产物与 `bandwidth_sweep` 明细见 `bench/artifacts/`。）
+（以上是 [`bench/artifacts/20261008-235142/machine-profile.json`](bench/artifacts/) 的节选；
+原始产物与 `bandwidth_sweep` 明细见同一目录。`tflops_protocol` 与
+`caliber_variant_settings` 是后来补的字段，理由见下。）
 
 ## 为什么标定必须记录"累加口径"
 
@@ -75,8 +108,8 @@ matmul 的 TFLOP/s 不是机器常数，它取决于**累加口径**：fp16/bf16
 另一次给出 5.0%（可分辨）。5% 的离散度足以让 roofline 在拐点附近翻转判定。
 
 同一次标定里，不同 dtype 的结论也可以**相反** —— 上面那份产物就是：
-bf16 三个口径差 3.9%（可分辨）、fp16 差 10.9%（可分辨）、而 fp32 只差 0.4%（**不可分辨**，
-三种设置下都是 57 TFLOP/s 上下）。所以 fp32 那一档报"精确单值"是不诚实的，
+bf16 三个口径差 3.8%（可分辨）、fp16 差 13.2%（可分辨）、而 fp32 只差 0.7%（**不可分辨**，
+三种设置下都是 54.5 TFLOP/s 上下）。所以 fp32 那一档报"精确单值"是不诚实的，
 报告里会带上 `caliber_spread_pct` 与 `caliber_distinguishable`，让读者自己判断。
 
 所以标定产物必须带：
@@ -89,6 +122,16 @@ bf16 三个口径差 3.9%（可分辨）、fp16 差 10.9%（可分辨）、而 f
 | `caliber_variants_tflops` | 三种口径设置各测一次（探针） |
 | `caliber_spread_pct` | 三者最大相对差 |
 | `caliber_distinguishable` | `spread ≥ 2%` 为可分辨；**为否时该档"精确单值"本身不可得** |
+| `tflops_protocol` | 头条 `tflops` **是哪个变体**测出来的（`default` / `reduced_precision_reduction_off` / `fp32_ieee`；跳过口径探针时是 `sweep-default`） |
+| `tflops_is_variant_reading` | 头条是否直接来自变体读数（否则它只来自尺寸扫描，复现不了） |
+| `caliber_variant_settings` | 每个变体**自己的** precision 设置（从前 `_settings` 被丢弃，只剩一个事后快照） |
+| `caliber_probe_size` / `caliber_probe_method` | 口径探针的尺寸与方法 —— `caliber_spread_pct` 只在**同协议**之间比较，读者要能复核这一点 |
+
+**为什么头条必须能对应到一次具体测量**：真机产物曾经出现 fp16 的 `tflops` 是 167.4，
+而同一尺寸下三个变体是 145.5 / 163.2 / 163.3 —— 头条**不等于任何一个变体**，
+而 `precision_settings` 记的却是 `fp32_precision="ieee"`（对应 `fp32_ieee` 那一档）。
+读者拿着这份产物无法复现这个数字，也无法判断该信哪一个。现在头条取"变体里最快的那一个"，
+并写明它是谁：上面那份产物里 fp16 的头条 166.9 就是 `fp32_ieee` 变体的读数。
 
 口径探针会在测完后恢复原始设置（有测试守这一点）。
 

@@ -265,6 +265,15 @@ if [[ -f tools/probes/Makefile ]]; then
   KSC occupancy --from "$HOSTDIR/occupancy-records.txt" --json \
       > "$HOSTDIR/occupancy.json" 2> "$HOSTDIR/occupancy-cmd.err"
   record occupancy-analyze $?
+  # 探针同时写了 .smem32k（32 KB 静态共享内存把 occupancy 压到 25% 那个读数）。
+  # 从前只分析前一份，于是 README 里第二行数字**不在产物里** —— 文档引用的数字
+  # 必须能追到产物，所以这一份也要走同一条分析路径。
+  if [[ -f tools/probes/occupancy-records.txt.smem32k ]]; then
+    cp -f tools/probes/occupancy-records.txt.smem32k "$HOSTDIR/occupancy-records.smem32k.txt"
+    KSC occupancy --from "$HOSTDIR/occupancy-records.smem32k.txt" --json \
+        > "$HOSTDIR/occupancy-smem32k.json" 2>> "$HOSTDIR/occupancy-cmd.err"
+    record occupancy-analyze-smem32k $?
+  fi
 fi
 
 # ------------------------------------------------- 8) NVBit 访存轨迹（可选外部依赖）
