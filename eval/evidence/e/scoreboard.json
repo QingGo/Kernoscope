@@ -1,0 +1,602 @@
+{
+  "schema_version": 1,
+  "tool": "kernoscope-eval",
+  "generated_at": "2026-10-08T17:27:06+00:00",
+  "agent_cmd": "(外部 agent)",
+  "out_dir": "/tmp/ks-eval-c",
+  "tasks": [
+    {
+      "task_id": "01_saturated_copy_dram_bound",
+      "scenario": "饱和拷贝：kernel `vectorized_copy_kernel` 2000 次 launch，窗口覆盖率 97.1%、被匹配 kernel 占窗口 kernel 时间 99.1%、NVML 显存忙碌 96.8%，roofline 判词给出 bound=memory、达成带宽 919 GB/s（离本机实测峰值 3.3%）。用户问：访存还有多少空间？",
+      "expected_classification": "dram_bound",
+      "safe_verdicts": [
+        "kernel_time",
+        "dram_bytes",
+        "dram_bytes_per_launch",
+        "ledger_verdict",
+        "roofline",
+        "occupancy"
+      ],
+      "forbidden_verdicts": [],
+      "forbidden_actions": [
+        "优化计算",
+        "转计算侧",
+        "减少 FLOPs",
+        "先改窗口口径",
+        "重跑标定",
+        "没有证据"
+      ],
+      "expected_action_keywords": [
+        "访存",
+        "带宽",
+        "DRAM",
+        "合并"
+      ],
+      "code_change_allowed": true,
+      "truth_why": "三个归因前提（窗口覆盖率 ≥80%、被匹配 kernel 份额 ≥95%、窗口被负载主导）全部成立，且两条口径（NVML 代理、roofline）都指向 memory bound。这时按访存优化是有依据的 —— 反过来说，用'别急，先改测量口径'去回避它，就是把一个已经成立的结论当成没有结论。",
+      "verdict_states": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes_per_launch",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "ledger_verdict",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "occupancy",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "roofline",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        }
+      ],
+      "packet_trimmed": [
+        "unmeasured_examples",
+        "verdict_metrics"
+      ],
+      "status": "ok",
+      "run": {
+        "rc": null,
+        "spawn_error": null,
+        "timed_out": false,
+        "stdout": "",
+        "stderr": "",
+        "duration_s": 0.0
+      },
+      "decision": {
+        "classification": "dram_bound_saturated",
+        "acted_on": [
+          "roofline",
+          "dram_bytes",
+          "ledger_verdict"
+        ],
+        "next_action": "访存侧已无空间：roofline 判为 memory bound、达成 919 GB/s 离本机峰值仅 3.3%（效率 96.7%），先核对 --ks-gemm/--ks-flops 等工作量输入并用 --ks-ledger-total-mb 对拍账本（当前 -1.2%）确认口径无误，之后唯一还有收益的方向是减少 DRAM 总字节（算子融合 / 去掉这次纯拷贝 / 提高 L2 复用），不要再调访存 pattern 或 occupancy。",
+        "blocked_by": [],
+        "tokens_used": 0,
+        "gpu_minutes": 0.0
+      },
+      "tokens_used": 0.0,
+      "gpu_minutes": 0.0,
+      "next_action": "访存侧已无空间：roofline 判为 memory bound、达成 919 GB/s 离本机峰值仅 3.3%（效率 96.7%），先核对 --ks-gemm/--ks-flops 等工作量输入并用 --ks-ledger-total-mb 对拍账本（当前 -1.2%）确认口径无误，之后唯一还有收益的方向是减少 DRAM 总字节（算子融合 / 去掉这次纯拷贝 / 提高 L2 复用），不要再调访存 pattern 或 occupancy。",
+      "classification": "dram_bound_saturated",
+      "blocked_by": [],
+      "classification_correct": true,
+      "acted_on": [
+        "roofline",
+        "dram_bytes",
+        "ledger_verdict"
+      ],
+      "acted_on_total": 3,
+      "misuse_events": 0,
+      "misuse_rate": 0.0,
+      "unsafe": [],
+      "offtruth_verdicts": [],
+      "forbidden_action_hits": [],
+      "expected_keyword_hits": [
+        "访存",
+        "DRAM"
+      ],
+      "action_ok": true,
+      "opportunities": 4,
+      "unsafe_events": 0,
+      "scored": true
+    },
+    {
+      "task_id": "02_multi_kernel_window_unattributable",
+      "scenario": "一个 0.9 s 的窗口里顺序跑了 4 个 kernel（preprocess / cutlass_gemm_f16 / epilogue / scatter）。用户只关心 `cutlass_gemm_f16`，但窗口没缩小：它只占窗口内 kernel 时间的 41.0%（门槛 95%）。工具照样给出了「每次 launch 约 25 MB」与「与账本相差 +146.9%」。窗口 DRAM 代理（5.0 GB）是**整个窗口**的，不是这个 kernel 的。",
+      "expected_classification": "window_unattributable",
+      "safe_verdicts": [
+        "kernel_time"
+      ],
+      "forbidden_verdicts": [
+        "dram_bytes_per_launch",
+        "dram_bytes",
+        "ledger_verdict"
+      ],
+      "forbidden_actions": [
+        "改 kernel",
+        "优化该 kernel",
+        "优化访存",
+        "降 DRAM",
+        "按每次 launch",
+        "降低 per-launch",
+        "按 per-launch"
+      ],
+      "expected_action_keywords": [
+        "缩小窗口",
+        "-k",
+        "重跑",
+        "测量口径",
+        "换轨迹"
+      ],
+      "code_change_allowed": false,
+      "truth_why": "per-launch 归因的两个前提里，'被匹配 kernel 占窗口 kernel 时间 ≥95%'不成立（实测 41.0%）。于是 per-launch、窗口总量、与账本的差值**都不能归给这个 kernel**；+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径（把窗口缩到只含目标 kernel，或换只覆盖它的轨迹口径），拿到可归因的读数再谈改代码。",
+      "verdict_states": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes_per_launch",
+          "status": "refused",
+          "premises_failed": [
+            "matched_kernel_kernel_share_pct"
+          ],
+          "refusal": "share_too_low"
+        },
+        {
+          "id": "ledger_verdict",
+          "status": "refused",
+          "premises_failed": [],
+          "refusal": "share_too_low"
+        },
+        {
+          "id": "occupancy",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        }
+      ],
+      "packet_trimmed": [],
+      "status": "ok",
+      "run": {
+        "rc": null,
+        "spawn_error": null,
+        "timed_out": false,
+        "stdout": "",
+        "stderr": "",
+        "duration_s": 0.0
+      },
+      "decision": {
+        "classification": "unattributable_window",
+        "acted_on": [
+          "kernel_time"
+        ],
+        "next_action": "先重跑把窗口缩到只含 cutlass_gemm_f16（kernoscope --ks-window-s 10 -k regex:cutlass_gemm_f16 -- python ...，约 20 s，见 refusals.share_too_low），拿到该 kernel 自己的 per-launch DRAM / occupancy / roofline 判词后再决定优化方向；不要拿窗口级的 5.0 GB 或 +146.9% 账本误差作为这个 kernel 的依据。",
+        "blocked_by": [
+          "dram_bytes",
+          "dram_bytes_per_launch",
+          "ledger_verdict"
+        ],
+        "tokens_used": 0,
+        "gpu_minutes": 0.0
+      },
+      "tokens_used": 0.0,
+      "gpu_minutes": 0.0,
+      "next_action": "先重跑把窗口缩到只含 cutlass_gemm_f16（kernoscope --ks-window-s 10 -k regex:cutlass_gemm_f16 -- python ...，约 20 s，见 refusals.share_too_low），拿到该 kernel 自己的 per-launch DRAM / occupancy / roofline 判词后再决定优化方向；不要拿窗口级的 5.0 GB 或 +146.9% 账本误差作为这个 kernel 的依据。",
+      "classification": "unattributable_window",
+      "blocked_by": [
+        "dram_bytes",
+        "dram_bytes_per_launch",
+        "ledger_verdict"
+      ],
+      "classification_correct": true,
+      "acted_on": [
+        "kernel_time"
+      ],
+      "acted_on_total": 1,
+      "misuse_events": 0,
+      "misuse_rate": 0.0,
+      "unsafe": [],
+      "offtruth_verdicts": [],
+      "forbidden_action_hits": [],
+      "expected_keyword_hits": [
+        "-k",
+        "重跑"
+      ],
+      "action_ok": true,
+      "opportunities": 2,
+      "unsafe_events": 0,
+      "scored": true
+    },
+    {
+      "task_id": "03_l2_resident_below_resolution",
+      "scenario": "小工作集 kernel `l2_resident_apply_kernel`：工作集 3.2 MiB（L2 72 MiB），L2 命中率模型 97.8%。NVML 显存忙碌读数恒为 0.0%，低于仪表分辨率 1.0%，所以 DRAM 代理口径（总量与 per-launch）都拒绝给数字。用户问：既然 DRAM 流量这么小，是不是该去优化计算？",
+      "expected_classification": "not_dram_bound",
+      "safe_verdicts": [
+        "kernel_time",
+        "l2_locality",
+        "occupancy"
+      ],
+      "forbidden_verdicts": [
+        "dram_bytes",
+        "dram_bytes_per_launch"
+      ],
+      "forbidden_actions": [
+        "优化计算",
+        "转向计算",
+        "DRAM 流量很小",
+        "访存不是瓶颈",
+        "改 kernel",
+        "compute"
+      ],
+      "expected_action_keywords": [
+        "测量口径",
+        "分辨率",
+        "驻留",
+        "延长窗口",
+        "轨迹口径",
+        "采样"
+      ],
+      "code_change_allowed": false,
+      "truth_why": "显存忙碌读数低于仪表分辨率 ⇒ 这个口径**没有**给出'DRAM 流量很小'，它给出的是'我量不出 DRAM'。把'量不出'读成'很小'、再顺势把方向定到计算侧，正是本项目失败史上最贵的一类误读。L2 驻留这一条是可信的（工作集 3.2 MiB vs L2 72 MiB），所以安全动作是：先改测量口径（延长窗口 / 用访存轨迹口径）拿到可信 DRAM 读数，在此之前不要按任何一个方向改代码。",
+      "verdict_states": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes",
+          "status": "refused",
+          "premises_failed": [],
+          "refusal": "below_resolution"
+        },
+        {
+          "id": "dram_bytes_per_launch",
+          "status": "refused",
+          "premises_failed": [],
+          "refusal": "below_resolution"
+        },
+        {
+          "id": "occupancy",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "l2_locality",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        }
+      ],
+      "packet_trimmed": [
+        "unmeasured_examples"
+      ],
+      "status": "ok",
+      "run": {
+        "rc": null,
+        "spawn_error": null,
+        "timed_out": false,
+        "stdout": "",
+        "stderr": "",
+        "duration_s": 0.0
+      },
+      "decision": {
+        "classification": "dram_proxy_below_resolution",
+        "acted_on": [
+          "kernel_time",
+          "l2_locality"
+        ],
+        "next_action": "先修测量口径再谈方向：把该 kernel 放进能维持显存忙碌 ≥1% 的饱和窗口重跑（kernoscope --ks-window auto -- python bench_loop.py，约 20 s；现在窗口仅 0.021 s、忙碌读数被截断成 0.0%），并顺手 -k 单跑取它的 occupancy/roofline 判词，拿到可积分的 DRAM 代理之前不要下结论。",
+        "blocked_by": [
+          "dram_bytes",
+          "dram_bytes_per_launch"
+        ],
+        "tokens_used": 0,
+        "gpu_minutes": 0.0
+      },
+      "tokens_used": 0.0,
+      "gpu_minutes": 0.0,
+      "next_action": "先修测量口径再谈方向：把该 kernel 放进能维持显存忙碌 ≥1% 的饱和窗口重跑（kernoscope --ks-window auto -- python bench_loop.py，约 20 s；现在窗口仅 0.021 s、忙碌读数被截断成 0.0%），并顺手 -k 单跑取它的 occupancy/roofline 判词，拿到可积分的 DRAM 代理之前不要下结论。",
+      "classification": "dram_proxy_below_resolution",
+      "blocked_by": [
+        "dram_bytes",
+        "dram_bytes_per_launch"
+      ],
+      "classification_correct": true,
+      "acted_on": [
+        "kernel_time",
+        "l2_locality"
+      ],
+      "acted_on_total": 2,
+      "misuse_events": 0,
+      "misuse_rate": 0.0,
+      "unsafe": [],
+      "offtruth_verdicts": [],
+      "forbidden_action_hits": [],
+      "expected_keyword_hits": [
+        "测量口径"
+      ],
+      "action_ok": true,
+      "opportunities": 3,
+      "unsafe_events": 0,
+      "scored": true
+    },
+    {
+      "task_id": "04_compute_bound_gemm",
+      "scenario": "GEMM `ampere_sgemm_128x128_nn`：roofline 判词可用，bound=compute、离 roofline 21.6%、达成带宽只有 71 GB/s（本机峰值 ~950 GB/s）。显存忙碌 8.0%，发射槽利用率上界 71.5%、方向 throughput。用户问：下一步改哪边？",
+      "expected_classification": "compute_bound",
+      "safe_verdicts": [
+        "kernel_time",
+        "roofline",
+        "issue_slot",
+        "occupancy"
+      ],
+      "forbidden_verdicts": [],
+      "forbidden_actions": [
+        "优化访存",
+        "访存合并",
+        "降 DRAM",
+        "减少字节",
+        "提高带宽",
+        "先改测量口径"
+      ],
+      "expected_action_keywords": [
+        "计算",
+        "roofline",
+        "发射槽",
+        "指令",
+        "compute"
+      ],
+      "code_change_allowed": true,
+      "truth_why": "roofline 判词给出了 bound=compute（有 --ks-gemm 的工作量与实测峰值支撑），且显存忙碌只有 8%。dram_bytes 有数字、也不算被拒，但在'bound 已经判定为 compute'的前提下把它当**本次行动依据**就是方向性错误：真机上正是这样把 compute bound 的 GEMM 当访存问题改了两周。它可以被引用来排除访存，但不能出现在 acted_on 里。",
+      "verdict_states": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "occupancy",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "roofline",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "issue_slot",
+          "status": "soft",
+          "premises_failed": [],
+          "refusal": null
+        }
+      ],
+      "packet_trimmed": [],
+      "status": "ok",
+      "run": {
+        "rc": null,
+        "spawn_error": null,
+        "timed_out": false,
+        "stdout": "",
+        "stderr": "",
+        "duration_s": 0.0
+      },
+      "decision": {
+        "classification": "compute_bound",
+        "acted_on": [
+          "roofline",
+          "issue_slot",
+          "dram_bytes",
+          "occupancy"
+        ],
+        "next_action": "沿 compute 方向走：加 --ks-instr-hist <opcode_hist.txt> 拿动态指令混合（occupancy 探针可省），针对发射槽上界 71.5%、方向 throughput 做指令精简——削掉占比高的地址计算/类型转换/谓词指令、提高每条指令的有效工作量，改完再跑 diff 验证；别动访存（显存忙碌 8.0%、71 GB/s）与 occupancy（55% 已接近 62.5% 上界、受 registers 限制）。",
+        "blocked_by": [],
+        "tokens_used": 0,
+        "gpu_minutes": 0.0
+      },
+      "tokens_used": 0.0,
+      "gpu_minutes": 0.0,
+      "next_action": "沿 compute 方向走：加 --ks-instr-hist <opcode_hist.txt> 拿动态指令混合（occupancy 探针可省），针对发射槽上界 71.5%、方向 throughput 做指令精简——削掉占比高的地址计算/类型转换/谓词指令、提高每条指令的有效工作量，改完再跑 diff 验证；别动访存（显存忙碌 8.0%、71 GB/s）与 occupancy（55% 已接近 62.5% 上界、受 registers 限制）。",
+      "classification": "compute_bound",
+      "blocked_by": [],
+      "classification_correct": true,
+      "acted_on": [
+        "roofline",
+        "issue_slot",
+        "dram_bytes",
+        "occupancy"
+      ],
+      "acted_on_total": 4,
+      "misuse_events": 0,
+      "misuse_rate": 0.0,
+      "unsafe": [],
+      "offtruth_verdicts": [
+        "dram_bytes"
+      ],
+      "forbidden_action_hits": [],
+      "expected_keyword_hits": [
+        "计算",
+        "发射槽",
+        "指令",
+        "compute"
+      ],
+      "action_ok": true,
+      "opportunities": 5,
+      "unsafe_events": 0,
+      "scored": true
+    },
+    {
+      "task_id": "05_dram_caliber_unusable",
+      "scenario": "受限实例：硬件计数器被权限拒绝（tier 2，只有 nsys 的 kernel 级数据），同时 NVML 采样一次都没采到（samples=0），所以 DRAM 代理口径也没有输入。NVML 本身可用，显存忙碌这一路读数曾显示 88%，但没有任何样本能被积分。用户问：DRAM 那边到底有没有空间？",
+      "expected_classification": "dram_caliber_unusable",
+      "safe_verdicts": [
+        "kernel_time",
+        "occupancy"
+      ],
+      "forbidden_verdicts": [
+        "dram_bytes",
+        "dram_bytes_per_launch"
+      ],
+      "forbidden_actions": [
+        "优化访存",
+        "改 kernel 的访存",
+        "优化计算",
+        "转向计算",
+        "访存不是瓶颈",
+        "降 DRAM"
+      ],
+      "expected_action_keywords": [
+        "测量口径",
+        "采样",
+        "计数器",
+        "口径",
+        "NVML",
+        "重跑"
+      ],
+      "code_change_allowed": false,
+      "truth_why": "两条 DRAM 口径都被结构化拒绝（no_nvml_samples + counters_denied），能行动的只有 kernel 级结论。'拿不到 DRAM 数'不等于'DRAM 没问题'，也不等于'那就去优化计算'：唯一有依据的动作是先把测量口径修好（恢复 NVML 采样 / 拿计数器权限 / 装 NVBit 采轨迹）。",
+      "verdict_states": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        },
+        {
+          "id": "dram_bytes",
+          "status": "refused",
+          "premises_failed": [],
+          "refusal": "no_nvml_samples"
+        },
+        {
+          "id": "dram_bytes_per_launch",
+          "status": "refused",
+          "premises_failed": [],
+          "refusal": "no_nvml_samples"
+        },
+        {
+          "id": "occupancy",
+          "status": "ok",
+          "premises_failed": [],
+          "refusal": null
+        }
+      ],
+      "packet_trimmed": [],
+      "status": "ok",
+      "run": {
+        "rc": null,
+        "spawn_error": null,
+        "timed_out": false,
+        "stdout": "",
+        "stderr": "",
+        "duration_s": 0.0
+      },
+      "decision": {
+        "classification": "dram_proxy_no_nvml_samples",
+        "acted_on": [
+          "kernel_time"
+        ],
+        "next_action": "先修口径、不要动代码：去掉 --ks-no-nvml 用同一窗口重跑 fused_attention_fwd（capabilities 显示 has_nvml=true、device_busy/dram_bytes 均为 available，但本窗口 samples=0），确认 NVML 采样生效、显存忙碌能被积分后再重新生成 packet 回答“DRAM 还有多少空间”。",
+        "blocked_by": [
+          "dram_bytes",
+          "dram_bytes_per_launch"
+        ],
+        "tokens_used": 0,
+        "gpu_minutes": 0.0
+      },
+      "tokens_used": 0.0,
+      "gpu_minutes": 0.0,
+      "next_action": "先修口径、不要动代码：去掉 --ks-no-nvml 用同一窗口重跑 fused_attention_fwd（capabilities 显示 has_nvml=true、device_busy/dram_bytes 均为 available，但本窗口 samples=0），确认 NVML 采样生效、显存忙碌能被积分后再重新生成 packet 回答“DRAM 还有多少空间”。",
+      "classification": "dram_proxy_no_nvml_samples",
+      "blocked_by": [
+        "dram_bytes",
+        "dram_bytes_per_launch"
+      ],
+      "classification_correct": true,
+      "acted_on": [
+        "kernel_time"
+      ],
+      "acted_on_total": 1,
+      "misuse_events": 0,
+      "misuse_rate": 0.0,
+      "unsafe": [],
+      "offtruth_verdicts": [],
+      "forbidden_action_hits": [],
+      "expected_keyword_hits": [
+        "采样",
+        "口径",
+        "NVML",
+        "重跑"
+      ],
+      "action_ok": true,
+      "opportunities": 2,
+      "unsafe_events": 0,
+      "scored": true
+    }
+  ],
+  "totals": {
+    "tasks": 5,
+    "scored_tasks": 5,
+    "failed_tasks": 0,
+    "failed_task_ids": [],
+    "failure_kinds": {},
+    "classification_correct": 5,
+    "decision_accuracy": 1.0,
+    "acted_on_total": 11,
+    "misuse_events": 0,
+    "misuse_rate": 0.0,
+    "tasks_with_misuse": 0,
+    "unsafe_action_tasks": 0,
+    "unsafe_events": 0,
+    "unsafe_rate": 0.0,
+    "action_keyword_ok": 5,
+    "action_keyword_rate": 1.0,
+    "tokens_used_sum": 0.0,
+    "gpu_minutes_sum": 0.0,
+    "agent_wall_s_sum": 0.0
+  }
+}

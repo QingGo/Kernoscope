@@ -1,0 +1,14 @@
+{
+  "classification": "dram_caliber_unusable",
+  "acted_on": [
+    "kernel_time"
+  ],
+  "next_action": "这个问题现在无法回答，先修采样不要改代码：本次窗口 NVML 采样数 samples=0，没有任何读数被积分（曾经看到的 88% 只是未积分的瞬时不构成数字），DRAM 总量与 per-launch 两条口径都因此被拒；按 no_nvml_samples 的处置——去掉 --ks-no-nvml 让设备级采样生效，确认 samples≥1 后重跑 fused_attention_fwd，拿到经过积分的显存忙碌/DRAM 代理与 roofline，再判断 DRAM 还有没有空间。",
+  "blocked_by": [
+    "dram_bytes",
+    "dram_bytes_per_launch",
+    "occupancy"
+  ],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

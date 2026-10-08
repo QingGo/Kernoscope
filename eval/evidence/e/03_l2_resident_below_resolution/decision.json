@@ -1,0 +1,8 @@
+{
+  "classification": "dram_proxy_below_resolution",
+  "acted_on": ["kernel_time", "l2_locality"],
+  "next_action": "先修测量口径再谈方向：把该 kernel 放进能维持显存忙碌 ≥1% 的饱和窗口重跑（kernoscope --ks-window auto -- python bench_loop.py，约 20 s；现在窗口仅 0.021 s、忙碌读数被截断成 0.0%），并顺手 -k 单跑取它的 occupancy/roofline 判词，拿到可积分的 DRAM 代理之前不要下结论。",
+  "blocked_by": ["dram_bytes", "dram_bytes_per_launch"],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

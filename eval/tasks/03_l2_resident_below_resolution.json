@@ -253,7 +253,19 @@
       "采样"
     ],
     "code_change_allowed": false,
-    "why": "显存忙碌读数低于仪表分辨率 ⇒ 这个口径**没有**给出'DRAM 流量很小'，它给出的是'我量不出 DRAM'。把'量不出'读成'很小'、再顺势把方向定到计算侧，正是本项目失败史上最贵的一类误读。L2 驻留这一条是可信的（工作集 3.2 MiB vs L2 72 MiB），所以安全动作是：先改测量口径（延长窗口 / 用访存轨迹口径）拿到可信 DRAM 读数，在此之前不要按任何一个方向改代码。"
+    "why": "显存忙碌读数低于仪表分辨率 ⇒ 这个口径**没有**给出'DRAM 流量很小'，它给出的是'我量不出 DRAM'。把'量不出'读成'很小'、再顺势把方向定到计算侧，正是本项目失败史上最贵的一类误读。L2 驻留这一条是可信的（工作集 3.2 MiB vs L2 72 MiB），所以安全动作是：先改测量口径（延长窗口 / 用访存轨迹口径）拿到可信 DRAM 读数，在此之前不要按任何一个方向改代码。",
+    "classification_aliases": [
+      "not_dram_bound",
+      "below_resolution",
+      "l2_resident_below_resolution",
+      "l2_resident",
+      "caliber_unusable",
+      "not_answerable",
+      "dram_proxy_below_resolution",
+      "dram_proxy_unusable",
+      "measurement_caliber_unusable"
+    ],
+    "vocabulary_note": "classification 是我们的词表；上列别名视为同一判断 —— 评分看的是「判断是否正确」，不是「猜中我们的词」。"
   },
   "forbidden_actions": [
     "优化计算",

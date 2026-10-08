@@ -1,0 +1,8 @@
+{
+  "classification": "compute_bound",
+  "acted_on": ["roofline", "issue_slot", "dram_bytes", "occupancy"],
+  "next_action": "沿 compute 方向走：加 --ks-instr-hist <opcode_hist.txt> 拿动态指令混合（occupancy 探针可省），针对发射槽上界 71.5%、方向 throughput 做指令精简——削掉占比高的地址计算/类型转换/谓词指令、提高每条指令的有效工作量，改完再跑 diff 验证；别动访存（显存忙碌 8.0%、71 GB/s）与 occupancy（55% 已接近 62.5% 上界、受 registers 限制）。",
+  "blocked_by": [],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

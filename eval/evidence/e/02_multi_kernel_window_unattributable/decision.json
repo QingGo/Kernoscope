@@ -1,0 +1,8 @@
+{
+  "classification": "unattributable_window",
+  "acted_on": ["kernel_time"],
+  "next_action": "先重跑把窗口缩到只含 cutlass_gemm_f16（kernoscope --ks-window-s 10 -k regex:cutlass_gemm_f16 -- python ...，约 20 s，见 refusals.share_too_low），拿到该 kernel 自己的 per-launch DRAM / occupancy / roofline 判词后再决定优化方向；不要拿窗口级的 5.0 GB 或 +146.9% 账本误差作为这个 kernel 的依据。",
+  "blocked_by": ["dram_bytes", "dram_bytes_per_launch", "ledger_verdict"],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

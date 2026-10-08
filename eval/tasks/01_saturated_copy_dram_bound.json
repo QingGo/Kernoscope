@@ -238,7 +238,15 @@
       "合并"
     ],
     "code_change_allowed": true,
-    "why": "三个归因前提（窗口覆盖率 ≥80%、被匹配 kernel 份额 ≥95%、窗口被负载主导）全部成立，且两条口径（NVML 代理、roofline）都指向 memory bound。这时按访存优化是有依据的 —— 反过来说，用'别急，先改测量口径'去回避它，就是把一个已经成立的结论当成没有结论。"
+    "why": "三个归因前提（窗口覆盖率 ≥80%、被匹配 kernel 份额 ≥95%、窗口被负载主导）全部成立，且两条口径（NVML 代理、roofline）都指向 memory bound。这时按访存优化是有依据的 —— 反过来说，用'别急，先改测量口径'去回避它，就是把一个已经成立的结论当成没有结论。",
+    "classification_aliases": [
+      "dram_bound",
+      "memory_bound",
+      "bandwidth_bound",
+      "dram_bound_saturated",
+      "memory_bound_saturated"
+    ],
+    "vocabulary_note": "classification 是我们的词表；上列别名视为同一判断 —— 评分看的是「判断是否正确」，不是「猜中我们的词」。"
   },
   "forbidden_actions": [
     "优化计算",

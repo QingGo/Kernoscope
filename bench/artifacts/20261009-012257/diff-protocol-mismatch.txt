@@ -1,0 +1,23 @@
+Kernoscope diff 1
+  两次运行**不可比**（protocol_hash, window_mode）：只给差值，不给方向判词
+    protocol_hash: sha256:eef61ed797ee757d → sha256:661da0e9b813ff19
+    window_mode: auto（已裁剪） → full
+  没有 MDD：分不出噪声与真差别 —— 跑一次 `kernoscope selftest` 并把结果用 --selfcheck 传进来
+
+  [ n/a   ] dram_bytes             7273090.30 → 7272160.30 B    Δ-930.00 (-0.0%)
+            protocol_mismatch：两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）
+  [ n/a   ] dram_bytes_per_launch 
+            protocol_mismatch：两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）
+  [ n/a   ] dram_bytes_trace      
+            protocol_mismatch：两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）
+  [ n/a   ] kernel_time               7958.29 →    7963.06 ms   Δ+4.77 (+0.1%)
+            protocol_mismatch：两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）
+  [ n/a   ] ledger_verdict        
+            一侧缺失（通常是那次运行该口径不成立）
+            metric_absent：用 --json 看本次报告里实际存在哪些指标，或用 `kernoscope capabilities --json` 看哪些问题能答（不存在 ≠ 被拒）  [kernoscope capabilities --json]
+  [ n/a   ] occupancy                  100.00 →     100.00 %    Δ+0.00 (+0.0%)
+            protocol_mismatch：两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）
+
+  汇总：improved=0 · regressed=0 · indistinguishable=0 · incomparable=6
+  注：协议不同时我们拒绝给方向判词：宁可说不可比，也不说一个会误导的「变好了」
+  注：没有 MDD ⇒ 所有判词都是 incomparable(mdd_unknown)：先跑 `kernoscope selftest --out machine-selfcheck.json`

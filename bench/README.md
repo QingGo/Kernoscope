@@ -63,8 +63,8 @@ git rev-parse HEAD > REVISION      # 远端仓库根目录
    一条记录 = 一条 warp 访存指令（≤128 B 流量），而插桩**不区分预热**：
    一个 80 MB 工作集 + 默认 50 次预热能写出 **10 GB** 的文本（真事，把磁盘写满过一次）。
    采轨迹时用小负载 + `--warmup 2`，采完立刻分析、只留分析产物。
-   实测产物的体积对比（同一次运行）见 `size-comparison.csv`（默认 JSON 150.6 MB vs
-   `--ks-json-no-launches -c 50` 18.7 KB，两行都以字节为单位写给机器读）。
+   实测产物的体积对比（同一次运行）见 `size-comparison.csv`（默认 JSON 131.3 MB vs
+   `--ks-json-no-launches -c 50` 25.0 KB，两行都以字节为单位写给机器读）。
 
 ## 入库前脱敏
 

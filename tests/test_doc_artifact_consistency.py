@@ -107,11 +107,17 @@ def _size_comparison(art: Path) -> dict[str, int]:
 
 
 def _ledger_error(art: Path, kernel: str) -> float | None:
-    """从 rep-<kernel>.txt 的摘要行里取账本误差（%）。"""
+    """从 rep-<kernel>.txt 里取账本误差（%）。
+
+    两种写法都要认：摘要句里的「误差 +9.0%」，以及指标行 `est__dram_vs_ledger_err_pct -66.7 %`
+    （轨迹口径那次走的是指标行 —— 只认摘要会让 README 里的 −66.7% 变成不可校验的数字）。
+    """
     p = art / f"rep-{kernel}.txt"
     if not p.exists():
         return None
-    m = re.search(r"误差\s*([-+]?\d+\.\d+)%", p.read_text(encoding="utf-8", errors="replace"))
+    text = p.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"误差\s*([-+]?\d+\.\d+)%", text) or \
+        re.search(r"est__dram_vs_ledger_err_pct\s+([-+]?\d+\.\d+)\s*%", text)
     return float(m.group(1)) if m else None
 
 
@@ -218,6 +224,29 @@ def _doc_rules(art: Path):
             rules.append(("README.md", "轨迹模型给出的 L2 命中率",
                           [f"{hit:.1f}", f"{round(hit)}"]))
     return rules
+
+
+def test_documented_union_band_matches_all_registered_artifacts():
+    """README 写的"并集 −4.3% ~ +12.7%"必须等于所有已登记产物里该范围的并集。
+
+    单个数字由 `_doc_rules` 逐条对拍；这一条守的是"跨运行的并集"这个说法 ——
+    它最容易在新增一次运行之后悄悄过期（并集只会变宽，不会自动写进文档）。
+    """
+    lo: float | None = None
+    hi: float | None = None
+    for art in _artifact_dirs():
+        for kern in ("copy", "read", "write"):
+            err = _ledger_error(art, kern)
+            if err is None:
+                continue
+            lo = err if lo is None else min(lo, err)
+            hi = err if hi is None else max(hi, err)
+    if lo is None or hi is None:
+        pytest.skip("产物里还没有可比对的历史运行")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    needle = f"{lo:+.1f}% ~ {hi:+.1f}%"
+    assert needle in readme or needle.replace("-", "\u2212") in readme, (
+        f"README 要写出跨全部 {len(_artifact_dirs())} 次登记的并集 {needle}")
 
 
 def test_documented_numbers_exist_in_the_artifact():

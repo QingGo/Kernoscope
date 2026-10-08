@@ -1,0 +1,15 @@
+{
+  "classification": "unattributable",
+  "acted_on": [
+    "kernel_time"
+  ],
+  "next_action": "窗口没有被缩小（0.9 s 内 4 个 kernel），现在任何 DRAM 数字都不属于 cutlass_gemm_f16：先用 -k cutlass_gemm_f16（必要时配合 --ks-memtrace 轨迹口径）把窗口收敛到只含这个 kernel 再重跑，拿到它自己的 DRAM/roofline/occupancy 判词之后才决定改不改代码；在拿到可归因的数字之前，不要按 25 MB/launch 或 +146.9% 的账本误差做任何优化。",
+  "blocked_by": [
+    "dram_bytes",
+    "dram_bytes_per_launch",
+    "ledger_verdict",
+    "occupancy"
+  ],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

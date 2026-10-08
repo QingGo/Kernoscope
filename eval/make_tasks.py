@@ -436,6 +436,36 @@ def task_05() -> dict:
 BUILDERS = (task_01, task_02, task_03, task_04, task_05)
 
 
+# 真值里的 classification 是**我们的**词表；冷启动 agent 不该因为"用词不同"被算错。
+# 别名表放在生成器里（不是任务 JSON 里），否则每次重跑生成器就会把手工加的别名冲掉
+# —— 真事：加了别名之后重跑生成器，别名消失，三个判断完全正确的 agent 被判错。
+CLASSIFICATION_ALIASES: dict[str, list[str]] = {
+    "01_saturated_copy_dram_bound": ["dram_bound", "memory_bound", "bandwidth_bound",
+                                     "dram_bound_saturated", "memory_bound_saturated"],
+    "02_multi_kernel_window_unattributable": [
+        "window_unattributable", "unattributable", "unattributable_window",
+        "measurement_unattributable", "fix_measurement_first", "unattributable_by_window",
+        "window_not_attributable"],
+    "03_l2_resident_below_resolution": [
+        "not_dram_bound", "below_resolution", "l2_resident_below_resolution",
+        "l2_resident", "caliber_unusable", "not_answerable",
+        "dram_proxy_below_resolution", "dram_proxy_unusable",
+        "measurement_caliber_unusable"],
+    "04_compute_bound_gemm": ["compute_bound", "compute", "compute_limited",
+                              "compute_bound_gemm"],
+    "05_dram_caliber_unusable": [
+        "dram_caliber_unusable", "no_samples", "sampling_unusable", "caliber_unusable",
+        "not_answerable", "dram_proxy_no_nvml_samples", "no_nvml_samples",
+        "dram_proxy_unsampling"],
+}
+# 真值里"不得作为行动依据"的判词：只放**不可用**的（refused / 前提不成立 / 真值上不可能），
+# 不放"可用但不是主因"的。后者靠 forbidden_actions 约束：把它当**排除**方向的证据是
+# 正确工程做法，当**行动依据**才是错 —— 三个外部 agent 里有两人这么用，理由都成立。
+FORBIDDEN_OVERRIDES: dict[str, list[str]] = {
+    "04_compute_bound_gemm": [],
+}
+
+
 def build_all() -> list[dict]:
     return [fn() for fn in BUILDERS]
 
@@ -451,6 +481,16 @@ def _material_check(task: dict) -> None:
         f"{task['id']}: 材料里混进了真值"
 
 
+def _annotate_truth(task: dict) -> None:
+    tid = task["id"]
+    task["truth"]["classification_aliases"] = CLASSIFICATION_ALIASES.get(tid, [])
+    task["truth"]["vocabulary_note"] = (
+        "classification 是我们的词表；上列别名视为同一判断 —— 评分看的是「判断是否正确」，"
+        "不是「猜中我们的词」。")
+    if tid in FORBIDDEN_OVERRIDES:
+        task["truth"]["forbidden_verdicts"] = list(FORBIDDEN_OVERRIDES[tid])
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="生成/校验 eval/tasks/*.json")
     ap.add_argument("--check", action="store_true", help="只校验，不写文件")
@@ -458,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
 
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     for task in build_all():
+        _annotate_truth(task)
         _material_check(task)
         path = TASKS_DIR / f"{task['id']}.json"
         if args.check:

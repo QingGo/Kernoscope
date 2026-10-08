@@ -215,9 +215,7 @@
       "issue_slot",
       "occupancy"
     ],
-    "forbidden_verdicts": [
-      "dram_bytes"
-    ],
+    "forbidden_verdicts": [],
     "expected_action_keywords": [
       "计算",
       "roofline",
@@ -226,7 +224,14 @@
       "compute"
     ],
     "code_change_allowed": true,
-    "why": "roofline 判词给出了 bound=compute（有 --ks-gemm 的工作量与实测峰值支撑），且显存忙碌只有 8%。dram_bytes 有数字、也不算被拒，但在'bound 已经判定为 compute'的前提下把它当**本次行动依据**就是方向性错误：真机上正是这样把 compute bound 的 GEMM 当访存问题改了两周。它可以被引用来排除访存，但不能出现在 acted_on 里。"
+    "why": "roofline 判词给出了 bound=compute（有 --ks-gemm 的工作量与实测峰值支撑），且显存忙碌只有 8%。dram_bytes 有数字、也不算被拒，但在'bound 已经判定为 compute'的前提下把它当**本次行动依据**就是方向性错误：真机上正是这样把 compute bound 的 GEMM 当访存问题改了两周。它可以被引用来排除访存，但不能出现在 acted_on 里。",
+    "classification_aliases": [
+      "compute_bound",
+      "compute",
+      "compute_limited",
+      "compute_bound_gemm"
+    ],
+    "vocabulary_note": "classification 是我们的词表；上列别名视为同一判断 —— 评分看的是「判断是否正确」，不是「猜中我们的词」。"
   },
   "forbidden_actions": [
     "优化访存",

@@ -1,0 +1,8 @@
+{
+  "classification": "dram_bound_saturated",
+  "acted_on": ["roofline", "dram_bytes", "ledger_verdict"],
+  "next_action": "访存侧已无空间：roofline 判为 memory bound、达成 919 GB/s 离本机峰值仅 3.3%（效率 96.7%），先核对 --ks-gemm/--ks-flops 等工作量输入并用 --ks-ledger-total-mb 对拍账本（当前 -1.2%）确认口径无误，之后唯一还有收益的方向是减少 DRAM 总字节（算子融合 / 去掉这次纯拷贝 / 提高 L2 复用），不要再调访存 pattern 或 occupancy。",
+  "blocked_by": [],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

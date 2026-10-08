@@ -1,0 +1,15 @@
+{
+  "classification": "compute_bound",
+  "acted_on": [
+    "kernel_time",
+    "roofline",
+    "issue_slot",
+    "occupancy"
+  ],
+  "next_action": "往 compute 侧走：roofline 判定 compute bound、离上界 21.6%，发射槽利用率 71.5% 且方向是 throughput——先补 --ks-instr-hist（约 600 s）拿到动态指令直方图，然后按吞吐方向精简指令（减少地址/循环开销、提高每指令有效工作量、必要时改数据类型/分块），不要花时间在带宽（显存忙碌仅 8%）或 occupancy（55.0% 对理论上界 62.5%，已接近）上。",
+  "blocked_by": [
+    "dram_bytes"
+  ],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

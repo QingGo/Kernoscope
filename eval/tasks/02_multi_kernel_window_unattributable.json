@@ -242,7 +242,17 @@
       "换轨迹"
     ],
     "code_change_allowed": false,
-    "why": "per-launch 归因的两个前提里，'被匹配 kernel 占窗口 kernel 时间 ≥95%'不成立（实测 41.0%）。于是 per-launch、窗口总量、与账本的差值**都不能归给这个 kernel**；+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径（把窗口缩到只含目标 kernel，或换只覆盖它的轨迹口径），拿到可归因的读数再谈改代码。"
+    "why": "per-launch 归因的两个前提里，'被匹配 kernel 占窗口 kernel 时间 ≥95%'不成立（实测 41.0%）。于是 per-launch、窗口总量、与账本的差值**都不能归给这个 kernel**；+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径（把窗口缩到只含目标 kernel，或换只覆盖它的轨迹口径），拿到可归因的读数再谈改代码。",
+    "classification_aliases": [
+      "window_unattributable",
+      "unattributable",
+      "unattributable_window",
+      "measurement_unattributable",
+      "fix_measurement_first",
+      "unattributable_by_window",
+      "window_not_attributable"
+    ],
+    "vocabulary_note": "classification 是我们的词表；上列别名视为同一判断 —— 评分看的是「判断是否正确」，不是「猜中我们的词」。"
   },
   "forbidden_actions": [
     "改 kernel",

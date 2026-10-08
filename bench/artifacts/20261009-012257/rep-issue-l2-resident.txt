@@ -1,0 +1,189 @@
+Kernoscope 0.2.0 · 协议 42efb89a4262 · 层 3 (instrumented)
+------------------------------------------------------------------------------------------------
+[ok  ] 最耗时的是 ?（None ms / None 次，占 kernel 时间 None%），进程内 kernel 时间合计 None ms  (467.82 ms, exact)
+        前提 该 kernel 占全部 kernel 时间的比例：100.0%
+        下一步：用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词
+[no  ] 不给数字：读数低于仪器分辨率下限
+        前提 窗口是否被被测负载主导：71.4%（门槛 50.0%）→ 满足
+        怎么办：让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成…（代价 ≈20s）
+[no  ] 不给数字：读数低于仪器分辨率下限
+        前提 窗口是否被被测负载主导：71.4%（门槛 80.0%）→ **不满足**
+        怎么办：让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成…（代价 ≈20s）
+[no  ] 不给数字：访存轨迹给不出字节数
+        怎么办：轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --…（代价 ≈20s）
+[soft]   (100.0 %, exact)
+        下一步：装上 NVBit 探针可拿到实测 occupancy（不只是上界）
+[soft] 发射槽利用率上界 n/a  (71.7 %, estimated)
+        下一步：方向是 latency 就先加并行度/减少依赖链；是 throughput 才谈指令精简
+
+没测到什么（共 16 个指标，按原因归组）：
+  - 8 个 counters_denied（硬件计数器被权限/驱动策略拒绝）；怎么办：计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…
+  - 3 个 below_resolution（读数低于仪器分辨率下限）；怎么办：让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成…（代价 ≈20s）
+  - 2 个 sampling_unavailable（PC 采样（PmSampling/SourceCounters）不可得）；怎么办：PC 采样（PmSampling/SourceCounters）与计数器同源、同样被权限锁…
+  - 本机缺件 no_instr_hist（没有提供指令直方图）；怎么办：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发…
+  - 本机缺件 no_memtrace（没有提供访存轨迹文件）；怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…
+  - 本机缺件 no_occupancy_probe（没跑 occupancy 探针）；怎么办：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…
+  - 本机缺件 no_static_input（没有提供 cubin/.so）；怎么办：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…
+  … 其余 3 组 / 3 个指标见 --packet（机器视图）
+
+本次代价：wall 10.11s · 包 3898B · 完整报告 48 KB · 197230 次 launch · 无本机误差带（跑 kernoscope selftest 后 diff 才有 MDD） · 包已按尺寸预算裁剪（unmeasured_examples, verdict_metrics, next_pointers, unmeasured_groups, passing_premises, remedy_commands, verdicts, facts）
+
+====================================================================================================
+完整报告（上面的判词都出自这里的数据；每个数字都带出处）
+====================================================================================================
+==PROF== Kernoscope 0.2.0 - provenance-honest profile (no performance counters required)
+==PROF== Target: bench/artifacts/.build/ledger_probe --kernel norm --mb 2 --target-s 1.2
+==PROF== DRAM 估算不可用：显存忙碌读数 0.7% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+==PROF== Kernel time: 467.820 ms of 10109.707 ms wall (4.6%)
+==PROF== Window: mode=auto（已裁剪） 采样 7 点 / 参与积分 1.4 s / 裁掉 8.7 s / 进程 wall 10.1 s
+==PROF== source[kernel activity]: nsys sqlite CUPTI_ACTIVITY_KIND_KERNEL (no counters needed)
+==PROF== source[device counters]: pynvml (energy/PCIe/mem-busy are management counters, available without admin)
+==PROF== source[static]: not used
+==PROF== source[peaks]: measured calibration (bench/artifacts/20261009-012257/machine-profile.json)
+
+Kernel: norm_k(const float *, const float *, float *, long)
+  nsys short name: norm_k
+  197230 launch(es), 467.8196 ms total, 0.0024 ms mean
+
+  Section: Duration                           [exact]
+    gpu__time_duration.sum                                 467.82 ms       [exact]
+    ks__launch_time_mean                                   0.0024 ms       [exact]
+    ks__launch_time_min                                    0.0022 ms       [exact]
+    ks__launch_time_max                                    0.0029 ms       [exact]
+    ks__launch_count                                       197230          [exact]
+
+  Section: LaunchStats                        [exact]
+    launch__grid_size                                        1024          [exact]
+    launch__block_size                                        256          [exact]
+    launch__thread_count                                   262144          [exact]
+    launch__registers_per_thread                               34          [exact]
+    ks__registers_used_for_occupancy                           34          [exact]
+    launch__shared_mem_per_block_static                         0 B        [exact]
+    launch__shared_mem_per_block_dynamic                        0 B        [exact]
+    launch__local_mem_per_thread                                0 B        [exact]
+    ks__cuda_graph_capture                                    yes          [exact]
+
+  Section: Occupancy                          [exact] (+1 n/a)
+    ks__theoretical_occupancy_pct                             100 %        [exact]
+    ks__blocks_per_sm                                           6          [exact]
+    ks__warps_per_sm                                           48          [exact]
+    ks__occupancy_limiter                          registers+threads+warps          [exact]  (并列的限制因素用 + 连接)
+    sm__maximum_warps_per_active_cycle_pct                    n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: SpeedOfLight                       [unavailable] (+2 n/a)
+    est__achieved_tflops                                      n/a          [unavailable]  [no_workload] workload not provided: pass --ks-gemm M,N,K or --ks-flops/--ks-bytes (plus --ks-calibration machine-profile.json for measured peaks)
+        observed peaks_provided=True  (downgraded: degraded)
+        fix: 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes  (代价≈≈0)
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: InstructionStats                   [unavailable] (+2 n/a)
+    ks__static_sass_instructions                              n/a          [unavailable]  [no_static_input] no cubin provided: pass --ks-cubin <file.so|.cubin>
+        fix: 用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS  (代价≈需人工)
+    smsp__inst_executed.sum                                   n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: SchedulerStats                     [estimated] (+1 n/a)
+    est__dynamic_warp_instructions                    1.79344e+11          [estimated]  (动态指令构成：alu 81.1%、control 5.4%、memory 5.4%、fp 4.5%；发射槽上限 = SM 数 × 4 调度器 × 时钟 × 时长；动态指令数按 **warp 级**计（NVBit count_warp_level=1），因此这是发射槽占用的直接计数；；指令数按 per-launch 平均对齐到本报告的 197230 次 launch（直方图那次是 1040 次）)
+    est__issue_slot_utilization_pct                          71.7 %        [estimated]  (**上界口径**：每 SM 4 个调度器、每周期各发 1 条；真实可用发射槽只会更少)
+    est__issued_ipc_per_sm                                  2.867 warp-instr/SM/cycle [estimated]  (同为上界口径)
+    est__stall_direction                           偏发射受限：发射槽已用掉约 72%，优化方向是减少指令数（向量化、减少地址运算、合并访存）          [estimated]  (**不是** ncu 的 stall 计数器细分（smsp__warp_issue_stalled_*）：这里只回答「到底发不出去还是在等数据」，且标 estimated)
+    est__warp_instructions_per_launch                 1.72446e+08          [estimated]  (共 1040 次 launch)
+    est__dyn_instr_share_alu                                 81.1 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_control                              5.4 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_memory                               5.4 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_fp                                   4.5 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_sync                                 3.6 %        [estimated]  (按 warp 级指令数加权)
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct            n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: WarpStateStats                     [estimated] (+1 n/a)
+    est__stall_direction                           偏发射受限：发射槽已用掉约 72%，优化方向是减少指令数（向量化、减少地址运算、合并访存）          [estimated]  (**不是** ncu 的 stall 计数器细分（smsp__warp_issue_stalled_*）：这里只回答「到底发不出去还是在等数据」，且标 estimated)
+    est__dyn_instr_share_alu                                 81.1 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_control                              5.4 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_memory                               5.4 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_fp                                   4.5 %        [estimated]  (按 warp 级指令数加权)
+    est__dyn_instr_share_sync                                 3.6 %        [estimated]  (按 warp 级指令数加权)
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct            n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: WorkloadDistribution               [unavailable] (+1 n/a)
+    ks__workloaddistribution_status                           n/a          [unavailable]  [instrumentation_missing] requires in-kernel instrumentation (NVBit / IKP trace) which is not enabled; install NVBit and pass an existing trace with --ks-memtrace <file> (see tools/probe
+        observed section=WorkloadDistribution
+        fix: 这一类需要额外的采集通道（插桩/多趟重放）：本工具不重放，用 NVBit 轨迹（--ks-memtrace）或指令直方图（--ks-instr-hist）替代  (代价≈10 分钟)
+
+  Section: ComputeWorkloadAnalysis            [unavailable] (+1 n/a)
+    ks__computeworkloadanalysis_status                        n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        observed section=ComputeWorkloadAnalysis
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: MemoryWorkloadAnalysis             [unavailable] (+1 n/a)
+    ks__memoryworkloadanalysis_status                         n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        observed section=MemoryWorkloadAnalysis
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: MemoryWorkloadAnalysis_Tables      [unavailable] (+1 n/a)
+    ks__memoryworkloadanalysis_tables_status                  n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        observed section=MemoryWorkloadAnalysis_Tables
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: SourceCounters                     [unavailable] (+1 n/a)
+    ks__sourcecounters_status                                 n/a          [unavailable]  [sampling_unavailable] requires PC sampling, which needs the profiling permission here
+        observed section=SourceCounters
+        fix: PC 采样（PmSampling/SourceCounters）与计数器同源、同样被权限锁死；需要 PC 级归因时用 --ks-instr-hist 的发射槽上界替代（方向性结论，非周期细分）  (代价≈本机不可行)
+
+  Section: PmSampling                         [unavailable] (+1 n/a)
+    ks__pmsampling_status                                     n/a          [unavailable]  [sampling_unavailable] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        observed section=PmSampling
+        fix: PC 采样（PmSampling/SourceCounters）与计数器同源、同样被权限锁死；需要 PC 级归因时用 --ks-instr-hist 的发射槽上界替代（方向性结论，非周期细分）  (代价≈本机不可行)
+
+  Section: Nvlink_Tables                      [unavailable] (+1 n/a)
+    ks__nvlink_tables_status                                  n/a          [unavailable]  [no_nvlink] requires NVLink hardware with NVML counter support (not present / not supported)
+        observed section=Nvlink_Tables
+        fix: 需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用  (代价≈本机不可行)
+
+  Section: NumaAffinity                       [unavailable] (+1 n/a)
+    ks__numaaffinity_status                                   n/a          [unavailable]  [not_applicable] not applicable on this device
+        observed section=NumaAffinity
+        fix: 该指标在本设备/本平台上无定义（不是数据缺失）：忽略这一行即可  (代价≈≈0)
+
+----------------------------------------------------------------------------------------------------
+Kernel: (device)
+  0 launch(es), 0.0000 ms total, 0.0000 ms mean
+
+  Section: DeviceStatistics                   [estimated]
+    meas__nvml_mem_busy_mean_pct                              0.1 %        [measured]  [resolution 1 %（整数百分比）]  (区间平均；是「显存子系统忙碌占比」，不是 DRAM 吞吐本身。读数 0.0% 只说明低于分辨率下限，不等于「DRAM 完全没动」；必须让 GPU 保持饱和，否则会被宿主间隙稀释（实测 96.8% vs 6.3%）)
+    est__dram_busy_equivalent_gbs                             0.9 GB/s     [estimated]  [resolution 1 %]  (等效带宽口径；与按字节/时间的口径略有差异)
+    meas__sm_clock_mean_mhz                                1044.8 MHz      [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__sm_clock_max_mhz                                   2775 MHz      [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__power_max_w                                       141.5 W        [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__device_energy_j                                 459.015 J        [measured]  [resolution 1 mJ]  (ncu 不提供能耗指标)
+
+  Section: DramTraffic                        [derived] (+4 n/a)
+    est__dram_bytes_total                                     n/a          [unavailable]  [below_resolution] 显存忙碌读数 0.7% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+        observed mem_busy_pct=0.714 | threshold resolution_pct=1.0
+        fix: 让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成 0；把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup）  (代价≈20 秒)
+    est__dram_bytes_per_launch                                n/a          [unavailable]  [below_resolution] 显存忙碌读数 0.7% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+        observed mem_busy_pct=0.714 | threshold resolution_pct=1.0
+        fix: 让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成 0；把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup）  (代价≈20 秒)
+    est__dram_throughput_pct_of_peak                          n/a          [unavailable]  [below_resolution] 显存忙碌读数 0.7% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+        observed mem_busy_pct=0.714 | threshold resolution_pct=1.0
+        fix: 让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成 0；把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup）  (代价≈20 秒)
+    ks__sampler_window_coverage_pct                          71.4 %        [derived]  [resolution 1 个采样点]  (前提①「窗口被被测负载主导」：<80% 不给 per-launch 归因，<50% 连总量也不给)
+    ks__matched_kernel_kernel_share_pct                       100 %        [derived]  [resolution 0.1 %]  (前提②「窗口被被匹配的 kernel 主导」：<95% 不给 per-launch 归因。空闲时段贡献 0 字节，所以判据用内核时间份额而不是墙钟份额：单 kernel 的窗口无论有多少空闲都是 100%)
+    ks__matched_kernel_window_share_pct                      33.4 %        [derived]  [resolution 0.1 %]  (与覆盖率同量纲的对照量（95% 门槛用的是内核时间份额）；通常 ≤ 覆盖率，差值就是窗口里的空闲；本次分子含窗口外的同名 launch（窗口被裁过），所以它是**上界**，可能高于覆盖率，不能当作保守估计)
+    ks__attribution_bias_estimate_pct                           0 %        [derived]  [resolution 0.1 %]  (实测校验：k_fused 内核时间份额 44.9% → 估计 +123%，而那次观测误差是 +146.9% —— 观测值比估计更高，因为该 kernel 的字节密度低于窗口里其他 kernel。所以这是**估计而非严格上界**：字节强度不一致的混合窗口必须换轨迹口径)
+    ks__window_busy_segments                                    1 段        [derived]  [resolution 1 段]  (多段 ⇒ 窗口可能是多个阶段/变体拼接（例如先跑正确性再跑性能、依次跑 v1/v2/v3），此时 per-launch 归因需谨慎：这是启发式信号，不是判据)
+    ks__dram_window_mem_busy_mean_pct                         0.7 %        [derived]  [resolution 1 %]  (这就是摘要里那个「窗口显存忙碌」，也是字节估算真正用到的那个数；整进程均值另见 meas__nvml_mem_busy_mean_pct，两者不可互换)
+    est__dram_bytes_per_launch_trace                          n/a          [unavailable]  [trace_unavailable] 未提供访存轨迹：加 --ks-memtrace <trace> 可换用轨迹口径，在 NVML 代理口径不成立时仍能完成账本对拍
+        observed trace_bytes_per_launch=None
+        fix: 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel  (代价≈20 秒)
+
+----------------------------------------------------------------------------------------------------
+
+Provenance summary: exact=18, derived=6, measured=5, estimated=17, unavailable=19
+Legend: exact=与 ncu 同源 | derived=本机实测标定/模型 | measured=我们的探针实测 | estimated=采样或代理(附误差) | unavailable=需要硬件计数器，只报 n/a
+Output(json): bench/artifacts/20261009-012257/rep-issue-l2-resident.ksreport.json
+Output(perfetto): bench/artifacts/20261009-012257/rep-issue-l2-resident.perfetto.json
+Open the timeline at https://ui.perfetto.dev -> Load trace -> the file above

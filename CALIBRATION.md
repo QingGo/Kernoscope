@@ -24,20 +24,20 @@ python tools/machine-profile.py --out bench/machine-profile.json
   "gpu": "NVIDIA GeForce RTX 4090",
   "cc": "8.9", "sm_count": 128, "l2_mib": 72.0,
   "nvidia_smi": "580.105.08, 3105, 450.00, 2, 16",   // driver, maxSM, power, pcie gen, width
-  "measured_dram": {"copy_gbs": 908.5, "read_gbs": 904.5, "write_gbs": 942.0},
+  "measured_dram": {"copy_gbs": 908.5, "read_gbs": 898.5, "write_gbs": 937.2},
   "l2_info": {"l2_resident_max_mb": 64, "l2_drop_mb": 96, "l2_read_peak_gbs": 2180.1},
   "measured_matmul_tflops": {
     "torch.bfloat16": {
-      "tflops": 167.3, "size": 16384, "ms": 52.5,
+      "tflops": 166.2, "size": 16384, "ms": 52.9,
       "acc_caliber": "bf16 (fp32 accumulate)",
       "tflops_protocol": "default",          // 这个头条读数**就是**哪个变体测出来的
       "tflops_is_variant_reading": true,
       "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
                              "fp32_precision": "none", "allow_tf32": true},
       "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
-      "caliber_variants_tflops": {"default": 167.3,
-                                  "reduced_precision_reduction_off": 167.2,
-                                  "fp32_ieee": 160.9},
+      "caliber_variants_tflops": {"default": 166.2,
+                                  "reduced_precision_reduction_off": 166.1,
+                                  "fp32_ieee": 159.9},
       "caliber_variant_settings": {          // 每个变体自己的设置，不再只留一个快照
         "default": {"allow_fp16_reduced_precision_reduction": true,
                     "fp32_precision": "none"},

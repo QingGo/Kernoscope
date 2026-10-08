@@ -1,0 +1,8 @@
+{
+  "classification": "dram_proxy_no_nvml_samples",
+  "acted_on": ["kernel_time"],
+  "next_action": "先修口径、不要动代码：去掉 --ks-no-nvml 用同一窗口重跑 fused_attention_fwd（capabilities 显示 has_nvml=true、device_busy/dram_bytes 均为 available，但本窗口 samples=0），确认 NVML 采样生效、显存忙碌能被积分后再重新生成 packet 回答“DRAM 还有多少空间”。",
+  "blocked_by": ["dram_bytes", "dram_bytes_per_launch"],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

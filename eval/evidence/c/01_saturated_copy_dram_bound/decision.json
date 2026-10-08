@@ -1,0 +1,15 @@
+{
+  "classification": "dram_bound",
+  "acted_on": [
+    "kernel_time",
+    "dram_bytes",
+    "dram_bytes_per_launch",
+    "ledger_verdict",
+    "roofline",
+    "occupancy"
+  ],
+  "next_action": "别在带宽上找空间：roofline 已 96.7%、离本机实测峰值只差 3.3%，occupancy 46.9% 对比上界 50% 也已贴顶；接下来只做减少总字节的工作——把相邻 pass 融合、或让中间结果靠 L2 复用（分块/调 tile）不出 DRAM，改完用 -k 单跑 vectorized_copy_kernel 并做 diff，确认差异超过 MDD 才算真改进。",
+  "blocked_by": [],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

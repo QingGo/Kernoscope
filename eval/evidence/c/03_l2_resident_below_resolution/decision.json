@@ -1,0 +1,15 @@
+{
+  "classification": "below_resolution",
+  "acted_on": [
+    "kernel_time",
+    "l2_locality"
+  ],
+  "next_action": "现在还不能反过来去优化计算：NVML 显存忙碌恒为 0.0% 是低于 1 个百分点分辨率被截断，不等于 DRAM 流量为零，DRAM 总量与 per-launch 两条口径都因此被拒；先把窗口撑到可分辨（保持 GPU 饱和、加长 bench_loop：kernoscope --ks-window auto -- python bench_loop.py，约 20 s），或加 --ks-memtrace 用轨迹口径拿到这个 kernel 的真实 DRAM 字节与 roofline，再决定是攻 compute 还是 mov。",
+  "blocked_by": [
+    "dram_bytes",
+    "dram_bytes_per_launch",
+    "occupancy"
+  ],
+  "tokens_used": 0,
+  "gpu_minutes": 0.0
+}

@@ -774,7 +774,18 @@
       "重跑"
     ],
     "code_change_allowed": false,
-    "why": "两条 DRAM 口径都被结构化拒绝（no_nvml_samples + counters_denied），能行动的只有 kernel 级结论。'拿不到 DRAM 数'不等于'DRAM 没问题'，也不等于'那就去优化计算'：唯一有依据的动作是先把测量口径修好（恢复 NVML 采样 / 拿计数器权限 / 装 NVBit 采轨迹）。"
+    "why": "两条 DRAM 口径都被结构化拒绝（no_nvml_samples + counters_denied），能行动的只有 kernel 级结论。'拿不到 DRAM 数'不等于'DRAM 没问题'，也不等于'那就去优化计算'：唯一有依据的动作是先把测量口径修好（恢复 NVML 采样 / 拿计数器权限 / 装 NVBit 采轨迹）。",
+    "classification_aliases": [
+      "dram_caliber_unusable",
+      "no_samples",
+      "sampling_unusable",
+      "caliber_unusable",
+      "not_answerable",
+      "dram_proxy_no_nvml_samples",
+      "no_nvml_samples",
+      "dram_proxy_unsampling"
+    ],
+    "vocabulary_note": "classification 是我们的词表；上列别名视为同一判断 —— 评分看的是「判断是否正确」，不是「猜中我们的词」。"
   },
   "forbidden_actions": [
     "优化访存",
