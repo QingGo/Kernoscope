@@ -727,8 +727,9 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
                 f"被匹配 kernel 的 GPU 时间 ÷ 参与积分的窗口长度"
                 f"（{est.matched_kernel_ns / 1e9:.2f} s / {est.window_used_s:.1f} s）",
                 f"与覆盖率同量纲的对照量（{SHARE_STRONG:.0f}% 门槛用的是内核时间份额）；"
-                f"它 ≤ 覆盖率，差值就是窗口里的空闲"
-                + ("；分子含窗口外的同名 launch，因此是上界" if est.share_upper_bound else ""),
+                f"通常 ≤ 覆盖率，差值就是窗口里的空闲"
+                + ("；本次分子含窗口外的同名 launch（窗口被裁过），所以它是**上界**，"
+                   "可能高于覆盖率，不能当作保守估计" if est.share_upper_bound else ""),
                 "0.1 %"))
     out.append(("ks__attribution_bias_estimate_pct",
                 round(bias, 1) if bias is not None else None, "%",
