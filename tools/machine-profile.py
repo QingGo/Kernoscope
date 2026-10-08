@@ -28,7 +28,34 @@ import subprocess
 import threading
 import time
 
-import torch
+try:                       # 让 `--help` 与单元测试在没有 torch 的环境里也能用
+    import torch
+except ImportError:        # pragma: no cover - 取决于环境
+    torch = None
+
+
+def _require_torch():
+    if torch is None:
+        raise SystemExit("需要 PyTorch（这个脚本要跑真实 matmul/带宽微基准）："
+                         "pip install torch；无 GPU 环境请用 `kernoscope --ks-synthetic`")
+    if not torch.cuda.is_available():
+        raise SystemExit("没有可用的 CUDA 设备（标定必须有 GPU；"
+                         "无 GPU 环境请用 `kernoscope --ks-synthetic` 跑通流程）")
+
+
+def write_profile(profile: dict, out: str) -> str:
+    """落盘（R-18）：默认 --out 是**裸文件名**，`os.path.dirname` 会返回 ''。
+
+    旧实现直接 `os.makedirs(os.path.dirname(args.out))` → 真机 `FileNotFoundError: ''`，
+    而这一步是 README 与 doctor 共同推荐的第一步。用 abspath 兜住。
+    """
+    path = os.path.abspath(out)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(profile, f, indent=2, default=str)
+    return path
 
 
 # --------------------------------------------------------------------------
@@ -136,19 +163,115 @@ def bandwidth_sweep(sizes_mb, dtype_bytes=4, reps=5):
 
 
 # --------------------------------------------------------------------------
-# 2) matmul 可达算力
+# 2) matmul 可达算力（并测量"累加口径可区分性"，R-09/R-10）
 # --------------------------------------------------------------------------
-def matmul_peak(sizes, dtypes):
+CALIBER_VARIANTS = [
+    # (名字, 设置函数, 记录进 profile 的 precision_settings)
+    ("default", lambda: None, {"allow_fp16_reduced_precision_reduction": None,
+                               "fp32_precision": "none"}),
+]
+
+
+def _precision_settings_snapshot():
+    """读回当前的 torch 精度设置，作为标定产物的一部分（R-09）。"""
+    snap = {}
+    try:
+        snap["allow_fp16_reduced_precision_reduction"] = bool(
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
+    except Exception:
+        snap["allow_fp16_reduced_precision_reduction"] = None
+    for attr in ("fp32_precision", "float32_matmul_precision"):
+        try:
+            snap[attr] = str(getattr(torch.backends.cuda.matmul, attr))
+        except Exception:
+            pass
+    try:
+        snap["allow_tf32"] = bool(torch.backends.cuda.matmul.allow_tf32)
+    except Exception:
+        pass
+    return snap
+
+
+def _apply_precision(settings: dict):
+    """把一份精度设置快照写回 torch（写不动的项静默跳过 —— torch 版本差异很大）。"""
+    if settings.get("allow_fp16_reduced_precision_reduction") is not None:
+        try:
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = \
+                settings["allow_fp16_reduced_precision_reduction"]
+        except Exception:
+            pass
+    if "fp32_precision" in settings:
+        try:
+            torch.backends.cuda.matmul.fp32_precision = settings["fp32_precision"]
+        except Exception:
+            pass
+    if settings.get("allow_tf32") is not None:
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = settings["allow_tf32"]
+        except Exception:
+            pass
+
+
+def _set_precision(allow_reduced: bool | None = None, fp32_precision: str | None = None,
+                   baseline: dict | None = None):
+    """设置一项精度开关，并返回"恢复到 baseline"的可调用对象。
+
+    baseline 必须**在外面算一次**再传进来：如果每个变体各自快照，链式设置会让后面的
+    快照记下前面变体改过的值，于是"恢复现场"实际恢复成了中间状态（这个坑有测试守）。
+    """
+    prev = dict(baseline) if baseline is not None else _precision_settings_snapshot()
+    if allow_reduced is not None:
+        try:
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = allow_reduced
+        except Exception:
+            pass
+    if fp32_precision is not None:
+        try:
+            torch.backends.cuda.matmul.fp32_precision = fp32_precision
+        except Exception:
+            try:
+                torch.backends.cuda.matmul.allow_tf32 = (fp32_precision != "ieee")
+            except Exception:
+                pass
+
+    def restore():
+        _apply_precision(prev)
+
+    return restore
+
+
+def _variants():
+    """三种累加口径设置（default / fp16 reduced-reduction off / fp32 ieee）。"""
+    baseline = _precision_settings_snapshot()
+    out = [("default", _set_precision(baseline=baseline),
+            {"allow_fp16_reduced_precision_reduction": True, "fp32_precision": "none"})]
+    out.append(("reduced_precision_reduction_off",
+                _set_precision(allow_reduced=False, baseline=baseline),
+                {"allow_fp16_reduced_precision_reduction": False, "fp32_precision": "none"}))
+    out.append(("fp32_ieee", _set_precision(fp32_precision="ieee", baseline=baseline),
+                {"allow_fp16_reduced_precision_reduction": True, "fp32_precision": "ieee"}))
+    return out
+
+
+def matmul_peak(sizes, dtypes, caliber_probe=True, reps=3):
+    """测每个 dtype 的可达 TFLOP/s，并**测量**累加口径的可区分性。
+
+    为什么口径可区分性必须被测而不是被假设（B9 的真机证据）：
+      10-07 的三设置最大相对差 0.4%（不可分辨），10-08 是 5.0%（可分辨）——
+      同一台机器、相隔一天、两个脚本给出相反判断。所以标定产物必须带离散度。
+    """
     print("\n===== 2) matmul 可达 TFLOP/s（本机真实上限，替代规格表） =====")
     out = {}
     for dt in dtypes:
         best = 0.0
         best_cfg = None
+        best_variant = "default"
+        variant_tflops: dict[str, float] = {}
         for s in sizes:
             a = torch.randn(s, s, device="cuda", dtype=dt)
             b = torch.randn(s, s, device="cuda", dtype=dt)
             try:
-                t, _ = timeit(lambda: a @ b, reps=3, warmup=2)
+                t, _ = timeit(lambda: a @ b, reps=reps, warmup=2)
             except Exception as e:
                 print(f"  {dt} {s}: 失败 {e}")
                 del a, b
@@ -160,19 +283,67 @@ def matmul_peak(sizes, dtypes):
                 best, best_cfg = tflops, {"size": s, "ms": t * 1e3}
             del a, b
             torch.cuda.empty_cache()
-        out[str(dt)] = {"tflops": round(best, 1), **(best_cfg or {})}
-        print(f"  -> {dt} 最好: {best:.1f} TFLOP/s  @ {best_cfg}")
+
+        # ---- 口径探针：同一尺寸、三种设置各测一遍 ----
+        spread = None
+        distinguishable = None
+        if caliber_probe and best_cfg:
+            size = best_cfg["size"]
+            a = torch.randn(size, size, device="cuda", dtype=dt)
+            b = torch.randn(size, size, device="cuda", dtype=dt)
+            try:
+                for name, restore, _settings in _variants():
+                    try:
+                        t, _ = timeit(lambda: a @ b, reps=reps, warmup=2)
+                        variant_tflops[name] = round(2.0 * size ** 3 / t / 1e12, 1)
+                    except Exception as e:
+                        print(f"  {dt} 口径探针 {name} 失败: {e}")
+                    finally:
+                        restore()
+            finally:
+                del a, b
+                torch.cuda.empty_cache()
+            vals = [v for v in variant_tflops.values() if v]
+            if len(vals) >= 2:
+                spread = round(100.0 * (max(vals) - min(vals)) / max(vals), 1)
+                distinguishable = spread >= 2.0
+                print(f"  -> {dt} 口径探针: {variant_tflops}  最大相对差 {spread}% "
+                      f"=> {'可分辨' if distinguishable else '不可分辨'}")
+            # 用探针中最好的一次作为该 dtype 的读数（与 default 一致时数值不变）
+            if vals:
+                best = max(best, max(vals))
+
+        entry = {"tflops": round(best, 1), **(best_cfg or {}),
+                 "acc_caliber": _caliber_name(dt),
+                 "precision_settings": _precision_settings_snapshot(),
+                 "method": f"torch.matmul, {reps} iters best-of, size sweep {list(sizes)}",
+                 "caliber_variants_tflops": variant_tflops,
+                 "caliber_spread_pct": spread,
+                 "caliber_distinguishable": distinguishable}
+        out[str(dt)] = entry
+        print(f"  -> {dt} 最好: {best:.1f} TFLOP/s  @ {best_cfg}  "
+              f"(口径离散 {spread}% / 可分辨={distinguishable})")
     return out
+
+
+def _caliber_name(dt) -> str:
+    if dt == torch.float32:
+        return "fp32 (fp32 accumulate)"
+    if dt == torch.float16:
+        return "fp16 (fp32 accumulate; 允许 reduced-precision reduction)"
+    return "bf16 (fp32 accumulate)"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="快速版（小尺寸，约 15s）")
-    ap.add_argument("--out", default="machine-profile.json")
+    ap.add_argument("--out", default="machine-profile.json",
+                    help="输出 JSON 路径（默认 ./machine-profile.json；含目录时自动创建）")
+    ap.add_argument("--no-caliber-probe", action="store_true",
+                    help="跳过累加口径探针（省时间；产物将缺 caliber_spread_pct）")
     args = ap.parse_args()
 
-    if not torch.cuda.is_available():
-        raise SystemExit("没有可用的 CUDA 设备")
+    _require_torch()
     props = torch.cuda.get_device_properties(0)
     name = props.name
     print(f"GPU: {name}  SM {props.multi_processor_count}  CC {props.major}.{props.minor}  "
@@ -191,10 +362,12 @@ def main():
 
     with ClockSampler() as cs:
         bw_rows, dram, l2_knee = bandwidth_sweep(sizes)
-        mm = matmul_peak(msizes, dtypes)
+        mm = matmul_peak(msizes, dtypes, caliber_probe=not args.no_caliber_probe,
+                         reps=2 if args.quick else 3)
         clocks = cs.summary()
 
     profile = {
+        "schema_version": 2,
         "gpu": name,
         "cc": f"{props.major}.{props.minor}",
         "sm_count": props.multi_processor_count,
@@ -203,22 +376,26 @@ def main():
         "measured_dram": {k: round(v, 1) for k, v in dram.items()},
         "l2_info": l2_knee,
         "measured_matmul_tflops": mm,
+        "precision_settings_at_end": _precision_settings_snapshot(),
         "clocks_during_measurement": clocks,
         "bandwidth_sweep": bw_rows,
         "torch": torch.__version__,
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "tool": "tools/machine-profile.py",
     }
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(profile, f, indent=2, default=str)
+    written = write_profile(profile, args.out)
 
     print("\n===== 测量期间的时钟/功耗 =====")
     print(" ", clocks)
     if clocks and clocks["sm_clock_max"] < 0.7 * float(smi.split(",")[1] or 0 or 1):
         print("  ⚠ SM 时钟明显低于最大值：测量可能在非 boost 状态，结论偏保守。")
         print("    建议先跑 10 秒满载预热，或长循环取 best-of。")
-    print(f"\n已写入 {args.out}")
-    print("roofline 用法：python roofline-calc.py --profile %s ..." % args.out)
+    print(f"\n已写入 {written}")
+    print("roofline 用法（同仓库自带，不需要额外脚本）：")
+    print("  kernoscope --ks-calibration %s --ks-gemm 4096,4096,4096 --ks-dtype bf16 "
+          "-k regex:<kernel> -- <bench>" % args.out)
+    print("口径提示：被测 matmul 的累加口径（fp32/fp16 acc）必须与产物里的 acc_caliber 一致；"
+          "标定缺少该字段时 kernoscope 会拒绝用它算 roofline 拐点（R-09）。")
 
 
 if __name__ == "__main__":

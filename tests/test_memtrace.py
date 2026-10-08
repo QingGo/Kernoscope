@@ -196,7 +196,8 @@ def test_cli_memtrace_bad_file_returns_1(tmp_path, capsys):
 
 
 def test_report_integration_adds_section_with_right_provenance(monkeypatch, capsys, tmp_path):
-    # 采样轨迹 -> 连精确算术也降为 estimated（样本代表性是假设）
+    # 采样轨迹 -> 连精确算术也降为 estimated（样本代表性是假设），
+    # 且前缀必须跟着出处改（R-12）：meas__ 只能是全量实测，采样放大的用 est__。
     p = _mk_trace(tmp_path / "t.txt", [_coalesced(0x1000)], grid=8, blocks_traced=1,
                   ratio=0.125, kernel="synthetic_gemm")
     base = tmp_path / "rep"
@@ -207,8 +208,9 @@ def test_report_integration_adds_section_with_right_provenance(monkeypatch, caps
     secs = {s["name"]: s for k in doc["kernels"] for s in k["sections"]}
     mt = secs["MemoryTrace"]
     metrics = {m["name"]: m for m in mt["metrics"]}
-    assert metrics["meas__sectors_per_request"]["provenance"] == "estimated"
+    assert metrics["est__sectors_per_request"]["provenance"] == "estimated"
     assert metrics["est__l2_hit_rate_l2only_pct"]["provenance"] == "estimated"
+    assert "meas__sectors_per_request" not in metrics, "采样放大的量不得用 meas__ 前缀"
     assert "lts__t_sector_hit_rate" not in metrics      # 不占用 ncu 指标名
 
 

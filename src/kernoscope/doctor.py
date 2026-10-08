@@ -21,15 +21,15 @@ import json
 import os
 import platform
 import re
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from . import __version__
 from .provenance import UNAVAILABLE_REASONS
+from .toolchain import Discovery, discover
 
-DOCTOR_SCHEMA_VERSION = 1
+DOCTOR_SCHEMA_VERSION = 2
 
 # Linux capability 位号（与内核 include/uapi/linux/capability.h 一致）
 CAP_NAMES: dict[int, str] = {
@@ -74,6 +74,11 @@ class DoctorReport:
     backend_plan: list[str] = field(default_factory=list)
     device: dict[str, Any] = field(default_factory=dict)
     advice: list[str] = field(default_factory=list)
+    # R-16/R-17：每个工具的发现结果（含"找过哪些路径"），让"未安装"可证伪
+    tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 计数器四态：not-installed / not-in-path / denied / available / unknown
+    counter_state: str = "unknown"
+    counter_state_note: str = ""
 
     def add(self, group: str, name: str, status: str, detail: str = "", impact: str = "") -> None:
         self.checks.append(Check(group, name, status, detail, impact))
@@ -86,6 +91,9 @@ class DoctorReport:
             "ok": self.ok,
             "host": {"platform": platform.platform(), "python": platform.python_version()},
             "device": self.device,
+            "tools": self.tools,
+            "counter_state": self.counter_state,
+            "counter_state_note": self.counter_state_note,
             "checks": [asdict(c) for c in self.checks],
             "capabilities": [asdict(c) for c in self.capabilities],
             "backend_plan": self.backend_plan,
@@ -105,8 +113,18 @@ def _read(path_env: str, default: str) -> str:
         return ""
 
 
+def discover_tool(name: str) -> Discovery:
+    """单点发现入口（测试与 `KS_TOOL_SEARCH_DIRS` 都从这里注入）。"""
+    return discover(name)
+
+
 def find_tool(name: str) -> str | None:
-    return shutil.which(name)
+    """多路径发现（PATH → CUDA_HOME → /usr/local/cuda* → 常见目录）。
+
+    历史坑（B3）：只查 PATH 会在这类实例上给出"未安装 ncu"，而 ncu 就躺在
+    `/usr/local/cuda-13.0/bin/ncu` —— 与后端 `find_cuobjdump()` 的结论互相矛盾。
+    """
+    return discover_tool(name).path
 
 
 def tool_version(cmd: list[str], timeout: float = 20.0) -> str:
@@ -177,7 +195,7 @@ def gpu_info() -> dict[str, Any]:
     return info
 
 
-def counter_gate_probe() -> tuple[bool | None, str]:
+def counter_gate_probe(ncu_path: str | None = None) -> tuple[bool | None, str]:
     """用 ncu 自身快速探测"硬件计数器是否可用"。
 
     返回 (可用?, 说明)，其中 **None = 无法判定**（例如没装 ncu）——
@@ -186,17 +204,41 @@ def counter_gate_probe() -> tuple[bool | None, str]:
     `ncu --query-metrics` 在无权限时会打印 ERR_NVGPUCTRPERM（实测），
     因此可作为 1 秒级的经验判定。
     """
-    ncu = find_tool("ncu")
+    ncu = ncu_path or find_tool("ncu")
     if not ncu:
-        return None, "未安装 ncu，无法实测判定"
+        return None, "在所有候选路径里都没有找到 ncu"
     try:
         p = subprocess.run([ncu, "--query-metrics"], capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
-        return None, "ncu 探测超时，无法判定"
+        return None, f"{ncu} 探测超时/无法执行，无法判定"
     blob = (p.stdout or "") + (p.stderr or "")
     if "ERR_NVGPUCTRPERM" in blob:
         return False, "ncu reports ERR_NVGPUCTRPERM (empirically confirmed)"
+    if "No devices" in blob or "no devices" in blob:
+        return None, "ncu 找不到设备，无法判定"
     return True, "ncu probe did not report a permission error"
+
+
+def classify_counter_state(found: Discovery | None, allowed: bool | None,
+                           probe: bool | None) -> tuple[str, str]:
+    """计数器四态（R-17）：未安装 / 已安装但不在 PATH / 已安装实测被拒 / 实测可用。
+
+    关键是**把"未安装"与"无法判定"分开**：前者可被一次 `ls` 推翻，后者才是诚实结论。
+    """
+    if found is None or not found.found:
+        return "not-installed", (f"在 {len(found.searched) if found else 0} 个候选目录里都没找到 ncu "
+                                 f"（不是「没试」，是真的找遍了；--json 里有目录清单）")
+    where = found.path or ""
+    not_in_path = "（不在 PATH 上，已按多路径找到）" if found.found_but_not_in_path else ""
+    if probe is False:
+        who = "policy" if allowed is False else "runtime"
+        return "denied", (f"ncu 存在于 {where}{not_in_path}，实测被拒（ERR_NVGPUCTRPERM，{who}）")
+    if probe is True:
+        return "available", f"ncu 存在于 {where}{not_in_path}，实测可用"
+    if found.found_but_not_in_path:
+        return "not-in-path", (f"ncu 存在于 {where}{not_in_path}；"
+                               f"若只看 PATH 会误报「未安装」。实测未完成判定")
+    return "unknown", f"ncu 存在于 {where}，但实测无法判定"
 
 
 # --------------------------------------------------------------------------
@@ -260,22 +302,30 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
     else:
         r.add("permissions", "容器 capability", WARN, "读不到 /proc/self/status")
 
-    # ---- 工具链 ----
-    nsys = find_tool("nsys")
+    # ---- 工具链（多路径发现，R-16）----
+    disc: dict[str, Discovery] = {name: discover_tool(name) for name in
+                                 ("nsys", "ncu", "cuobjdump", "nvidia-smi")}
+    r.tools = {k: v.as_dict() for k, v in disc.items()}
+    nsys = disc["nsys"].path
     if nsys:
-        r.add("toolchain", "nsys", OK, tool_version([nsys, "--version"]) or "present",
+        r.add("toolchain", "nsys", OK,
+              (tool_version([nsys, "--version"]) or "present")
+              + (f"  @ {nsys}" if disc["nsys"].found_but_not_in_path else ""),
               impact="提供 exact 的 LaunchStats / 时长（CUPTI activity，不需要计数器）")
     else:
-        r.add("toolchain", "nsys", FAIL, "未找到",
+        r.add("toolchain", "nsys", FAIL,
+              f"未找到（找过 {len(disc['nsys'].searched)} 个候选目录，见 --json 的 tools.nsys）",
               impact="缺少核心数据源：无法得到 kernel 时长与 LaunchStats")
         r.ok = False
 
-    cubin = find_tool("cuobjdump")
+    cubin = disc["cuobjdump"].path
     r.add("toolchain", "cuobjdump", OK if cubin else WARN,
-          tool_version([cubin, "--version"]) if cubin else "未找到（可选）",
+          (tool_version([cubin, "--version"]) if cubin else
+           f"未找到（找过 {len(disc['cuobjdump'].searched)} 个候选目录）")
+          + (f"  @ {cubin}" if cubin and disc["cuobjdump"].found_but_not_in_path else ""),
           impact="提供静态寄存器/共享内存与 SASS 指令混合（exact，且不需要 GPU）")
 
-    smi = find_tool("nvidia-smi")
+    smi = disc["nvidia-smi"].path
     r.add("toolchain", "nvidia-smi", OK if smi else WARN,
           "present" if smi else "未找到",
           impact="提供设备级计数器：能耗/显存忙碌/时钟功耗（measured，无需 admin）")
@@ -304,35 +354,62 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
           nvbit_hint or "未配置（可选外部依赖，需自行安装，许可证禁止随本项目分发）",
           impact="指令级归因 / 访存轨迹 / sectors-per-request / locality")
 
-    # ---- 计数器门：经验判定 ----
+    # ---- 计数器门：经验判定 + 四态结论（R-17）----
+    ncu_disc = disc["ncu"]
     if probe_counters:
-        available, why = counter_gate_probe()
-        if available is None:
-            r.add("counters", "硬件计数器（ncu 实测）", WARN, why,
-                  impact="无法判定；如以后在受限机器上使用，计数器类工具会报 ncu: ERR_NVGPUCTRPERM")
-        else:
-            r.add("counters", "硬件计数器（ncu 实测）", OK if available else FAIL, why,
-                  impact="" if available else UNAVAILABLE_REASONS["counters"])
-        counters_allowed = available
-    elif counters_allowed is not None:
-        r.add("counters", "硬件计数器（静态推断）",
-              OK if counters_allowed else FAIL,
-              "RmProfilingAdminOnly=0" if counters_allowed else "RmProfilingAdminOnly!=0")
+        available, why = counter_gate_probe(ncu_disc.path)
+    else:
+        available, why = counters_allowed, "静态推断（--no-probe）"
+    state, state_note = classify_counter_state(ncu_disc, counters_allowed, available
+                                               if probe_counters else None)
+    r.counter_state, r.counter_state_note = state, state_note
+    mark = {"available": OK, "denied": FAIL, "not-installed": WARN,
+            "not-in-path": WARN, "unknown": WARN}[state]
+    impacts = {
+        "denied": UNAVAILABLE_REASONS["counters"],
+        "not-installed": ("计数器是否可用**无法判定**：所有候选目录里都没有 ncu。"
+                          "这不等于「被权限限制」——装上 ncu（或用平台文档确认策略）后重跑 "
+                          "doctor 才能定性"),
+        "not-in-path": ("ncu 装在非 PATH 目录里；只看 PATH 的工具会误报「未安装」。"
+                        "本工具已按多路径找到它"),
+        "available": "",
+        "unknown": "无法判定：ncu 存在但探测既没报权限错、也没给出可用证据",
+    }
+    details = {
+        "available": f"实测可用 @ {ncu_disc.path}",
+        "denied": f"{ncu_disc.path} 实测被拒：ERR_NVGPUCTRPERM",
+        "not-installed": f"未找到 ncu（已在 {len(ncu_disc.searched)} 个候选目录里确认）",
+        "not-in-path": f"已安装但不在 PATH：{ncu_disc.path}",
+        "unknown": f"ncu 在 {ncu_disc.path or '?'}，但无法判定：{why}",
+    }
+    r.add("counters", "硬件计数器（ncu）", mark, details[state], impact=impacts[state])
+    if state == "unknown" and not ncu_disc.found:
+        # 没装就当"无法判定"，但把原因说清（不是"被权限限制"）
+        available = None
 
     # ---- 能力矩阵 ----
     caps: list[Capability] = []
-    exact = ["kernel 时长与 launch 配置 (LaunchStats)", "理论 occupancy 上界与限制因素"]
+    exact = ["kernel 时长与 launch 配置 (LaunchStats)",
+             "同一 kernel 的多组 launch 配置（LaunchConfigs，形状扫描用）",
+             "理论 occupancy 上界与限制因素"]
     if cubin:
         exact.append("静态寄存器/共享内存、SASS 指令混合")
     caps.append(Capability("exact", exact,
                            "" if nsys else "缺少 nsys：时长与 LaunchStats 不可得"))
-    measured = ["设备能耗/显存忙碌占比/时钟与功耗（NVML 管理计数器）"]
+    measured = ["NVML 原始读数：显存忙碌占比 / 时钟 / 功耗 / 能量（管理计数器）"]
     if nvbit_hint:
-        measured.append("achieved occupancy（区间重叠）/ 区域级耗时 / 指令归因（需探针或 NVBit）")
+        measured.append("访存轨迹入口（NVBit 外部工具产出的 trace）：sectors/request、"
+                        "合并效率、工作集")
     caps.append(Capability("measured", measured))
-    caps.append(Capability("derived", [
+    # R-13：doctor 的分级必须与报告里实际打出的标签一致
+    caps.append(Capability("estimated", [
+        "DRAM 字节/吞吐代理（NVML 显存忙碌 × 本机实测峰值，误差带见 bench/artifacts）",
         "roofline 与 SpeedOfLight（需 --ks-calibration 本机标定 + 你提供 FLOPs/bytes）",
-        "“是否 DRAM bound”判定（NVML 代理，200ms 区间，误差约 6%）",
+        "访存轨迹的 L1/L2 命中率与 DRAM 字节（缓存模型，上界口径）",
+    ]))
+    caps.append(Capability("derived", [
+        "采样窗口覆盖率（由 NVML 采样点统计）",
+        "账本对拍误差与区间判词（由估算与你的账本推出）",
     ]))
     counter_items = [
         "MemoryWorkloadAnalysis（精确字节/命中率/sector 效率）",
@@ -340,12 +417,13 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
         "SchedulerStats / WarpStateStats（stall 周期归因）",
         "SourceCounters（PC 采样）与 PmSampling",
     ]
-    if counters_allowed:
-        # 计数器可用时这些指标确实拿得到，归入 exact（来源：ncu / CUPTI 计数器）
+    if state == "available":
+        # 计数器可用时这些指标确实拿得到（来源：ncu / CUPTI 计数器）
         caps.append(Capability("exact", [f"ncu：{i}" for i in counter_items]))
     else:
-        reason = UNAVAILABLE_REASONS["counters"] if counters_allowed is False else \
-            "未安装 ncu，无法判定计数器是否可用"
+        reason = UNAVAILABLE_REASONS["counters"] if state in ("denied", "not-in-path") else (
+            "ncu 未安装，无法实测判定计数器是否可用（这只是「无法判定」，"
+            "不等于「被权限限制」；装 ncu 后重跑 doctor --json 可定性）")
         caps.append(Capability("unavailable", counter_items, reason))
     r.capabilities = caps
 
@@ -362,11 +440,22 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
     r.backend_plan = plan
 
     r.advice = [
-        "首次使用先做一次机器标定：`uv run python tools/machine-profile.py`，"
-        "然后加 `--ks-calibration machine-profile.json` 得到可信 roofline",
+        "首次使用先做一次机器标定：`uv run python tools/machine-profile.py --quick`，"
+        "然后加 `--ks-calibration machine-profile.json` 得到可信 roofline"
+        "（标定会同时记录累加口径与口径离散度；缺字段时 compute roof 会被拒绝，见 R-09）",
         "报告里出现 `n/a` 属预期：那是需要硬件计数器的指标，"
         "用 `--strict` 可让 CI 在请求这类数据时直接失败",
+        "想拿账本对拍：`--ks-ledger-mb <每次 launch 的 MB>`（或 --ks-ledger-total-mb 总量口径），"
+        "并让被测 kernel 在紧循环里跑满；默认 `--ks-window auto` 会自动裁掉 import/JIT 的启动开销",
+        "代理口径不成立（显存忙碌读数为 0、窗口覆盖率不足）时，"
+        "用 `--ks-memtrace <trace>` 换用访存轨迹口径做账本对拍（R-33）",
     ]
+    if cubin and disc["cuobjdump"].found_but_not_in_path:
+        r.advice.insert(0, f"cuobjdump 不在 PATH 上（{cubin}）：本工具已自动找到它，"
+                           f"但 `python -m kerneloscope` 之外的工具可能需要 export PATH")
+    if state == "not-in-path":
+        r.advice.insert(0, f"ncu 已安装但不在 PATH（{ncu_disc.path}）：如果只想手工复核权限，"
+                           f"可直接用绝对路径执行 `{ncu_disc.path} --query-metrics`")
     if not nsys:
         r.advice.insert(0, "安装 Nsight Systems（随 CUDA Toolkit 提供，或单独下载）后重试")
     return r
@@ -417,8 +506,19 @@ def render(report: DoctorReport, color: bool = False) -> str:
         for item in cap.items:
             out.append(f"      · {item}")
         if cap.reason:
-            out.append(f"      原因: {cap.reason[:110]}")
+            out.append(f"      原因: {cap.reason[:140]}")
     out.append("")
+
+    if report.tools:
+        out.append("[工具发现（多路径，不只看 PATH）]")
+        for name, t in report.tools.items():
+            if t.get("found"):
+                loc = t["path"] + ("" if t.get("in_path") else "   (不在 PATH 上)")
+            else:
+                loc = f"未找到（找过 {len(t.get('searched_dirs') or [])} 个目录）"
+            out.append(f"  · {name:<12} {loc}")
+        out.append(f"  · 计数器结论: {report.counter_state} —— {report.counter_state_note}")
+        out.append("")
 
     out.append("[后端计划]")
     for p in report.backend_plan:

@@ -37,34 +37,87 @@ class MachinePeaks:
     dtype_key: str
     source: str = "machine-profile"
     raw: dict[str, Any] | None = None
+    profile_path: str = ""
+    calibrated_at: str = ""
+    # R-09/R-10：标定口径。`caliber_ok=False` 时**拒绝用它算拐点**（compute roof 不可用），
+    # 但带宽侧照常可用 —— 字节数与显存忙碌代理不依赖累加口径。
+    caliber_ok: bool = True
+    caliber_note: str = ""
+    caliber_spread_pct: float | None = None
+    caliber_distinguishable: bool | None = None
+    acc_caliber: str = ""
+    precision_settings: dict[str, Any] | None = None
 
     @staticmethod
-    def from_profile(profile: dict[str, Any], dtype: str = "bf16") -> "MachinePeaks":
+    def from_profile(profile: dict[str, Any], dtype: str = "bf16",
+                     profile_path: str = "") -> "MachinePeaks":
         dt = DTYPE_KEY.get(dtype.lower(), "fp16")
         mm = profile.get("measured_matmul_tflops", {})
         # 用 .get()：标定文件里可能没有 matmul 数据（只标了带宽），不能直接下标
         cands = [mm.get(PROFILE_KEY[dt])] if PROFILE_KEY.get(dt) else []
         if dt == "fp16":  # bf16/fp16 都测过，取更好的那个
             cands = [mm.get("torch.bfloat16"), mm.get("torch.float16")]
-        tflops = max((c["tflops"] for c in cands if isinstance(c, dict) and c.get("tflops")),
-                     default=0.0)
+        usable = [c for c in cands if isinstance(c, dict) and c.get("tflops")]
+        tflops = max((c["tflops"] for c in usable), default=0.0)
+        chosen = max(usable, key=lambda c: c["tflops"]) if usable else None
         dram = profile.get("measured_dram", {})
         vals = [v for v in dram.values() if isinstance(v, (int, float))]
         # 默认用 copy 速率：DRAM bound 的 kernel 基本是读写混合，取 max（通常落在 write 峰值）
         # 会系统性高估流量（实测约 +4%）。read 峰值与 copy 峰值一般只差 ~1%。
         bw = dram.get("copy_gbs") if isinstance(dram.get("copy_gbs"), (int, float)) else (
             max(vals) if vals else 0.0)
-        return MachinePeaks(
+
+        caliber_ok, note = True, ""
+        if chosen is None:
+            caliber_ok, note = False, ("标定文件里没有可用的 measured_matmul_tflops 条目："
+                                       "拒绝用它算 compute roof")
+        else:
+            missing = [k for k in ("acc_caliber", "precision_settings", "method")
+                       if k not in chosen]
+            if missing:
+                caliber_ok = False
+                note = (f"标定条目 torch.{dt} 缺少口径字段 {', '.join(missing)}："
+                        f"按 R-09 拒绝用它算 roofline 拐点（累加口径不同实测可差 5%，"
+                        f"见 tools/machine-profile.py 的 caliber 探针）")
+        peaks = MachinePeaks(
             compute_tflops=float(tflops),
             bandwidth_gbs=float(bw),
             dtype_key=dtype,
             source=str(profile.get("gpu", "machine-profile")),
             raw=profile,
+            profile_path=profile_path,
+            calibrated_at=str(profile.get("ts", "")),
+            caliber_ok=caliber_ok,
+            caliber_note=note,
         )
+        if chosen is not None:
+            peaks.acc_caliber = str(chosen.get("acc_caliber", ""))
+            peaks.precision_settings = chosen.get("precision_settings") or None
+            peaks.caliber_spread_pct = chosen.get("caliber_spread_pct")
+            peaks.caliber_distinguishable = chosen.get("caliber_distinguishable")
+            if not peaks.caliber_note and peaks.caliber_distinguishable is False:
+                peaks.caliber_note = (
+                    f"该机三种累加口径设置最大相对差 {peaks.caliber_spread_pct}% —— "
+                    f"不可分辨，说明这一档的「精确单值」本身不可得")
+        return peaks
 
     @staticmethod
     def from_spec(compute_tflops: float, bandwidth_gbs: float, dtype: str = "bf16") -> "MachinePeaks":
-        return MachinePeaks(compute_tflops, bandwidth_gbs, dtype, source="spec/override")
+        return MachinePeaks(compute_tflops, bandwidth_gbs, dtype, source="spec/override",
+                            caliber_ok=False,
+                            caliber_note="峰值来自 --ks-peak-* 覆盖或规格表，不是本机标定："
+                                         "不用于拐点判定（R-09）")
+
+    def source_label(self) -> str:
+        """R-06：峰值必须带来源与时间戳。"""
+        where = self.profile_path or self.source
+        when = f" @ {self.calibrated_at}" if self.calibrated_at else ""
+        cal = f", 累加口径={self.acc_caliber or '未记录'}"
+        spread = (f", 口径离散={self.caliber_spread_pct}%"
+                  if self.caliber_spread_pct is not None else "")
+        return (f"{where}{when}, dtype={self.dtype_key}, "
+                f"bw={self.bandwidth_gbs:.0f} GB/s, compute={self.compute_tflops:.1f} TFLOP/s"
+                f"{cal}{spread}")
 
 
 def gemm_workload(m: int, n: int, k: int, dtype: str = "bf16") -> tuple[float, float]:

@@ -8,9 +8,7 @@ ncu 的 LaunchStats 里 registers/static smem 就是从 cubin 读的；我们用
 from __future__ import annotations
 
 import collections
-import os
 import re
-import shutil
 import subprocess
 
 FUNC_RE = re.compile(r"^\s*Function\s+(\S+?)\s*:?\s*$")
@@ -29,11 +27,13 @@ CATEGORY: list[tuple[str, re.Pattern[str]]] = [
 
 
 def find_cuobjdump() -> str | None:
-    for cand in ("cuobjdump", "/usr/local/cuda/bin/cuobjdump", "/usr/local/cuda-13.0/bin/cuobjdump"):
-        p = shutil.which(cand) or (cand if os.path.exists(cand) else None)
-        if p:
-            return p
-    return None
+    """多路径发现（PATH → CUDA_HOME → /usr/local/cuda-*/bin → 常见目录）。
+
+    与 doctor 共用 `toolchain.discover`，这样"doctor 说没有、后端却找到了"不可能再发生（B3）。
+    """
+    from ..toolchain import find
+
+    return find("cuobjdump")
 
 
 def _run(mode: str, path: str) -> str:

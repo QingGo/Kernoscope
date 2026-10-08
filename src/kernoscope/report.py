@@ -87,6 +87,43 @@ class KernelLaunch:
 
 
 @dataclass
+class LaunchConfig:
+    """一组 launch 配置（grid/block/资源全同）的汇总。
+
+    为什么必须分开：第 4 章的边界矩阵是「8 形状 × 3 版本 = 24 个对拍点」，靠的是同一个
+    kernel 换 launch 配置；第 6 章的 feasible_shapes 同理。把 grid=64/256/1024 三次扫描
+    聚合成一行均值，等于把 24 个对拍点变成 1 个 —— 而且那一行还带着 `[exact]` 标签，
+    陈述了"这个 kernel 的 grid 是 64"，而 2/3 的 launch 不是。
+    """
+
+    key: str
+    grid: tuple[int, int, int]
+    block: tuple[int, int, int]
+    count: int = 0
+    total_ns: int = 0
+    registers_per_thread: int = 0
+    static_smem_bytes: int = 0
+    dynamic_smem_bytes: int = 0
+
+    @property
+    def mean_ns(self) -> float:
+        return self.total_ns / self.count if self.count else 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"config": self.key, "grid": list(self.grid), "block": list(self.block),
+                "launch_count": self.count, "total_ns": self.total_ns,
+                "mean_ns": self.mean_ns, "registers_per_thread": self.registers_per_thread,
+                "static_smem_bytes": self.static_smem_bytes,
+                "dynamic_smem_bytes": self.dynamic_smem_bytes}
+
+
+def config_key(l: "KernelLaunch") -> str:
+    """一组 launch 配置的稳定标识（用于 CSV/JSON/指标名）。"""
+    return (f"grid{l.grid[0]}x{l.grid[1]}x{l.grid[2]}_block{l.block[0]}x{l.block[1]}x{l.block[2]}"
+            f"_smem{l.static_smem_bytes + l.dynamic_smem_bytes}")
+
+
+@dataclass
 class KernelReport:
     """一个 kernel（按名字聚合）的报告。"""
 
@@ -103,6 +140,34 @@ class KernelReport:
         s = Section(name)
         self.sections.append(s)
         return s
+
+    # ---- launch 配置分组（R-04/B4）----
+    @property
+    def configs(self) -> list["LaunchConfig"]:
+        """按 (grid, block, 资源) 分组的 launch 汇总，按 launch 数降序。"""
+        groups: dict[str, LaunchConfig] = {}
+        for l in self.launches:
+            k = config_key(l)
+            c = groups.get(k)
+            if c is None:
+                c = groups[k] = LaunchConfig(
+                    key=k, grid=l.grid, block=l.block,
+                    registers_per_thread=l.registers_per_thread,
+                    static_smem_bytes=l.static_smem_bytes,
+                    dynamic_smem_bytes=l.dynamic_smem_bytes)
+            c.count += 1
+            c.total_ns += l.duration_ns
+        return sorted(groups.values(), key=lambda c: (-c.count, c.key))
+
+    @property
+    def is_mixed_config(self) -> bool:
+        return len(self.configs) > 1
+
+    @property
+    def dominant_config(self) -> "LaunchConfig | None":
+        """launch 数最多的那组配置（occupancy 等单一取值的兜底口径）。"""
+        cfgs = self.configs
+        return cfgs[0] if cfgs else None
 
     # ---- 汇总（全部来自 exact 的 CUPTI activity 时间戳）----
     @property
@@ -187,6 +252,8 @@ class Report:
                     "mean_ns": k.mean_ns,
                     "min_ns": k.min_ns,
                     "max_ns": k.max_ns,
+                    "mixed_config": k.is_mixed_config,
+                    "launch_configs": [c.as_dict() for c in k.configs],
                     "sections": [
                         {
                             "name": s.name,
@@ -201,6 +268,7 @@ class Report:
                                     "source": m.source,
                                     "reason": m.reason,
                                     "note": m.note,
+                                    "resolution": m.resolution,
                                 }
                                 for m in s.metrics
                             ],
@@ -211,6 +279,7 @@ class Report:
                         {
                             "start_ns": l.start_ns,
                             "end_ns": l.end_ns,
+                            "duration_ns": l.duration_ns,
                             "grid": list(l.grid),
                             "block": list(l.block),
                             "registers_per_thread": l.registers_per_thread,
@@ -219,6 +288,7 @@ class Report:
                             "stream_id": l.stream_id,
                             "device_id": l.device_id,
                             "grid_id": l.grid_id,
+                            "config": config_key(l),
                         }
                         for l in k.launches
                     ],
@@ -256,9 +326,25 @@ class Report:
                             source=md.get("source", ""),
                             reason=md.get("reason", ""),
                             note=md.get("note", ""),
+                            resolution=md.get("resolution", ""),
                         )
                     )
                 k.sections.append(s)
+            for ld in kd.get("launches", []):
+                k.launches.append(KernelLaunch(
+                    name=kd["name"], demangled=kd["name"],
+                    start_ns=int(ld["start_ns"]), end_ns=int(ld["end_ns"]),
+                    grid=tuple(ld.get("grid", (1, 1, 1))),      # type: ignore[arg-type]
+                    block=tuple(ld.get("block", (1, 1, 1))),    # type: ignore[arg-type]
+                    registers_per_thread=int(ld.get("registers_per_thread", 0)),
+                    static_smem_bytes=int(ld.get("static_smem_bytes", 0)),
+                    dynamic_smem_bytes=int(ld.get("dynamic_smem_bytes", 0)),
+                    local_mem_per_thread=int(ld.get("local_mem_per_thread", 0)),
+                    stream_id=int(ld.get("stream_id", 0)),
+                    device_id=int(ld.get("device_id", 0)),
+                    grid_id=int(ld.get("grid_id", 0)),
+                    correlation_id=int(ld.get("correlation_id", 0)),
+                ))
             rep.kernels.append(k)
         return rep
 

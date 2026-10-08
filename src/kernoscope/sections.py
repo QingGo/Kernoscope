@@ -18,13 +18,13 @@ from .provenance import Metric, Provenance, Section, UNAVAILABLE_REASONS
 
 # `--set` 的分级（对齐 ncu --list-sets）
 SET_SECTIONS: dict[str, list[str]] = {
-    "basic": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic", "MemoryTrace",
-              "WorkloadDistribution"],
-    "detailed": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic", "MemoryTrace",
-                 "WorkloadDistribution",
+    "basic": ["Duration", "LaunchStats", "LaunchConfigs", "Occupancy", "SpeedOfLight", "DramTraffic",
+              "MemoryTrace"],
+    "detailed": ["Duration", "LaunchStats", "LaunchConfigs", "Occupancy", "SpeedOfLight", "DramTraffic",
+                 "MemoryTrace",
                  "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis", "SourceCounters"],
-    "full": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic", "MemoryTrace",
-             "WorkloadDistribution",
+    "full": ["Duration", "LaunchStats", "LaunchConfigs", "Occupancy", "SpeedOfLight", "DramTraffic",
+             "MemoryTrace", "WorkloadDistribution",
              "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis", "MemoryWorkloadAnalysis_Tables",
              "InstructionStats", "SchedulerStats", "WarpStateStats", "SourceCounters",
              "PmSampling", "Nvlink_Tables", "NumaAffinity"],
@@ -75,6 +75,8 @@ class BuildOptions:
     device_name: str = ""
     arch: str = "sm_89"
     peak_gbs: float = 0.0
+    peak_source: str = ""          # R-06：峰值从哪个标定文件的哪次测量来
+    ledger_basis: str = "auto"     # R-33：账本对拍口径 auto|nvml|trace
     schema_extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -85,79 +87,87 @@ def requested_sections(opt: BuildOptions) -> list[str]:
 
 
 def build_device_kernel(opt: BuildOptions) -> Section:
-    """设备级 section（伪 kernel "(device)"）。"""
+    """设备级 section（伪 kernel "(device)"）。
+
+    命名纪律（R-12）：NVML 的原始读数（时钟/功耗/能量/显存忙碌）是**实测**，
+    用 `meas__` + measured；由它们再算出来的量（等效带宽）是 estimated，用 `est__`。
+    """
     s = Section("DeviceStatistics")
     n = opt.nvml_summary
     if n:
         if "mem_util_mean" in n:
-            s.add(Metric.estimated(
-                "meas__dram_busy_proxy_pct", round(n["mem_util_mean"], 1), "%",
-                source="NVML utilization.memory (200ms interval average)",
-                note="区间平均；必须让 GPU 保持饱和，否则会被宿主间隙稀释（实测 96.8% vs 6.3%）",
+            # R-31：把 NVML 自身的分辨率与采样周期随数字一起报出来。
+            s.add(Metric.measured(
+                "meas__nvml_mem_busy_mean_pct", round(n["mem_util_mean"], 1), "%",
+                source="NVML utilization.memory（显存子系统忙碌时间占比，管理计数器，免 admin）",
+                note=("区间平均；是「显存子系统忙碌占比」，不是 DRAM 吞吐本身。"
+                      "读数 0.0% 只说明低于分辨率下限，不等于「DRAM 完全没动」；"
+                      "必须让 GPU 保持饱和，否则会被宿主间隙稀释（实测 96.8% vs 6.3%）"),
+                resolution="1 %（整数百分比）",
             ))
             if opt.peak_gbs:
                 s.add(Metric.estimated(
-                    "meas__dram_busy_proxy_gbs", round(n["mem_util_mean"] / 100.0 * opt.peak_gbs, 1),
-                    "GB/s",
-                    source=f"NVML mem_util x measured peak {opt.peak_gbs:.0f} GB/s",
-                    note="稳态代理，实测误差约 6%",
+                    "est__dram_busy_equivalent_gbs",
+                    round(n["mem_util_mean"] / 100.0 * opt.peak_gbs, 1), "GB/s",
+                    source=f"NVML mem_util × 本机实测峰值 {opt.peak_gbs:.0f} GB/s"
+                           + (f"（{opt.peak_source}）" if opt.peak_source else ""),
+                    note="等效带宽口径；与按字节/时间的口径略有差异", resolution="1 %",
                 ))
         for key, name, unit in (("sm_clock_mean", "meas__sm_clock_mean_mhz", "MHz"),
                                 ("sm_clock_max", "meas__sm_clock_max_mhz", "MHz"),
                                 ("power_max", "meas__power_max_w", "W")):
             if key in n:
-                s.add(Metric.measured(name, round(n[key], 1), unit, source="nvidia-smi / NVML"))
+                s.add(Metric.measured(name, round(n[key], 1), unit,
+                                      source="nvidia-smi / NVML（管理计数器，免 admin）",
+                                      resolution="1 MHz / 1 W（驱动报数粒度）"))
         if n.get("energy_j"):
             s.add(Metric.measured("meas__device_energy_j", round(n["energy_j"], 3), "J",
                                   source="NVML total energy accumulator",
-                                  note="ncu 不提供能耗指标"))
+                                  note="ncu 不提供能耗指标", resolution="1 mJ"))
     if not s.metrics:
-        s.add(Metric.unavailable("meas__dram_busy_proxy_pct",
-                                 "NVML sampling disabled or unavailable (--ks-no-nvml?)"))
+        s.add(Metric.unavailable("meas__nvml_mem_busy_mean_pct",
+                                 "没有 NVML 采样点：采样被关闭（--ks-no-nvml）或 nvidia-smi/pynvml "
+                                 "不可用；没有它就无法给出显存忙碌代理",
+                                 source="NVML"))
     return s
 
 
 def build_dram_section(opt: BuildOptions) -> Section | None:
     """DRAM 流量估算 section（对标 ncu 的 MemoryWorkloadAnalysis / dram__bytes）。
 
-    诚实性处理：占空比过低或缺少实测峰值带宽时，**不给数字**，改为 unavailable + 原因 ——
-    否则会给出一个被空闲稀释、系统性偏小的值（实测同一拷贝 96.8% vs 6.3%）。
+    诚实性处理：任一口径前提不成立就**不给数字**，改为 unavailable + 原因 ——
+    但那一行必须**存在**（B1：口径不成立时"拒绝"退化成"消失"是不可接受的），
+    且原因必须点明哪个前提没成立（R-32），不是复述算法定义。
     """
     est = opt.dram
     if est is None:
         return None
     s = Section("DramTraffic")
-    if not est.reliable or est.bytes_total <= 0:
-        reason = "；".join(est.notes) or "无法估算（缺少采样或峰值带宽）"
-        s.add(Metric.unavailable("est__dram_bytes_total", reason))
-        return s
     from .analyze.dram import to_metrics
 
-    for name, value, unit, source, note in to_metrics(est):
+    for name, value, unit, source, note, resolution in to_metrics(est, opt.ledger_basis):
         if value is None:
-            continue
-        # per-launch / 吞吐占比需要"窗口被该 kernel 主导"，否则只能给 n/a
-        if name in ("est__dram_vs_ledger_err_pct", "est__dram_range_position_pct") and value is None:
-            s.add(Metric.unavailable(
-                name, "账本对拍的口径不成立：per-launch 需要「单一 kernel 主导窗口 + 占空比 ≥80%」，"
-                      f"当前占空比 {est.duty_pct:.0f}%、kernel 数 {'1' if est.attributable else '不确定'}"
-                      "；请用 -k 锁定单个 kernel 并让它跑满窗口"))
-            continue
-        if name == "est__dram_bytes_per_launch" and not est.attributable:
-            s.add(Metric.unavailable(
-                name,
-                f"占空比 {est.duty_pct:.0f}% 或未锁定单一 kernel：无法把 {est.bytes_total / 1e6:.0f} MB "
-                f"总量归因到每个 launch（请用 -k 选单个 kernel，并让它在紧循环里跑满）"))
-            continue
-        s.add(Metric.estimated(name, value, unit, source=source, note=note))
+            s.add(Metric.unavailable(name, est.reason_for(name, opt.ledger_basis),
+                                     source=source, resolution=resolution))
+        elif name == "ks__ledger_range_verdict":
+            s.add(Metric.derived(name, value, unit, source=source, note=note,
+                                 resolution=resolution))
+        elif name.startswith("ks__"):
+            # 由实测样本再算出来的统计量/判词：derived（不是"实测读数"，R-12）
+            s.add(Metric.derived(name, value, unit, source=source, note=note,
+                                 resolution=resolution))
+        else:
+            s.add(Metric.estimated(name, value, unit, source=source, note=note,
+                                   resolution=resolution))
     return s
 
 
 def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
     """访存轨迹 section（NVBit 插桩口径）。
 
-    provenance 规则：`meas__` 前缀 → measured（采样比 <100% 时为 estimated，
-    因为样本代表性是假设）；`est__` 前缀 → estimated。前缀本身由 R3 强制。
+    provenance 规则：全量轨迹 → `meas__` + measured；**按采样比放大**的轨迹不是"实测读数"
+    （样本代表性是假设），此时前缀改为 `est__` + estimated（R-12：名字承诺什么，
+    出处就得是什么）。前缀本身由 R3 强制。
     """
     from .analyze.memtrace import to_metrics
 
@@ -168,7 +178,10 @@ def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
     for name, value, unit, source, note in to_metrics(st):
         if value is None:
             continue
-        if name.startswith("meas__") and not sampled:
+        if name.startswith("meas__") and sampled:
+            name = "est__" + name[len("meas__"):]
+            note = f"{note}；**按 {st.sampling_ratio * 100:.1f}% 采样放大 → estimated**"
+        if name.startswith("meas__"):
             s.add(Metric.measured(name, value, unit, source=source, note=note))
         else:
             s.add(Metric.estimated(name, value, unit, source=source, note=note))
@@ -191,7 +204,15 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
     """为一个聚合后的 kernel 生成 section 列表。"""
     out: list[Section] = []
     want = set(requested_sections(opt))
-    launch = kr.launches[0] if kr.launches else None
+    # B4：同一 kernel 可能以多组 launch 配置运行（形状扫描）。聚合行的单一
+    # launch__grid_size 会陈述一个"多数 launch 不成立"的事实，所以混合时改为 n/a + 取值集合，
+    # 并在 LaunchConfigs section 里逐组给出时间与 occupancy。
+    configs = kr.configs
+    mixed = len(configs) > 1
+    dominant = configs[0] if configs else None
+    launch = _launch_for_config(kr, dominant.key) if dominant is not None else None
+    if launch is None:
+        launch = kr.launches[0] if kr.launches else None
     if launch is None:
         return out
 
@@ -201,12 +222,18 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
         s.add(Metric.exact("gpu__time_duration.sum", round(kr.total_ns / 1e6, 4), "ms",
                            source="CUPTI activity timestamps (nsys sqlite)"))
         s.add(Metric.exact("ks__launch_time_mean", round(kr.mean_ns / 1e6, 4), "ms",
-                           source="CUPTI activity timestamps"))
+                           source="CUPTI activity timestamps",
+                           note=("**多组 launch 配置的混合均值**，不可当作某一组配置的读数"
+                                 if mixed else "")))
         s.add(Metric.exact("ks__launch_time_min", round(kr.min_ns / 1e6, 4), "ms",
                            source="CUPTI activity timestamps"))
         s.add(Metric.exact("ks__launch_time_max", round(kr.max_ns / 1e6, 4), "ms",
                            source="CUPTI activity timestamps"))
         s.add(Metric.exact("ks__launch_count", kr.launch_count, "", source="CUPTI activity"))
+        if mixed:
+            s.add(Metric.exact("ks__launch_config_count", len(configs), "",
+                               source="distinct (grid, block, smem) tuples in CUPTI activity",
+                               note="逐组读数见 LaunchConfigs section"))
         out.append(s)
 
     # ---------------- LaunchStats ----------------
@@ -215,10 +242,28 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
         gx, gy, gz = launch.grid
         bx, by, bz = launch.block
         threads = bx * by * bz
-        s.add(Metric.exact("launch__grid_size", gx * gy * gz, "", source="CUPTI activity"))
-        s.add(Metric.exact("launch__block_size", threads, "", source="CUPTI activity"))
-        s.add(Metric.exact("launch__thread_count", threads * gx * gy * gz, "",
-                           source="CUPTI activity"))
+        if mixed:
+            grids = sorted({c.grid[0] * c.grid[1] * c.grid[2] for c in configs})
+            blocks = sorted({c.block[0] * c.block[1] * c.block[2] for c in configs})
+            s.add(Metric.unavailable(
+                "launch__grid_size",
+                f"该 kernel 有 {len(configs)} 组不同 launch 配置（grid="
+                f"{'/'.join(str(g) for g in grids)}）：单一数值会误导 2/3 的 launch，"
+                f"故报 n/a；逐组读数见 LaunchConfigs section"))
+            s.add(Metric.unavailable(
+                "launch__block_size",
+                f"该 kernel 有 {len(configs)} 组不同 launch 配置（block="
+                f"{'/'.join(str(b) for b in blocks)}）：单一数值会误导，故报 n/a"))
+            s.add(Metric.exact("ks__grid_sizes_observed", "|".join(str(g) for g in grids), "",
+                               source="distinct grid sizes in CUPTI activity",
+                               note="取值集合口径（R-04）；逐组时长见 LaunchConfigs"))
+            s.add(Metric.exact("ks__block_sizes_observed", "|".join(str(b) for b in blocks), "",
+                               source="distinct block sizes in CUPTI activity"))
+        else:
+            s.add(Metric.exact("launch__grid_size", gx * gy * gz, "", source="CUPTI activity"))
+            s.add(Metric.exact("launch__block_size", threads, "", source="CUPTI activity"))
+            s.add(Metric.exact("launch__thread_count", threads * gx * gy * gz, "",
+                               source="CUPTI activity"))
         s.add(Metric.exact("launch__registers_per_thread", launch.registers_per_thread, "",
                            source="CUPTI activity (nsys)"))
         # 交叉校验 + 决定 occupancy 用哪个值
@@ -248,7 +293,29 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                            source="CUPTI activity"))
         if launch.is_cuda_graph:
             s.add(Metric.exact("ks__cuda_graph_capture", "yes", "", source="CUPTI gridId != 0"))
+        if mixed and dominant is not None:
+            s.add(Metric.exact("ks__dominant_config", dominant.key, "",
+                               source="launch 数最多的那组配置",
+                               note=f"{dominant.count}/{kr.launch_count} 次 launch；"
+                                    f"本节未标注逐组的数值均取这组配置"))
         out.append(s)
+
+    # ---------------- LaunchConfigs（逐组配置，R-04/B4）----------------
+    if "LaunchConfigs" in want and mixed:
+        sec = Section("LaunchConfigs")
+        for c in configs:
+            occ_c = _occupancy_for(c, opt)
+            sec.add(Metric.exact(f"ks__cfg_{c.key}__launch_time_mean_ms",
+                                 round(c.mean_ns / 1e6, 4), "ms",
+                                 source="CUPTI activity timestamps（按组筛选）"))
+            sec.add(Metric.exact(f"ks__cfg_{c.key}__launch_count", c.count, "",
+                                 source="CUPTI activity"))
+            if occ_c is not None:
+                sec.add(Metric.exact(f"ks__cfg_{c.key}__theoretical_occupancy_pct",
+                                     round(occ_c.occupancy_pct, 1), "%",
+                                     source=f"arithmetic from CUPTI stats + {opt.arch} limits "
+                                            f"(limiter={occ_c.limiter})"))
+        out.append(sec)
 
     # ---------------- Occupancy ----------------
     if "Occupancy" in want:
@@ -269,7 +336,9 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                            source="arithmetic (theoretical)"))
         s.add(Metric.exact("ks__occupancy_limiter", occ.limiter, "",
                            source="arithmetic (theoretical)",
-                           note="并列的限制因素用 + 连接"))
+                           note=("并列的限制因素用 + 连接"
+                                 + (f"；本节按主导配置 {dominant.key} 计算，逐组见 LaunchConfigs"
+                                    if mixed and dominant is not None else ""))))
         # ncu 的 achieved occupancy：计数器实现 → 我们只能标 unavailable 或给出 meas__
         ach = _lookup_in(opt.achieved_occupancy, kr)
         if ach:
@@ -291,23 +360,51 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
         if opt.workload and opt.peaks:
             flops, bytes_ = opt.workload
             sol = SpeedOfLight(float(kr.mean_ns), flops, bytes_, opt.peaks)
-            s.add(Metric.estimated("est__achieved_tflops", round(sol.achieved_tflops, 2), "TFLOP/s",
-                                   source=f"user-provided workload / CUPTI duration",
-                                   note=opt.workload_note))
+            peak_src = f"measured peak ({opt.peak_source})" if opt.peak_source else "measured peak"
+            caliber_ok = getattr(opt.peaks, "caliber_ok", True)
+            caliber_note = getattr(opt.peaks, "caliber_note", "")
             s.add(Metric.estimated("est__achieved_gbs", round(sol.achieved_gbs, 1), "GB/s",
                                    source="user-provided bytes / CUPTI duration"))
-            s.add(Metric.estimated("est__pct_of_measured_compute_peak", round(sol.pct_compute, 1), "%",
-                                   source=f"measured peak {opt.peaks.compute_tflops:.1f} TFLOP/s "
-                                          f"({opt.peaks.dtype_key})"))
             s.add(Metric.estimated("est__pct_of_measured_bw_peak", round(sol.pct_memory, 1), "%",
-                                   source=f"measured peak {opt.peaks.bandwidth_gbs:.0f} GB/s"))
-            s.add(Metric.estimated("est__roofline_ideal_ns", round(max(sol.ideal_ns_compute,
-                                                                      sol.ideal_ns_memory), 1), "ns",
-                                   source="roofline with measured peaks"))
-            s.add(Metric.estimated("est__bound", sol.bound, "",
-                                   source="compute vs memory roof"))
-            s.add(Metric.estimated("est__roofline_efficiency_pct", round(sol.efficiency_pct, 1), "%",
-                                   source="ideal / measured"))
+                                   source=f"{peak_src} {opt.peaks.bandwidth_gbs:.0f} GB/s"))
+            if caliber_ok and opt.peaks.compute_tflops > 0:
+                s.add(Metric.estimated("est__achieved_tflops", round(sol.achieved_tflops, 2),
+                                       "TFLOP/s", source=peak_src.replace("measured peak",
+                                                                          "user-provided workload / CUPTI duration, measured peak"),
+                                       note=opt.workload_note))
+                s.add(Metric.estimated("est__pct_of_measured_compute_peak", round(sol.pct_compute, 1),
+                                       "%", source=f"{peak_src} {opt.peaks.compute_tflops:.1f} TFLOP/s "
+                                                   f"({opt.peaks.dtype_key})"))
+                s.add(Metric.estimated("est__roofline_ideal_ns", round(max(sol.ideal_ns_compute,
+                                                                           sol.ideal_ns_memory), 1),
+                                       "ns", source="roofline with measured peaks"))
+                s.add(Metric.estimated("est__bound", sol.bound, "",
+                                       source="compute vs memory roof",
+                                       note=caliber_note))
+                s.add(Metric.estimated("est__roofline_efficiency_pct", round(sol.efficiency_pct, 1),
+                                       "%", source="ideal / measured"))
+                if getattr(opt.peaks, "caliber_spread_pct", None):
+                    s.add(Metric.estimated(
+                        "ks__calibration_caliber_spread_pct", opt.peaks.caliber_spread_pct, "%",
+                        source="machine-profile.py 的三种累加口径设置之差",
+                        note=("口径可分辨时，roofline 在拐点附近的判定会随设置翻转 —— "
+                              "单值不可当作精确值" if getattr(opt.peaks, "caliber_distinguishable",
+                                                              True) else
+                              "三种设置不可分辨：该档口径不可得，单值只是同一台机器上的一个样本")))
+            else:
+                # R-09/R-10：标定文件没记累加口径 → **拒绝用它算拐点**（但带宽侧照常）
+                s.add(Metric.unavailable(
+                    "est__achieved_tflops",
+                    "拒绝用该标定算 roofline 拐点：" + (caliber_note or
+                    "machine-profile.json 的 measured_matmul_tflops 缺少 acc_caliber / "
+                    "precision_settings / method 字段。请用新版 tools/machine-profile.py 重新标定"),
+                    source="calibration caliber check (R-09)"))
+                s.add(Metric.unavailable(
+                    "est__pct_of_measured_compute_peak",
+                    "同上：缺累加口径字段的 matmul 峰值不能用于拐点判定（R-09）"))
+                s.add(Metric.unavailable(
+                    "est__bound",
+                    "同上：compute roof 不可用，无法判定 compute/memory bound（R-09）"))
             s.add(Metric.estimated("est__arithmetic_intensity", round(sol.arithmetic_intensity, 2),
                                    "FLOP/B", source="user-provided workload"))
         else:
@@ -355,6 +452,27 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
             out.append(sec)
 
     return out
+
+
+def _launch_for_config(kr, key: str):
+    """取某一组配置的代表 launch（该组第一次）。"""
+    from .report import config_key
+
+    for l in kr.launches:
+        if config_key(l) == key:
+            return l
+    return None
+
+
+def _occupancy_for(config, opt: BuildOptions):
+    """按一组 launch 配置算理论 occupancy（B4：逐组配置的读数）。"""
+    try:
+        return theoretical_occupancy(config.registers_per_thread, config.static_smem_bytes,
+                                     config.dynamic_smem_bytes,
+                                     config.block[0] * config.block[1] * config.block[2],
+                                     opt.arch)
+    except Exception:  # noqa: BLE001 - occupancy 是加分项，不能让它挡住报告
+        return None
 
 
 # token 匹配时忽略这些"到处都有"的词，避免把 Kernel2 匹配到 Kernel3

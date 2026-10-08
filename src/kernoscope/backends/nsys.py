@@ -14,7 +14,6 @@ localMemoryPerThread / gridId。
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -31,10 +30,19 @@ class NsysError(RuntimeError):
 
 
 def find_nsys() -> str | None:
-    for cand in ("nsys", "/usr/local/bin/nsys", "/opt/nvidia/nsight-systems/latest/nsys"):
-        p = shutil.which(cand) or (cand if os.path.exists(cand) else None)
-        if p:
-            return p
+    """多路径发现（与 doctor 用同一份逻辑，避免"同一台机器两个答案"）。"""
+    from ..toolchain import find
+
+    p = find("nsys")
+    if p:
+        return p
+    for cand in ("/opt/nvidia/nsight-systems/latest/nsys",
+                 "/opt/nvidia/nsight-systems/*/bin/nsys"):
+        import glob
+
+        for hit in glob.glob(cand):
+            if os.path.exists(hit):
+                return hit
     return None
 
 
@@ -166,7 +174,9 @@ SMI_FIELDS = ("name,driver_version,compute_cap,memory.total,clocks.max.sm,power.
 
 
 def device_info_from_smi() -> DeviceInfo:
-    smi = shutil.which("nvidia-smi")
+    from ..toolchain import find
+
+    smi = find("nvidia-smi")
     if not smi:
         return DeviceInfo()
     q = ("--query-gpu=name,driver_version,compute_cap,memory.total,clocks.max.sm,power.limit,"

@@ -32,7 +32,7 @@ from .backends import nsys as nsys_backend
 from .backends.nvml import Sampler
 from .provenance import Metric, Provenance, UNAVAILABLE_REASONS
 from .report import DeviceInfo, KernelLaunch, KernelReport, Report
-from .render import render_csv, render_perfetto, render_text
+from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
                        build_device_kernel, build_dram_section, build_kernel_sections,
                        requested_sections)
@@ -46,8 +46,6 @@ NOOP_FLAGS = [
     "--warp-sampling-max-passes", "--mps", "--mps-num-clients", "--mps-timeout",
     "--pipeline-boost-state", "--preload-library", "--import-sass", "--import-source",
 ]
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=PROG,
@@ -72,18 +70,26 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-c", "--launch-count", type=int, default=0,
                    help="每个 kernel 最多报告的 launch 数（0=全部）")
     g.add_argument("--target-processes", default="all", choices=["all", "application-only"])
-    g.add_argument("--devices", default=None, help="(accepted; 单卡环境取第一个)")
+    g.add_argument("--devices", default=None,
+                   help="只报告这些设备上的 launch（逗号分隔的 deviceId；默认全部）")
 
     o = p.add_argument_group("ncu-compatible: output")
     o.add_argument("-o", "--export", default=None, help="输出基名（写 <base>.ksreport.json）")
     o.add_argument("-f", "--force-overwrite", action="store_true")
     o.add_argument("--csv", action="store_true", help="以 CSV 输出（含 provenance 列）")
+    o.add_argument("--launch-csv", action="store_true",
+                   help="以 CSV 输出**每个 launch 一行**（grid/block/时长），形状扫描直接可用")
     o.add_argument("--print-summary", default="none", choices=["none", "per-kernel"])
-    o.add_argument("--print-details", default="header", help="(accepted)")
-    o.add_argument("--print-metric-name", default="name", help="(accepted)")
-    o.add_argument("--print-units", default="base", choices=["base", "auto"], help="(accepted)")
+    o.add_argument("--print-details", default="all", choices=["all", "header"],
+                   help="all=铺开所有指标（默认）；header=只打印 kernel/section 头")
+    o.add_argument("--print-metric-name", default="name", choices=["name", "full", "base"],
+                   help="name=指标名（默认）；full=带 section 前缀；base=同 name"
+                        "（去掉 est__/meas__ 前缀会隐藏出处，本工具不做）")
+    o.add_argument("--print-units", default="auto", choices=["base", "auto"],
+                   help="base=原始单位；auto=自适应换单位（MB→GB/TB，默认）")
     o.add_argument("--page", default="details", choices=["details", "raw", "source"],
-                   help="details=默认；raw=额外打印每个指标的数据来源")
+                   help="details=默认；raw=额外打印每个指标的数据来源；"
+                        "source=同 raw（SASS/源码对照不可得，会给出说明）")
     o.add_argument("-i", "--import", dest="import_report", default=None,
                    help="回读我们自己的 .ksreport.json（对标 ncu -i）")
     o.add_argument("--list-sets", action="store_true", help="列出 --set 可选面板")
@@ -127,6 +133,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="账本预测的整窗口 DRAM 字节数（MB，总量口径）：与整窗口估算对拍")
     k.add_argument("--ks-ledger-range-mb", default=None,
                    help="账本给出的区间 LOW,HIGH（MB）：报告里给出估算落在区间的哪一侧")
+    k.add_argument("--ks-ledger-basis", default="auto", choices=["auto", "nvml", "trace"],
+                   help="账本对拍用哪条口径：auto=能用 NVML 代理就用它，否则退回访存轨迹；"
+                        "nvml=只用 NVML 代理；trace=只用轨迹（两条口径不混用）")
+    k.add_argument("--ks-window", default="auto", choices=["auto", "full"],
+                   help="采样窗口：auto=按首个/末个 kernel 活动自动裁到稳态段（默认，"
+                        "避免被 import torch / JIT 的 9~10 秒稀释）；full=用整段采样窗")
+    k.add_argument("--ks-warmup", type=float, default=0.0,
+                   help="从首个采样点起再丢掉 N 秒（跳过启动/JIT；与 --ks-window 叠加）")
+    k.add_argument("--ks-window-s", type=float, default=None,
+                   help="只保留从采样起点算起的 N 秒窗口（成本可预算）")
     k.add_argument("--ks-memtrace", default=None,
                    help="NVBit 访存轨迹（ks-memtrace v1）：给出 sectors/request、合并效率、"
                         "L1/L2 命中率模型与 trace 口径的 DRAM 字节")
@@ -202,7 +218,10 @@ def load_synthetic() -> list[KernelLaunch]:
 
 
 def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str, Any], int]:
-    """返回 (launches, extra_meta, target_exit_code)。"""
+    """返回 (launches, extra_meta, target_exit_code)。
+
+    R-19：缺依赖/文件不存在时给**自家风格的错误 + 安装建议**，不能抛裸 traceback。
+    """
     meta: dict[str, Any] = {}
     rc = 0
     if args.ks_synthetic:
@@ -239,6 +258,22 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
     return launches, meta, rc
 
 
+def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str, Any], int] | None:
+    """采集，并把后端异常翻译成一行可读错误（R-19）。"""
+    try:
+        return collect(args, log)
+    except nsys_backend.NsysError as e:
+        log(f"error: {e}")
+        log("hint: nsys 随 CUDA Toolkit 提供（或单独安装 Nsight Systems）。"
+            "若已有 .nsys-rep / sqlite，可用 --ks-nsys-rep <file> 或 --ks-sqlite <db> 跳过采集；"
+            "没有 GPU 时用 --ks-synthetic 跑通流程。")
+        return None
+    except OSError as e:
+        log(f"error: 采集失败：{e}")
+        log("hint: 检查路径是否存在与权限；--ks-sqlite/--ks-nsys-rep 需要可读的文件。")
+        return None
+
+
 # --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
@@ -269,6 +304,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.quiet:
             print(msg, file=sys.stderr)
 
+    # ---------- 显示开关的诚实性（B6：不允许"接受但静默忽略"）----------
+    if args.print_metric_name == "base":
+        log("warn: --print-metric-name base 会去掉 est__/meas__/ks__ 前缀，"
+            "而那正是出处标签的一部分；本工具按 name 处理并保留前缀。")
+    if args.page == "source":
+        log("warn: --page source 退化为 raw（打印每个指标的 source）；"
+            "SASS/源码逐行对照需要 --import-source，本工具不实现，"
+            "对应的 ncu section 会以 n/a + 原因出现。")
+
     # ---------- 回读模式 ----------
     if args.import_report:
         rep = Report.from_dict(json.loads(Path(args.import_report).read_text()))
@@ -294,7 +338,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     sampler_ctx = Sampler(enabled=not args.ks_no_nvml)
     t0 = time.monotonic()
     with sampler_ctx as sampler:
-        launches, meta, target_rc = collect(args, log)
+        collected = _collect_or_report(args, log)
+        if collected is None:
+            return 1
+        launches, meta, target_rc = collected
     wall_ns = int((time.monotonic() - t0) * 1e9)
 
     # ---------- 设备信息 ----------
@@ -325,13 +372,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     peaks: MachinePeaks | None = None
     if args.ks_calibration:
         prof = json.loads(Path(args.ks_calibration).read_text())
-        peaks = MachinePeaks.from_profile(prof, args.ks_dtype)
+        peaks = MachinePeaks.from_profile(prof, args.ks_dtype, profile_path=args.ks_calibration)
+        if not peaks.caliber_ok:
+            log(f"warn: 标定口径不可用 —— {peaks.caliber_note}")
+        else:
+            log(f"calibration: {peaks.source_label()}")
     if args.ks_peak_tflops or args.ks_peak_gbps:
         peaks = MachinePeaks.from_spec(
             args.ks_peak_tflops or (peaks.compute_tflops if peaks else 0.0),
             args.ks_peak_gbps or (peaks.bandwidth_gbs if peaks else 0.0),
             args.ks_dtype,
         )
+        peaks.profile_path = args.ks_calibration or ""
+        log("warn: 峰值被 --ks-peak-* 覆盖：来源不是本机标定，roofline 拐点判定按 R-09 置为不可用")
     workload = None
     workload_note = ""
     if args.ks_gemm:
@@ -371,6 +424,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not launches:
         log("error: no kernel activity found (was the run collected with --trace=cuda?)")
         return 1
+    if args.devices:
+        try:
+            want_dev = {int(x) for x in str(args.devices).replace(" ", "").split(",") if x != ""}
+        except ValueError:
+            log(f"error: --devices 需要逗号分隔的整数设备号，收到 {args.devices!r}")
+            return 1
+        before = len(launches)
+        launches = [l for l in launches if l.device_id in want_dev]
+        log(f"--devices {sorted(want_dev)}: 保留 {len(launches)}/{before} 条 launch 记录")
+        if not launches:
+            log(f"error: 这些设备上没有 kernel activity（可用 deviceId="
+                f"{sorted({l.device_id for l in launches}) or '无'}）。")
+            return 1
     matched = select_launches(launches, args.kernel_name, args.launch_skip,
                               args.launch_count, args.launch_skip_before_match)
     if not matched:
@@ -392,10 +458,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             log(f"error: --ks-ledger-range-mb 解析失败（{e}）；应形如 LOW,HIGH")
             return 1
 
-    # ---------- DRAM 流量估算（NVML 代理）----------
+    # ---------- DRAM 流量估算（NVML 代理；失败时可用轨迹口径对拍）----------
     from .analyze.dram import estimate as estimate_dram
 
     memtrace_stats = {}
+    trace_bytes_per_launch = None
+    trace_kernel = ""
+    trace_reason = "未提供访存轨迹：加 --ks-memtrace <file> 可换用轨迹口径（R-33）"
     if args.ks_memtrace:
         from .analyze.memtrace import analyze_memtrace
         from .backends.memtrace import MemTraceError, load_memtrace
@@ -404,6 +473,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _tr = load_memtrace(args.ks_memtrace)
             _st = analyze_memtrace(_tr, l2_bytes=args.ks_l2_bytes or None)
             memtrace_stats[_st.kernel] = _st
+            trace_kernel = _st.kernel
+            trace_bytes_per_launch = _st.dram_bytes_per_launch
+            trace_reason = _st.dram_bytes_unavailable_reason
             log(f"memtrace: {_st.kernel} 载入 {_st.records} 条记录")
         except (OSError, MemTraceError) as e:
             log(f"error: 访存轨迹读取失败: {e}")
@@ -413,16 +485,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     for l in matched:
         grouped_dram.setdefault(l.display_name(args.kernel_name_base), []).append(l)
     peak_gbs = float(args.ks_peak_gbps or (peaks.bandwidth_gbs if peaks else 0.0) or 0.0)
+    peak_source = ""
+    if args.ks_peak_gbps:
+        peak_source = "--ks-peak-gbps 覆盖值"
+    elif peaks is not None:
+        peak_source = peaks.source_label()
     launches_for_dram = len(next(iter(grouped_dram.values()))) if len(grouped_dram) == 1 else 0
     dram_est = estimate_dram(
         sampler.result.samples, peak_gbs=peak_gbs, window_s=wall_ns / 1e9,
         launches=launches_for_dram,
         ledger_per_launch=ledger_per_launch, ledger_total=ledger_total,
         ledger_range=ledger_range,
+        peak_source=peak_source,
+        window_mode=args.ks_window,
+        warmup_s=args.ks_warmup or 0.0,
+        window_limit_s=args.ks_window_s,
+        trace_bytes_per_launch=(trace_bytes_per_launch if len(grouped_dram) == 1 else None),
+        trace_kernel=trace_kernel,
+        trace_unavailable_reason=trace_reason,
     )
     if len(grouped_dram) != 1:
         dram_est.notes.append(
             f"匹配到 {len(grouped_dram)} 个 kernel：per-launch 口径不适用，只给总量")
+        dram_est.trace_bytes_per_launch = None
+        dram_est.trace_unavailable_reason = (
+            f"匹配到 {len(grouped_dram)} 个 kernel：轨迹口径的 per-launch 字节不适用，"
+            f"请用 -k 只选一个 kernel")
 
     # ---------- 组装报告 ----------
     from .analyze.occupancy import arch_for
@@ -442,6 +530,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         device_name=device.name,
         arch=arch,
         peak_gbs=peak_gbs,
+        peak_source=peak_source,
+        ledger_basis=args.ks_ledger_basis,
         dram=dram_est,
         memtrace=memtrace_stats,
     )
@@ -489,25 +579,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         if wall_ns:
             rep.meta["kernel_time_pct"] = 100.0 * rep.total_kernel_ns / wall_ns
     rep.generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    rep.meta["window"] = (
+        f"mode={dram_est.window_mode}{'（已裁剪）' if dram_est.trimmed else ''} "
+        f"采样 {dram_est.n_samples} 点 / 参与积分 {dram_est.window_used_s:.1f} s / "
+        f"裁掉 {dram_est.window_dropped_s:.1f} s / 进程 wall {wall_ns / 1e9:.1f} s"
+        + (f" / --ks-warmup {args.ks_warmup:g}s" if args.ks_warmup else "")
+        + (f" / --ks-window-s {args.ks_window_s:g}s" if args.ks_window_s else ""))
     if dram_est.reliable and dram_est.bytes_total > 0:
         summary = (f"DRAM 估算 {dram_est.bytes_total / 1e6:.1f} MB"
-                   f"（忙碌 {dram_est.busy_pct_mean:.1f}% × 峰值 {dram_est.peak_gbs:.0f} GB/s，"
-                   f"占空比 {dram_est.duty_pct:.0f}%）")
+                   f"（显存忙碌 {dram_est.mem_util_pct_mean:.1f}% × 峰值 {dram_est.peak_gbs:.0f} GB/s，"
+                   f"窗口覆盖率 {dram_est.window_coverage_pct:.0f}%）")
         if dram_est.bytes_per_launch is not None:
             summary += f" → {dram_est.bytes_per_launch / 1e6:.2f} MB/launch"
-        if dram_est.ledger_basis:
-            ref = dram_est.ledger_per_launch if dram_est.ledger_per_launch is not None else dram_est.ledger_total
+        if dram_est.ledger_requested:
+            ref = dram_est.reference_bytes()
             basis = "per-launch" if dram_est.ledger_basis == "per-launch" else "总量"
-            if dram_est.ledger_err_pct is None:
-                summary += f"；账本对拍（{basis}）口径不成立，未给误差"
+            err = dram_est.ledger_err_pct_for(args.ks_ledger_basis)
+            if err is None:
+                summary += (f"；账本对拍（{basis}）口径不成立，未给误差"
+                            f"（原因见 DramTraffic section 的 n/a 行）")
             else:
-                summary += (f"；vs 账本 {ref / 1e6:.1f} MB（{basis}），"
-                            f"误差 {dram_est.ledger_err_pct:+.1f}%")
+                used = dram_est.basis_label(args.ks_ledger_basis)
+                summary += (f"；vs 账本 {(ref or 0) / 1e6:.1f} MB（{basis}，口径 {used}），"
+                            f"误差 {err:+.1f}%")
         if dram_est.ledger_range:
-            summary += f"；{dram_est.range_verdict}"
+            summary += f"；{dram_est.range_verdict_for(args.ks_ledger_basis)}"
         rep.meta["dram_summary"] = summary
     else:
-        rep.meta["dram_summary_unavailable"] = "；".join(dram_est.notes)
+        rep.meta["dram_summary_unavailable"] = "；".join(
+            dram_est.reason_for("est__dram_bytes_total", args.ks_ledger_basis).split("；"))
+    # 账本裁决即使总量不可得也要出现在摘要里（B1：拒绝必须可见）
+    if not dram_est.reliable and dram_est.ledger_requested:
+        err = dram_est.ledger_err_pct_for(args.ks_ledger_basis)
+        if err is None:
+            reason = dram_est.reason_for(
+                "est__dram_range_position_pct" if dram_est.ledger_range
+                else "est__dram_vs_ledger_err_pct", args.ks_ledger_basis)
+            rep.meta["dram_summary_unavailable"] += f"；账本裁决未给出：{reason}"
 
     # ---------- 空转选项告警 ----------
     used_noop = [f for f in NOOP_FLAGS
@@ -532,7 +640,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]) -> list[str]:
-    """--strict 下"不可得即失败"的判定（采集模式与 -i 回读模式共用）。"""
+    """--strict 下"不可得即失败"的判定（采集模式与 -i 回读模式共用）。
+
+    覆盖面（R-20/B7-c）—— 这四类都必须能让门禁变红：
+      1. 空转的 ncu 开关（接受但无效果）；
+      2. `--metrics` 请求了不可得/不存在的指标；
+      3. **`--set` / `--section` 请求了计数器 section**（旧实现只看 --section，`--set full` 漏过）；
+      4. **请求了账本对拍但裁决行没能算出来**（旧实现：B1 让这一行静默消失，门禁全绿）。
+    外加：`--page source` 请求了未实现的 SASS/源码逐行对照。
+    """
     problems: list[str] = []
     if used_noop:
         problems.append(f"no-op ncu flags used: {', '.join(used_noop)}")
@@ -552,6 +668,33 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
     for s in args.section or []:
         if s in COUNTER_SECTIONS:
             problems.append(f"requested section needs hardware counters: {s}")
+    # 3) --set 也要覆盖：只把 section 名报出来，不把 10 个 section 全铺开
+    set_name = getattr(args, "set_name", "basic")
+    if not (args.section or []):
+        from .sections import SET_SECTIONS
+
+        gated = [s for s in SET_SECTIONS.get(set_name, []) if s in COUNTER_SECTIONS]
+        if gated:
+            problems.append(
+                f"--set {set_name} requests {len(gated)} section(s) that need hardware counters "
+                f"or instrumentation: {', '.join(gated)} - use --set basic for a producible set")
+    # 4) 账本对拍：请求了就必须有裁决行（B1 的 CI 侧修法）
+    ledger_requested = bool(args.ks_ledger_mb or args.ks_ledger_total_mb
+                            or args.ks_ledger_range_mb)
+    if ledger_requested:
+        for name in ("est__dram_vs_ledger_err_pct", "est__dram_range_position_pct"):
+            if name in unavailable_names:
+                problems.append(
+                    f"requested ledger comparison cannot be produced: {name} - "
+                    f"{reason_by_name.get(name, 'no reason recorded')}")
+        if not any(n in _collect_metric_names(rep) for n in
+                   ("est__dram_vs_ledger_err_pct", "est__dram_range_position_pct")):
+            problems.append(
+                "requested ledger comparison produced no verdict row at all "
+                "(neither a value nor an n/a row) - that is a bug, not a result")
+    if getattr(args, "page", "details") == "source":
+        problems.append("--page source asks for SASS/source line correlation, which this tool "
+                        "does not implement (use --page raw to see each metric's source field)")
     return problems
 
 
@@ -573,6 +716,8 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
               "(symlinked as 'ncu'); data sources differ from NVIDIA Nsight Compute.",
               file=sys.stderr)
 
+    metrics = [n for v in (args.metrics or []) for n in v.split(",") if n.strip()]
+
     # 落盘
     if args.export:
         base = args.export
@@ -585,6 +730,10 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
             return 1
         p.write_text(rep.to_json())
         rep.meta["out_json"] = json_path
+        if getattr(args, "launch_csv", False):
+            lp = base + ".launches.csv"
+            Path(lp).write_text(render_launch_csv(rep))
+            rep.meta["out_launch_csv"] = lp
         perfetto_path = args.ks_perfetto or (base + ".perfetto.json")
         q = Path(perfetto_path)
         if q.exists() and not args.force_overwrite:
@@ -597,10 +746,15 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         rep.meta["out_perfetto"] = args.ks_perfetto
 
     # 标准输出
-    if args.csv:
-        sys.stdout.write(render_csv(rep))
+    if getattr(args, "launch_csv", False):
+        sys.stdout.write(render_launch_csv(rep))
+    elif args.csv:
+        sys.stdout.write(render_csv(rep, metrics))
     else:
-        print(render_text(rep, quiet=args.quiet, summary=args.print_summary, page=args.page))
+        print(render_text(rep, quiet=args.quiet, summary=args.print_summary, page=args.page,
+                          metrics=metrics, print_details=args.print_details,
+                          print_units=args.print_units,
+                          print_metric_name=args.print_metric_name))
 
     if args.log_file:
         Path(args.log_file).write_text("\n".join(logged) + "\n")
