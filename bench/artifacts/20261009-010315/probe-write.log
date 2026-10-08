@@ -1,0 +1,1 @@
+ANALYTIC kernel=write bytes_per_launch=268435456 iters=8000 total_bytes=2.14748e+12 grid=0 block=256 n=67108864

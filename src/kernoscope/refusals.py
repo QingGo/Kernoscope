@@ -73,6 +73,7 @@ class RefusalCode(str, Enum):
     MDD_UNKNOWN = "mdd_unknown"                # 误差带里没有这个指标的 MDD
     PROTOCOL_MISMATCH = "protocol_mismatch"    # 两次运行协议不同，不可比
     BOTH_REFUSED = "both_refused"              # 两次运行都被同一个前提挡住：没有数字可比
+    PREMISE_FAILED = "premise_failed"          # 判词自己的前提之一不成立（值因此不能引用）
     METRIC_ABSENT = "metric_absent"            # 请求的指标不在报告/包里
     LEGACY_REPORT = "legacy_report"            # 旧报告没有结构化拒绝信息
     INTERNAL_UNKNOWN = "internal_unknown"      # 兜底：未分类的拒绝（出现即为 bug 信号）
@@ -122,6 +123,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.MDD_UNKNOWN: "误差带里没有这个指标的 MDD",
     RefusalCode.PROTOCOL_MISMATCH: "两次运行的协议不同，不可比",
     RefusalCode.BOTH_REFUSED: "两侧都被同一个前提挡住，没有数字可比",
+    RefusalCode.PREMISE_FAILED: "判词的前提之一不成立（数字不可引用）",
     RefusalCode.METRIC_ABSENT: "请求的指标不存在",
     RefusalCode.LEGACY_REPORT: "旧报告没有结构化拒绝信息",
     RefusalCode.INTERNAL_UNKNOWN: "未分类的拒绝（属于本工具缺陷）",
@@ -319,6 +321,10 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "误差带里没有这个指标（MDD 按指标族给）：用 --metric 指定有 MDD 的指标，"
         "或重跑 selftest 覆盖该负载族",
         command="kernoscope selftest --out machine-selfcheck.json", cost_s=120.0),
+    RefusalCode.PREMISE_FAILED: Remedy(
+        "先让前提成立（按该前提对应的 code 处理）：前提不成立时那个数字不能用，"
+        "把它当结论会得到一个方向性错误",
+        command="kernoscope capabilities --json", cost_kind="manual"),
     RefusalCode.BOTH_REFUSED: Remedy(
         "两侧都被同一种原因拒绝（例如都没有标定）：先按该原因的补救办法解除前提，"
         "这次比较才有意义 —— 没有数字时 diff 不下任何结论",

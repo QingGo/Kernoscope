@@ -47,6 +47,21 @@ if [[ -n "$NSYS" ]]; then
   NSYS_DIR="$(dirname "$NSYS")"
   [[ -d "$NSYS_DIR" ]] && export PATH="$NSYS_DIR:$PATH"
 fi
+# NVBit 是可选外部依赖，但"没设 NVBIT_PATH"不等于"这台机器没有 NVBit"：
+# doctor 现在会按深度 1..3 找它。harness 也必须用同一份发现逻辑，否则步骤 8/9 会被
+# 静默跳过（真事：一次产物里完全没有 NVBit 证据，而机器上装着 NVBit）。
+if [[ -z "${NVBIT_PATH:-}" ]]; then
+  for d in . "$HOME" /root /opt /usr/local /workspace /mnt \
+           "$HOME"/* "$HOME"/*/* /root/* /root/*/* /opt/* /usr/local/*; do
+    if [[ -f "$d/core/libnvbit.a" ]]; then NVBIT_PATH="$(cd "$d" && pwd)"; break; fi
+  done
+fi
+if [[ -n "${NVBIT_PATH:-}" ]]; then
+  export NVBIT_PATH
+  echo "[bench] NVBit: $NVBIT_PATH"
+else
+  echo "[bench] warn: 没找到 NVBit（可选依赖）—— 步骤 8/9 会跳过"
+fi
 command -v nvcc >/dev/null 2>&1 || echo "[bench] warn: PATH 里仍然没有 nvcc —— probes 会编译失败"
 command -v cuobjdump >/dev/null 2>&1 || echo "[bench] warn: PATH 里没有 cuobjdump —— NVBit mem_trace 会失败"
 
@@ -105,6 +120,7 @@ KS_VERSION="$(KSC --version 2>/dev/null || echo 'n/a')"
   echo "nvcc: $($NVCC --version 2>/dev/null | tail -1)"
   echo "nsys: $($NSYS --version 2>/dev/null | tail -1)"
   echo "nvidia-smi: $(nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null)"
+  echo "nvbit: ${NVBIT_PATH:-n/a}"
 } > "$HOSTDIR/environment.txt" 2>&1
 cat "$HOSTDIR/environment.txt"
 if [[ "$REVISION_SOURCE" == "none" ]]; then

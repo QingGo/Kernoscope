@@ -1,0 +1,19 @@
+Kernoscope diff 1
+  MDD（来自 包内误差带 + --selfcheck）：dram_bytes_pct=2.2% · kernel_time_pct=0.5%
+    MDD 只对测出它的那段机器状态成立：换机器、时钟/温度状态或同机其他租户负载变化后都要重跑 selftest；比较两次运行前先让 GPU 进入稳态
+
+  [ better] dram_bytes             7288684.40 → 6942680.60 B    Δ-346003.80 (-4.7%)  MDD 2.2%
+            超过 MDD 2.2% ⇒ 方向明确（lower is better）
+  [ better] dram_bytes_per_launch      585.00 →     559.30 B    Δ-25.70 (-4.4%)  MDD 2.2%
+            超过 MDD 2.2% ⇒ 方向明确（lower is better）
+  [ n/a   ] dram_bytes_trace        MDD 2.2%
+            both_refused：两侧都被同一种原因拒绝（例如都没有标定）：先按该原因的补救办法解除前提，这次比较才有意义 —— 没有数字时 diff 不下任何结论  [kernoscope capabilities --json]
+  [ same  ] kernel_time               7970.02 →    7943.52 ms   Δ-26.50 (-0.3%)  MDD 0.5%
+            差值 0.33 在 MDD 0.5% 之内 ⇒ 这是噪声，不要当成改进
+  [ same  ] occupancy                  100.00 →     100.00 %    Δ+0.00 (+0.0%)  MDD 0.5%
+            差值 0.00 在 MDD 0.5% 之内 ⇒ 这是噪声，不要当成改进
+
+  不判方向（高不一定好，或缺少可比数值）：
+    ledger_verdict                 9.00 →       4.20 %    Δ-4.80
+
+  汇总：improved=2 · regressed=0 · indistinguishable=2 · incomparable=1 · 不判方向=1

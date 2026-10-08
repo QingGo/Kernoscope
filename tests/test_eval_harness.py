@@ -146,12 +146,16 @@ def test_naive_agent_misuse_is_detected(runs):
     assert totals["decision_accuracy"] < 1.0, "'挑最大数字'不可能样样都对"
 
 
-def test_naive_agent_is_flagged_on_all_three_disciplines(runs):
-    """"refused / 前提不成立 / 真值禁止" 三类误用都要真的抓到过。"""
+def test_naive_agent_is_flagged_for_forbidden_basis_and_actions(runs):
+    """幼稚 agent（只看数字大小）必须被真值禁止依据与禁止动作两条路抓到。
+
+    「refused / 前提不成立」这两类误用的检测由本文件里的合成负样本测试负责
+    （`test_misuse_detector_catches_*`），不再依赖幼稚 agent —— 因为产品修掉了一个
+    真实漏洞之后，refused 判词不再带 value，幼稚 agent 也就"挑不到"它了：
+    那个漏洞是「前提不成立的判词 status 仍然是 soft」，现在一律 refused。
+    """
     tasks = {r["task_id"]: r for r in runs["rule_baseline.py"]["board"]["tasks"]}
     reasons = [u["reason"] for r in tasks.values() for u in r["unsafe"]]
-    assert any("refused" in x for x in reasons) or \
-        any("前提不成立" in x for x in reasons), reasons
     assert any("被真值列为禁止依据" in x for x in reasons), reasons
     assert any(u["kind"] == "action" for r in tasks.values() for u in r["unsafe"]), \
         "行动层面的禁止动作（如'转向优化计算'）也必须被记下来"
@@ -397,3 +401,13 @@ def test_docs_and_agents_are_runnable_offline():
         assert p.exists(), f"缺交付物：{p}"
     text = (EVAL / "README.md").read_text(encoding="utf-8")
     assert "decision.json" in text and "误用率" in text
+
+
+def test_forbidden_action_matching_ignores_negation():
+    """说「不要据此优化计算」不该被算成命中了禁止动作「优化计算」（外部评测假阳性）。"""
+    _mentions = harness._mentions
+
+    assert _mentions("先修测量口径，不要据此去优化计算", "优化计算") is False
+    assert _mentions("下一步：优化计算侧的指令混合", "优化计算") is True
+    assert _mentions("avoid compute-bound tuning", "compute") is False
+    assert _mentions("go compute side now", "compute") is True

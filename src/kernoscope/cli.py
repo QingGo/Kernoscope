@@ -742,6 +742,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         rep.wall_time_ns = wall_ns
         if wall_ns:
             rep.meta["kernel_time_pct"] = 100.0 * rep.total_kernel_ns / wall_ns
+    # 决策包要用它判断"账本裁决是否继承了不成立的 per-launch 口径"
+    rep.meta["ledger_basis"] = dram_est.ledger_basis
+    rep.meta["dtype"] = args.ks_dtype
     rep.generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     rep.meta["window"] = (
         f"mode={dram_est.window_mode}{'（已裁剪）' if dram_est.trimmed else ''} "

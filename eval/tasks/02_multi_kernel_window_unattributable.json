@@ -8,8 +8,8 @@
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {
-        "hash": "sha256:debfbea867f94b69",
-        "basis": "est__dram_bytes_per_launch = 窗口 DRAM 代理 ÷ 被匹配 kernel 的 launch 数",
+        "hash": "sha256:ed24210b5b47c04b",
+        "basis": "per-launch",
         "window_mode": "auto"
       },
       "env": {
@@ -88,13 +88,12 @@
         },
         {
           "id": "dram_bytes_per_launch",
-          "status": "soft",
+          "status": "refused",
           "facts": {
             "mb": 25.0,
-            "bias_pct": 147
+            "bias_pct": 147,
+            "uncitable_value": 25000000.0
           },
-          "value": 25000000.0,
-          "unit": "B",
           "provenance": "estimated",
           "premises": [
             {
@@ -112,6 +111,15 @@
               "unit": "%"
             }
           ],
+          "refusal": {
+            "code": "share_too_low",
+            "observed": {
+              "matched_kernel_kernel_share_pct": 41.0
+            },
+            "threshold": {
+              "matched_kernel_kernel_share_pct": 95.0
+            }
+          },
           "next": "改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进",
           "metrics": [
             "est__dram_bytes_per_launch",
@@ -120,13 +128,15 @@
         },
         {
           "id": "ledger_verdict",
-          "status": "soft",
+          "status": "refused",
           "facts": {
-            "err_pct": 146.9
+            "err_pct": 146.9,
+            "uncitable_value": 146.9
           },
-          "value": 146.9,
-          "unit": "%",
           "provenance": "derived",
+          "refusal": {
+            "code": "share_too_low"
+          },
           "next": "误差超出本机误差带才值得继续优化；否则先改测量口径",
           "metrics": [
             "est__dram_vs_ledger_err_pct"
@@ -159,6 +169,12 @@
         }
       ],
       "refusals": {
+        "share_too_low": {
+          "action": "把窗口缩到只含被匹配的 kernel（--ks-warmup/--ks-window-s…",
+          "cost_kind": "wall_seconds",
+          "cost_s": 20.0,
+          "cmd": "kernoscope --ks-window-s 10 -k regex:<kernel> -- python…"
+        },
         "counters_denied": {
           "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…",
           "cost_kind": "unavailable"
@@ -188,7 +204,7 @@
         },
         {
           "for": "dram_bytes_per_launch",
-          "hint": "改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进"
+          "code": "share_too_low"
         },
         {
           "for": "unmeasured",
@@ -200,7 +216,7 @@
         "launches": 420,
         "unmeasured_metrics": 3,
         "selftest_band": false,
-        "packet_bytes": 3528,
+        "packet_bytes": 3776,
         "trimmed": []
       }
     },

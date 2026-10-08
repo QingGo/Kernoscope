@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "tool": "kernoscope",
+  "a": "bench/artifacts/20261009-010315/rep-copy.ksreport.json",
+  "b": "bench/artifacts/20261009-010315/rep-copy-again.ksreport.json",
+  "protocol": {
+    "same": true,
+    "a": "sha256:b642ef91e3d61aed",
+    "b": "sha256:b642ef91e3d61aed",
+    "diffs": {}
+  },
+  "mdd": {
+    "source": "包内误差带 + --selfcheck",
+    "values": {
+      "dram_bytes_pct": 2.2,
+      "kernel_time_pct": 0.5
+    }
+  },
+  "comparisons": [
+    {
+      "id": "dram_bytes",
+      "status": "improved",
+      "a": 7288684.4,
+      "b": 6942680.6,
+      "unit": "B",
+      "delta": -346003.8,
+      "delta_pct": -4.747,
+      "mdd": 2.2,
+      "direction": "lower",
+      "note": "超过 MDD 2.2% ⇒ 方向明确（lower is better）"
+    },
+    {
+      "id": "dram_bytes_per_launch",
+      "status": "improved",
+      "a": 585.0,
+      "b": 559.3,
+      "unit": "B",
+      "delta": -25.7,
+      "delta_pct": -4.393,
+      "mdd": 2.2,
+      "direction": "lower",
+      "note": "超过 MDD 2.2% ⇒ 方向明确（lower is better）"
+    },
+    {
+      "id": "dram_bytes_trace",
+      "status": "incomparable",
+      "mdd": 2.2,
+      "direction": "lower",
+      "refusal": {
+        "code": "both_refused",
+        "message": "两侧都被 trace_unavailable 挡住：这次比较没有数字可比（不是「没变化」，也不是「退化」）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "两侧都被同一种原因拒绝（例如都没有标定）：先按该原因的补救办法解除前提，这次比较才有意义 —— 没有数字时 diff 不下任何结论",
+          "command": "kernoscope capabilities --json",
+          "cost_s": 0.0,
+          "cost_kind": "manual",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "kernel_time",
+      "status": "indistinguishable",
+      "a": 7970.021,
+      "b": 7943.525,
+      "unit": "ms",
+      "delta": -26.496,
+      "delta_pct": -0.332,
+      "mdd": 0.5,
+      "direction": "lower",
+      "note": "差值 0.33 在 MDD 0.5% 之内 ⇒ 这是噪声，不要当成改进"
+    },
+    {
+      "id": "occupancy",
+      "status": "indistinguishable",
+      "a": 100.0,
+      "b": 100.0,
+      "unit": "%",
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "mdd": 0.5,
+      "direction": "higher",
+      "note": "差值 0.00 在 MDD 0.5% 之内 ⇒ 这是噪声，不要当成改进"
+    }
+  ],
+  "not_judged": [
+    {
+      "id": "ledger_verdict",
+      "status": "incomparable",
+      "a": 9.0,
+      "b": 4.2,
+      "unit": "%",
+      "delta": -4.8,
+      "delta_pct": -53.333,
+      "mdd": 2.2
+    }
+  ],
+  "summary": {
+    "improved": 2,
+    "regressed": 0,
+    "indistinguishable": 2,
+    "incomparable": 1
+  },
+  "notes": []
+}

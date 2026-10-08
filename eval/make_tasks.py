@@ -194,9 +194,12 @@ def task_02() -> dict:
         _value_metric("ks__matched_kernel_window_share_pct", 38.5),
         _value_metric("ks__attribution_bias_estimate_pct", 146.9),
     ], kernel=1)
+    # 账本对拍走的就是 per-launch 口径 —— 必须与 CLI 一样把口径写进 meta/basis，
+    # 否则"per-launch 不可归因 ⇒ 账本误差也不可引用"这条继承判定不会生效
+    # （外部评测里 agent 正是拿 +146.9% 当真结论用的）。
+    rep.meta["ledger_basis"] = "per-launch"
     cap = _caps(2)
-    packet = build(rep, capabilities=cap,
-                   basis="est__dram_bytes_per_launch = 窗口 DRAM 代理 ÷ 被匹配 kernel 的 launch 数")
+    packet = build(rep, capabilities=cap, basis="per-launch")
     return {
         "id": "02_multi_kernel_window_unattributable",
         "scenario": (

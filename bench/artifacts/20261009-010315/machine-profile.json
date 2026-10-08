@@ -1,0 +1,206 @@
+{
+  "schema_version": 2,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "cc": "8.9",
+  "sm_count": 128,
+  "l2_mib": 72.0,
+  "nvidia_smi": "580.105.08, 3105, 450.00, 2, 16",
+  "measured_dram": {
+    "copy_gbs": 910.6,
+    "read_gbs": 905.2,
+    "write_gbs": 939.6
+  },
+  "l2_info": {
+    "l2_resident_max_mb": 64,
+    "l2_drop_mb": 96,
+    "l2_read_peak_gbs": 2155.3
+  },
+  "measured_matmul_tflops": {
+    "torch.bfloat16": {
+      "tflops": 167.1,
+      "size": 16384,
+      "ms": 52.6365,
+      "acc_caliber": "bf16 (fp32 accumulate)",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "none"
+      },
+      "tflops_protocol": "default",
+      "tflops_is_variant_reading": true,
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {
+        "default": 167.1,
+        "reduced_precision_reduction_off": 166.5,
+        "fp32_ieee": 160.4
+      },
+      "caliber_variant_settings": {
+        "default": {
+          "allow_fp16_reduced_precision_reduction": true,
+          "fp32_precision": "none"
+        },
+        "reduced_precision_reduction_off": {
+          "allow_fp16_reduced_precision_reduction": false,
+          "fp32_precision": "none"
+        },
+        "fp32_ieee": {
+          "allow_fp16_reduced_precision_reduction": true,
+          "fp32_precision": "ieee"
+        }
+      },
+      "caliber_probe_size": 16384,
+      "caliber_probe_method": "torch.matmul, 3 iters best-of, \u540c\u4e00\u5c3a\u5bf8 16384",
+      "caliber_spread_pct": 4.0,
+      "caliber_distinguishable": true
+    },
+    "torch.float16": {
+      "tflops": 166.2,
+      "size": 8192,
+      "ms": 6.6168,
+      "acc_caliber": "fp16 (fp32 accumulate; \u5141\u8bb8 reduced-precision reduction)",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "none"
+      },
+      "tflops_protocol": "default",
+      "tflops_is_variant_reading": true,
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {
+        "default": 166.2,
+        "reduced_precision_reduction_off": 162.5,
+        "fp32_ieee": 163.1
+      },
+      "caliber_variant_settings": {
+        "default": {
+          "allow_fp16_reduced_precision_reduction": true,
+          "fp32_precision": "none"
+        },
+        "reduced_precision_reduction_off": {
+          "allow_fp16_reduced_precision_reduction": false,
+          "fp32_precision": "none"
+        },
+        "fp32_ieee": {
+          "allow_fp16_reduced_precision_reduction": true,
+          "fp32_precision": "ieee"
+        }
+      },
+      "caliber_probe_size": 8192,
+      "caliber_probe_method": "torch.matmul, 3 iters best-of, \u540c\u4e00\u5c3a\u5bf8 8192",
+      "caliber_spread_pct": 2.2,
+      "caliber_distinguishable": true
+    },
+    "torch.float32": {
+      "tflops": 54.6,
+      "size": 8192,
+      "ms": 20.1299,
+      "acc_caliber": "fp32 (fp32 accumulate)",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": false,
+        "fp32_precision": "none"
+      },
+      "tflops_protocol": "reduced_precision_reduction_off",
+      "tflops_is_variant_reading": true,
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {
+        "default": 53.9,
+        "reduced_precision_reduction_off": 54.6,
+        "fp32_ieee": 54.2
+      },
+      "caliber_variant_settings": {
+        "default": {
+          "allow_fp16_reduced_precision_reduction": true,
+          "fp32_precision": "none"
+        },
+        "reduced_precision_reduction_off": {
+          "allow_fp16_reduced_precision_reduction": false,
+          "fp32_precision": "none"
+        },
+        "fp32_ieee": {
+          "allow_fp16_reduced_precision_reduction": true,
+          "fp32_precision": "ieee"
+        }
+      },
+      "caliber_probe_size": 8192,
+      "caliber_probe_method": "torch.matmul, 3 iters best-of, \u540c\u4e00\u5c3a\u5bf8 8192",
+      "caliber_spread_pct": 1.3,
+      "caliber_distinguishable": false
+    }
+  },
+  "precision_settings_at_end": {
+    "allow_fp16_reduced_precision_reduction": true,
+    "fp32_precision": "ieee",
+    "allow_tf32": false
+  },
+  "clocks_during_measurement": {
+    "sm_clock_min": 1815.0,
+    "sm_clock_max": 2775.0,
+    "sm_clock_mean": 2347.5,
+    "power_max": 440.9,
+    "util_mean": 84.5,
+    "n_samples": 10
+  },
+  "bandwidth_sweep": [
+    {
+      "size_mb": 2,
+      "copy_gbs": 305.1219259736108,
+      "read_gbs": 117.52608630925094,
+      "write_gbs": 194.0537585044164
+    },
+    {
+      "size_mb": 4,
+      "copy_gbs": 736.363575436641,
+      "read_gbs": 243.22745881240527,
+      "write_gbs": 402.6823701153877
+    },
+    {
+      "size_mb": 8,
+      "copy_gbs": 1278.342216114248,
+      "read_gbs": 465.34404085250014,
+      "write_gbs": 707.0015113611454
+    },
+    {
+      "size_mb": 16,
+      "copy_gbs": 1925.8497444389548,
+      "read_gbs": 821.0755929572464,
+      "write_gbs": 1075.8718651147865
+    },
+    {
+      "size_mb": 32,
+      "copy_gbs": 2648.397311008818,
+      "read_gbs": 1402.3352412799302,
+      "write_gbs": 1511.782352255957
+    },
+    {
+      "size_mb": 48,
+      "copy_gbs": 979.25627905425,
+      "read_gbs": 1830.9796560660643,
+      "write_gbs": 1627.0229867667977
+    },
+    {
+      "size_mb": 64,
+      "copy_gbs": 879.5663546448897,
+      "read_gbs": 2155.347991084229,
+      "write_gbs": 891.934371910778
+    },
+    {
+      "size_mb": 96,
+      "copy_gbs": 894.0296039379635,
+      "read_gbs": 825.1121488968511,
+      "write_gbs": 913.1077540034121
+    },
+    {
+      "size_mb": 128,
+      "copy_gbs": 902.8868539235157,
+      "read_gbs": 857.8693513730169,
+      "write_gbs": 919.7824160466664
+    },
+    {
+      "size_mb": 256,
+      "copy_gbs": 910.6459665090479,
+      "read_gbs": 905.2234119485432,
+      "write_gbs": 939.6079494833409
+    }
+  ],
+  "torch": "2.12.1+cu130",
+  "ts": "2026-10-09 01:03:31",
+  "tool": "tools/machine-profile.py"
+}

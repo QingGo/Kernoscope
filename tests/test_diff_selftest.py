@@ -59,10 +59,12 @@ def test_mdd_uses_run_to_run_spread_and_resolution_floor():
     # 同负载重复：偏差 20.0 / 21.0 → SD≈0.7 → 2SD≈1.4；分辨率下限 100*1/50=2.0；
     # 误差带半宽 = (21-20)/2 = 0.5 → 取最大 2.0
     res = _filled([_run("copy", 20.0, util=50.0), _run("copy", 21.0, util=50.0)])
-    assert res.mdd["dram_bytes_pct"] == 2.0
     assert res.mdd["resolution_floor_pct"] == 2.0
     assert res.mdd["band_half_width_pct"] == 0.5
     assert "max(" in res.mdd["basis"]
+    # 实测漂移下限 5%：真机同协议两次运行差过 4.7%，只按 SD 算会把它报成「improved」
+    assert res.mdd["dram_bytes_pct"] == 5.0
+    assert res.mdd["floor_pct"] == 5.0 and res.mdd["floor_evidence"]
 
 
 def test_mdd_never_smaller_than_half_the_band():
@@ -74,6 +76,7 @@ def test_mdd_never_smaller_than_half_the_band():
     res = _filled([_run("copy", 9.6), _run("read", 7.8), _run("write", 5.6)])
     assert res.mdd["band_half_width_pct"] == 2.0
     assert res.mdd["dram_bytes_pct"] >= 2.0
+    assert res.mdd["dram_bytes_pct"] >= res.mdd["floor_pct"]
 
 
 def test_cross_process_children_do_not_recurse(monkeypatch):

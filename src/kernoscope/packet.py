@@ -51,6 +51,16 @@ OK, SOFT, REFUSED = "ok", "soft", "refused"
 STATUSES = (OK, SOFT, REFUSED)
 
 # 前提的可读标签是**静态**的（同一 id 每次一样），所以不进包：渲染时查这张表。
+# 前提 id → 它不成立时该报哪个 code（拒绝必须可编程：让人知道去修哪一条）
+PREMISE_CODES: dict[str, RefusalCode] = {
+    "window_coverage_pct": RefusalCode.COVERAGE_TOO_LOW,
+    "matched_kernel_kernel_share_pct": RefusalCode.SHARE_TOO_LOW,
+    "kernel_time_pct_of_wall": RefusalCode.PREMISE_FAILED,
+    "kernel_share_of_total": RefusalCode.PREMISE_FAILED,
+    "trace_vs_nvml_pct": RefusalCode.PREMISE_FAILED,
+    "over_peak": RefusalCode.CALIBRATION_CALIBER_MISMATCH,
+}
+
 PREMISE_LABELS: dict[str, str] = {
     "kernel_share_of_total": "该 kernel 占全部 kernel 时间的比例",
     "kernel_time_pct_of_wall": "kernel 时间占进程 wall 的比例",
@@ -115,6 +125,10 @@ class Verdict:
     metrics: tuple[str, ...] = ()
     claim: str = ""                         # 仅内存：视图侧重新生成，避免两处文案
 
+    @property
+    def failed_premises(self) -> list[Premise]:
+        return [p for p in self.premises if p.ok is False]
+
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
             raise ValueError(f"bad verdict status {self.status!r}")
@@ -122,8 +136,17 @@ class Verdict:
             raise ValueError(f"refused verdict {self.id!r} must carry a structured refusal")
         if self.status == REFUSED and self.next:
             object.__setattr__(self, "next", "")   # 拒绝时「下一步」就是 remedy，不重复
+        # 构造期**不**报错：前提是构建之后才逐步填齐的。执法放在两个地方：
+        #   * build() 里统一降级（正常路径，见 _downgrade_broken_premises）；
+        #   * to_dict() 里断言（任何旁路都会立刻炸，而不是把不一致的包发出去）。
 
     def to_dict(self) -> dict[str, Any]:
+        if self.status != REFUSED and self.failed_premises:
+            # 前提不成立却把结论标成 ok/soft —— 这正是外部 agent 会踩的坑（它只看 status）。
+            raise ValueError(
+                f"verdict {self.id!r} is {self.status} but premise(s) "
+                f"{[p.id for p in self.failed_premises]} failed - build() must downgrade it "
+                f"to refused before serialization")
         d: dict[str, Any] = {"id": self.id, "status": self.status}
         if self.facts:
             d["facts"] = {k: (_clip(v, FACT_STR_LIMIT) if isinstance(v, str) else v)
@@ -363,13 +386,22 @@ def _verdict_roofline(rep: Any) -> Verdict | None:
         bits.append(f"离 roofline {100.0 - float(eff):.1f}%")
     if gbs is not None:
         bits.append(f"达成带宽 {gbs} GB/s")
+    # 「下一步」必须看数据：达成率已经很高时还说"去查访问模式"是模板话术，会把 agent
+    # 送去抠已经不存在的空间（这是 W8 冷启动评测里被测 agent 亲自指出的矛盾）。
+    if eff is not None and float(eff) >= 90.0:
+        nxt = (f"已达 roofline {float(eff):.1f}%：先核对工作量/账本输入（--ks-gemm/--ks-flops）"
+               f"是否正确；若要再进一步，只能减少总字节（算子融合 / 提高 L2 复用）")
+    elif bound is not None and str(bound) == "memory":
+        nxt = "memory bound 且达成率低 → 先查访问模式（L2 命中/合并效率）与工作集是否驻留"
+    elif bound is not None:
+        nxt = "compute bound → 查指令混合与发射槽利用率上界（--ks-instr-hist）"
+    else:
+        nxt = "先确认工作量输入与标定口径，再看达成率"
     return Verdict(
         id="roofline", question="离 roofline 多远、compute 还是 memory bound", status=SOFT,
         facts=facts, value=eff, unit="%", provenance="estimated",
         metrics=("est__bound", "est__roofline_efficiency_pct", "est__achieved_gbs"),
-        next=("memory bound 且达成率低 → 先查访问模式（L2 命中/合并效率）；"
-              "compute bound → 查指令混合与发射槽"),
-        claim="；".join(str(b) for b in bits))
+        next=nxt, claim="；".join(str(b) for b in bits))
 
 
 def _verdict_issue_slot(rep: Any) -> Verdict | None:
@@ -514,11 +546,40 @@ def protocol_hash(rep: Any, extra: dict[str, Any] | None = None) -> str:
 # --------------------------------------------------------------------------
 # 组包
 # --------------------------------------------------------------------------
+def _downgrade_broken_premises(verdicts: list[Verdict]) -> None:
+    """前提不成立的判词**必须**变成 refused（外部评测暴露的漏洞，见下）。
+
+    真事：一个 0.9 s 窗口里 4 个 kernel，被匹配 kernel 只占 41%（门槛 95%），
+    `dram_bytes_per_launch` 的 status 却还是 `soft` —— agent 只看 status，于是把它
+    （以及由它推出的账本误差 +146.9%）当成结论。值本身没错，错的是**允许它带着一个
+    不成立的前提被引用**。所以这里统一降级：status=refused + 按前提给 code + 保留历史值
+    在 facts 里（读者仍能看到"它曾经算出过多少"，但明确不可引用）。
+    """
+    for v in verdicts:
+        failed = v.failed_premises
+        if v.status == REFUSED or not failed:
+            continue
+        main = failed[0]
+        code = PREMISE_CODES.get(main.id, RefusalCode.PREMISE_FAILED)
+        msg = (f"前提不成立（{premise_label(main.id)}：实测 {main.observed}"
+               f"{main.unit}，门槛 {main.threshold}{main.unit}）⇒ 这个数字不可引用；"
+               f"数值 {v.value} {v.unit} 只作历史记录")
+        facts = dict(v.facts)
+        if v.value is not None:
+            facts["uncitable_value"] = v.value
+        v.status = REFUSED
+        v.refusal = Refusal(code, msg, observed={main.id: main.observed},
+                            threshold={main.id: main.threshold})
+        v.value = None
+        v.facts = facts
+
+
 def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | None = None,
           basis: str = "", cost_extra: dict[str, Any] | None = None,
           report_path: str = "") -> dict[str, Any]:
     """由 Report 组出决策包（不读文件、不跑命令，纯函数便于测试）。"""
     verdicts = [v for fn in BUILDERS if (v := fn(rep)) is not None][:MAX_VERDICTS]
+    _downgrade_broken_premises(verdicts)
 
     band = ((selfcheck or {}).get("band") or {}).get("dram_bytes_pct")
     mdd_dram = ((selfcheck or {}).get("mdd") or {}).get("dram_bytes_pct")
@@ -538,6 +599,21 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
     if len(unmeasured_all) > len(unmeasured):
         unmeasured_more = {"groups": len(unmeasured_all) - len(unmeasured),
                            "metrics": sum(g["count"] for g in unmeasured_all[len(unmeasured):])}
+
+    # 账本裁决继承它所用的那条口径：per-launch 对拍用的是 per-launch 数字，
+    # 而那个数字不可归因时，误差百分比同样不可引用（外部评测里 agent 正是在这里踩的）。
+    if basis.startswith("per-launch") or basis in ("", "auto"):
+        pl = next((v for v in verdicts if v.id == "dram_bytes_per_launch"), None)
+        lg = next((v for v in verdicts if v.id == "ledger_verdict"), None)
+        if (pl is not None and pl.status == REFUSED and lg is not None
+                and lg.value is not None):
+            lg.facts = {**lg.facts, "uncitable_value": lg.value}
+            lg.status = REFUSED
+            lg.refusal = Refusal(
+                pl.refusal.code if pl.refusal else RefusalCode.PREMISE_FAILED,
+                "账本对拍用的就是那个不可归因的 per-launch 数字 ⇒ 误差百分比不可引用；"
+                "要么缩小窗口让它可归因，要么改用 --ks-ledger-total-mb 走整窗口口径")
+            lg.value = None
 
     env: dict[str, Any] = {}
     if capabilities is not None:

@@ -297,3 +297,39 @@ def test_packet_has_no_timestamp_or_hostname():
     blob = dumps(p)
     for bad in ("generated_at", "hostname", "platform"):
         assert bad not in blob
+
+
+def test_verdict_with_failed_premise_is_downgraded_to_refused():
+    """外部评测暴露的漏洞：0.9 s 窗口 4 个 kernel、被匹配 kernel 只占 41% 时，
+    per-launch 判词的 status 仍是 soft —— agent 只看 status，于是把它当结论。
+    规则：前提不成立 ⇒ 必须 refused（值降级为 facts.uncitable_value，历史仍可见）。"""
+    from kernoscope.packet import _downgrade_broken_premises
+
+    v = Verdict(id="dram_bytes_per_launch", question="q", status=SOFT,
+                facts={"mb": 25.0}, value=2.5e7, unit="B", premises=[])
+    v.premises.append(Premise("matched_kernel_kernel_share_pct", 41.0, 95.0, False, "%"))
+    _downgrade_broken_premises([v])
+    assert v.status == REFUSED
+    assert v.value is None
+    assert v.refusal is not None
+    assert v.refusal.code.value == "share_too_low"
+    assert v.facts["uncitable_value"] == 2.5e7
+    d = v.to_dict()
+    assert d["status"] == "refused" and "value" not in d
+    assert d["facts"]["uncitable_value"] == 2.5e7
+
+
+def test_serializing_a_soft_verdict_with_failed_premise_raises():
+    """旁路保护：不一致的判词在序列化时必须炸，而不是悄悄发出去。"""
+    v = Verdict(id="x", question="q", status=SOFT, facts={}, value=1.0,
+                premises=[Premise("window_coverage_pct", 71.4, 80.0, False, "%")])
+    with pytest.raises(ValueError, match="premise"):
+        v.to_dict()
+
+
+def test_no_packet_verdict_is_soft_with_a_failed_premise():
+    """端到端守卫：任何一次组包都不许出现"前提不成立但 status 是 ok/soft"。"""
+    p = build(_rich_report())
+    for v in p["verdicts"]:
+        if v["status"] != "refused":
+            assert all(pr.get("ok") for pr in (v.get("premises") or [])), v["id"]

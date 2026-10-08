@@ -46,6 +46,15 @@ DRAM_BOUND_IDS = ("copy", "read", "write")
 # 采样前先跑一段：NVML 的 utilization.memory 是窗口平均，刚开始的 1~4 个采样点会
 # 读到上一段空闲的 0%（真机实测：不预热会让 copy 的偏差从 +9% 变成 +72%）。
 WARMUP_S = 1.0
+# 两次单次测量比较时的最小可分辨差异：t(95%,ν≈4)·√2 ≈ 2.8~3σ（不是 2σ）。
+SD_FACTOR = 3.0
+# DRAM 字节的 MDD **下限**（百分点）。它必须由实测定，不能拍的：
+#   * 同一台 4090 上、同协议、同命令的两次运行，dram_bytes 实测相差 4.7%（本仓库
+#     bench/artifacts 的 diff-same-protocol 产物）；
+#   * 时长扫描里同一负载在不同稳态段长度下相差约 5 个百分点。
+# 只按"同进程重复的 SD"算会得到 1%~2%，于是 4.7% 的真实漂移会被报成「improved」——
+# 那正是这个工具最不该犯的错（让 agent 照着噪声改代码）。
+MDD_FLOOR_DRAM_PCT = 5.0
 ITEM_BYTES = {"fp32": 4, "bf16": 2, "fp16": 2}
 # torch 的 dtype 属性名和我们的短名不是一回事：`torch.bf16` 不存在，`torch.bfloat16` 才存在。
 # 这个映射被真机踩过一次（当时错误信息还说成"显存不足"，更难查）。
@@ -132,6 +141,8 @@ class SelftestResult:
                        f"（本次 SD={m.get('run_to_run_sd_pct')}% · "
                        f"分辨率下限={m.get('resolution_floor_pct')}% · "
                        f"误差带半宽={m.get('band_half_width_pct')}%）")
+            if m.get("floor_evidence"):
+                out.append(f"  下限的依据：{m['floor_evidence']}")
             if m.get("caveat"):
                 out.append(f"  适用范围：{m['caveat']}")
         if self.peaks:
@@ -464,9 +475,14 @@ def _fill_band_and_mdd(res: SelftestResult,
     sd = max(sds) if sds else 0.0
     floor = max(floors) if floors else 0.0
     half_band = (max(errs) - min(errs)) / 2.0 if len(errs) > 1 else 0.0
-    res.mdd["dram_bytes_pct"] = round(max(2.0 * sd, floor, half_band, 0.5), 1)
-    res.mdd["basis"] = ("max(同负载重复的 2×SD（含跨进程，若有）, NVML 1 个百分点分辨率下限, "
-                        "本机误差带半宽)")
+    res.mdd["dram_bytes_pct"] = round(
+        max(SD_FACTOR * sd, floor, half_band, MDD_FLOOR_DRAM_PCT, 0.5), 1)
+    res.mdd["basis"] = (f"max({SD_FACTOR:g}×SD（同负载重复，含跨进程样本）, "
+                        f"NVML 1 个百分点分辨率下限, 本机误差带半宽, "
+                        f"实测漂移下限 {MDD_FLOOR_DRAM_PCT:g}%)")
+    res.mdd["floor_pct"] = MDD_FLOOR_DRAM_PCT
+    res.mdd["floor_evidence"] = ("同协议两次运行实测相差 4.7%（bench 产物 "
+                                 "diff-same-protocol）；时长扫描同负载 ≈5 个百分点")
     res.mdd["run_to_run_sd_pct"] = round(sd, 2)
     res.mdd["resolution_floor_pct"] = round(floor, 2)
     res.mdd["band_half_width_pct"] = round(half_band, 2)

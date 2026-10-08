@@ -116,7 +116,7 @@
           "value": 78.4,
           "unit": "%",
           "provenance": "estimated",
-          "next": "memory bound 且达成率低 → 先查访问模式（L2 命中/合并效率）；compute bound → 查指令混合与发射槽",
+          "next": "compute bound → 查指令混合与发射槽利用率上界（--ks-instr-hist）",
           "metrics": [
             "est__bound",
             "est__roofline_efficiency_pct",
@@ -202,7 +202,7 @@
         "launches": 120,
         "unmeasured_metrics": 3,
         "selftest_band": false,
-        "packet_bytes": 3922,
+        "packet_bytes": 3876,
         "trimmed": []
       }
     }
