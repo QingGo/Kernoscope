@@ -122,7 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-perfetto", default=None, help="Perfetto trace 输出路径（.json）")
     k.add_argument("--ks-sm-count", type=int, default=0, help="覆盖 SM 数量")
     k.add_argument("--ks-ledger-mb", type=float, default=None,
-                   help="账本预测的 DRAM 字节数（MB）：报告里给出估算与账本的相对误差")
+                   help="账本预测的 DRAM 字节数（MB，**每次 launch** 口径）：报告里按同基给出相对误差")
+    k.add_argument("--ks-ledger-total-mb", type=float, default=None,
+                   help="账本预测的整窗口 DRAM 字节数（MB，总量口径）：与整窗口估算对拍")
     k.add_argument("--ks-ledger-range-mb", default=None,
                    help="账本给出的区间 LOW,HIGH（MB）：报告里给出估算落在区间的哪一侧")
     k.add_argument("--ks-keep-intermediate", action="store_true",
@@ -369,7 +371,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     # ---------- 账本参数（MB -> bytes）----------
-    ledger_bytes = args.ks_ledger_mb * 1e6 if args.ks_ledger_mb else None
+    ledger_per_launch = args.ks_ledger_mb * 1e6 if args.ks_ledger_mb else None
+    ledger_total = args.ks_ledger_total_mb * 1e6 if args.ks_ledger_total_mb else None
     ledger_range = None
     if args.ks_ledger_range_mb:
         try:
@@ -392,7 +395,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     dram_est = estimate_dram(
         sampler.result.samples, peak_gbs=peak_gbs, window_s=wall_ns / 1e9,
         launches=launches_for_dram,
-        ledger_bytes=ledger_bytes, ledger_range=ledger_range,
+        ledger_per_launch=ledger_per_launch, ledger_total=ledger_total,
+        ledger_range=ledger_range,
     )
     if len(grouped_dram) != 1:
         dram_est.notes.append(
@@ -468,8 +472,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                    f"占空比 {dram_est.duty_pct:.0f}%）")
         if dram_est.bytes_per_launch is not None:
             summary += f" → {dram_est.bytes_per_launch / 1e6:.2f} MB/launch"
-        if dram_est.ledger_bytes:
-            summary += f"；vs 账本 {dram_est.ledger_bytes / 1e6:.1f} MB，误差 {dram_est.ledger_err_pct:+.1f}%"
+        if dram_est.ledger_basis:
+            ref = dram_est.ledger_per_launch if dram_est.ledger_per_launch is not None else dram_est.ledger_total
+            basis = "per-launch" if dram_est.ledger_basis == "per-launch" else "总量"
+            if dram_est.ledger_err_pct is None:
+                summary += f"；账本对拍（{basis}）口径不成立，未给误差"
+            else:
+                summary += (f"；vs 账本 {ref / 1e6:.1f} MB（{basis}），"
+                            f"误差 {dram_est.ledger_err_pct:+.1f}%")
         if dram_est.ledger_range:
             summary += f"；{dram_est.range_verdict}"
         rep.meta["dram_summary"] = summary

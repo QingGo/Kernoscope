@@ -45,35 +45,73 @@ class DramEstimate:
     window_s: float = 0.0
     sampler_period_s: float = 0.0
     launches: int = 0
-    # 账本对照（可选）
-    ledger_bytes: float | None = None
-    ledger_range: tuple[float, float] | None = None
+    # 账本对照（可选）：账本通常预测的是**每次 launch** 的字节数（如 2RH），
+    # 所以默认按 per-launch 对拍；要与整窗口总量比时用 ledger_total。
+    ledger_per_launch: float | None = None
+    ledger_total: float | None = None
+    ledger_range: tuple[float, float] | None = None   # 区间同样是 per-launch 口径
     notes: list[str] = field(default_factory=list)
 
     @property
+    def ledger_basis(self) -> str:
+        if self.ledger_per_launch is not None:
+            return "per-launch"
+        if self.ledger_total is not None:
+            return "total"
+        return ""
+
+    @property
+    def ledger_ready(self) -> bool:
+        """对拍所需的口径是否成立。
+
+        per-launch 标量账本与**区间账本**都要求"可归因"（单一 kernel 主导 + 占空比达标）；
+        只有总量账本才退而要求"总量可用"。
+        """
+        if self.ledger_per_launch is not None or self.ledger_range is not None:
+            return self.bytes_per_launch is not None and self.attributable
+        if self.ledger_total is not None:
+            return self.reliable
+        return False
+
+    @property
+    def ledger_target(self) -> float | None:
+        if self.ledger_per_launch is not None:
+            return self.bytes_per_launch
+        if self.ledger_total is not None:
+            return self.bytes_total
+        return None
+
+    @property
     def ledger_err_pct(self) -> float | None:
-        if not self.ledger_bytes:
+        """相对误差。**必须是同基比较**：per-launch 账本对 per-launch 估算。"""
+        if not self.ledger_ready:
             return None
-        return 100.0 * (self.bytes_total - self.ledger_bytes) / self.ledger_bytes
+        target, ref = self.ledger_target, (self.ledger_per_launch
+                                           if self.ledger_per_launch is not None else self.ledger_total)
+        if not ref or target is None:
+            return None
+        return 100.0 * (target - ref) / ref
 
     @property
     def range_position_pct(self) -> float | None:
-        """估算值在账本给出的 [low, high] 区间里的相对位置（0=下界，100=上界）。"""
-        if not self.ledger_range:
+        """估算值在账本区间 [low, high] 里的相对位置（0=下界，100=上界），per-launch 口径。"""
+        if not self.ledger_range or not self.ledger_ready:
             return None
         low, high = self.ledger_range
-        if high <= low:
+        if high <= low or self.bytes_per_launch is None:
             return None
-        return 100.0 * (self.bytes_total - low) / (high - low)
+        return 100.0 * (self.bytes_per_launch - low) / (high - low)
 
     @property
     def range_verdict(self) -> str:
         if not self.ledger_range:
             return ""
         low, high = self.ledger_range
-        if self.bytes_total < low:
+        if not self.ledger_ready or self.bytes_per_launch is None:
+            return "无法裁决（per-launch 口径不成立：占空比不足或未锁定单一 kernel）"
+        if self.bytes_per_launch < low:
             return "低于下界（可能不是被测 kernel，或账本漏项反了）"
-        if self.bytes_total > high:
+        if self.bytes_per_launch > high:
             return "高于上界（账本可能漏了一项流量，例如多读了一趟）"
         pos = self.range_position_pct or 0.0
         if pos <= 25:
@@ -99,15 +137,16 @@ class DramEstimate:
 
 def estimate(samples: Sequence, peak_gbs: float, window_s: float,
              launches: int = 0, sampler_period_s: float = 0.0,
-             ledger_bytes: float | None = None,
+             ledger_per_launch: float | None = None,
+             ledger_total: float | None = None,
              ledger_range: tuple[float, float] | None = None) -> DramEstimate:
     """从 NVML 采样序列估算 DRAM 流量。
 
     samples: 具 `.t`(秒) / `.mem_util_pct` / `.sm_util_pct` 属性的采样点列表。
     """
     est = DramEstimate(peak_gbs=peak_gbs, window_s=window_s, launches=launches,
-                       ledger_bytes=ledger_bytes, ledger_range=ledger_range,
-                       sampler_period_s=sampler_period_s)
+                       ledger_per_launch=ledger_per_launch, ledger_total=ledger_total,
+                       ledger_range=ledger_range, sampler_period_s=sampler_period_s)
     if not samples:
         est.notes.append("没有采样点：NVML 采样被关闭或不可用")
         return est
@@ -180,13 +219,16 @@ def to_metrics(est: DramEstimate) -> list[tuple[str, float | None, str, str, str
     out.append(("meas__sampler_duty_pct", round(est.duty_pct, 1), "%",
                 "采样窗口中 SM≥5% 或显存≥20% 的采样点占比",
                 "低于 80% 时不给 per-launch 归因；低于 50% 时连总量也不给"))
-    if est.ledger_bytes:
-        err = est.ledger_err_pct or 0.0
-        out.append(("est__dram_vs_ledger_err_pct", round(err, 1), "%",
-                    "（估算 − 账本）/ 账本",
-                    f"账本 {est.ledger_bytes / 1e6:.1f} MB；与账本对拍常用 |误差| < 10% 作为验收线"))
+    if est.ledger_basis:
+        ref = est.ledger_per_launch if est.ledger_per_launch is not None else est.ledger_total
+        basis = "每次 launch" if est.ledger_basis == "per-launch" else "整窗口总量"
+        out.append(("est__dram_vs_ledger_err_pct",
+                    round(est.ledger_err_pct, 1) if est.ledger_err_pct is not None else None, "%",
+                    f"（估算 − 账本）/ 账本，同为「{basis}」口径",
+                    f"账本 {ref / 1e6:.1f} MB；对拍常用 |误差| < 10% 作为验收线"))
     if est.ledger_range:
-        out.append(("est__dram_range_position_pct", round(est.range_position_pct or 0.0, 1), "%",
-                    f"在账本区间 [{est.ledger_range[0] / 1e6:.1f}, {est.ledger_range[1] / 1e6:.1f}] MB 中的相对位置",
-                    est.range_verdict))
+        out.append(("est__dram_range_position_pct",
+                    round(est.range_position_pct, 1) if est.range_position_pct is not None else None, "%",
+                    f"在账本区间 [{est.ledger_range[0] / 1e6:.1f}, {est.ledger_range[1] / 1e6:.1f}] MB "
+                    f"（per-launch）中的相对位置", est.range_verdict))
     return out

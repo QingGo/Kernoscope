@@ -76,28 +76,59 @@ def test_missing_peak_bandwidth_marks_unreliable():
 
 
 def test_ledger_error_and_range_verdict():
-    # 估算 1.8e12 B，账本 1.5e12 B → 误差 +20%
-    est = estimate(_samples(), peak_gbs=900.0, window_s=2.0, ledger_bytes=1.5e12)
+    # per-launch 账本：总量 1.8e12 B / 100 launches = 1.8e10；账本 1.5e10 → +20%
+    est = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
+                   ledger_per_launch=1.5e10)
+    assert est.ledger_basis == "per-launch"
     assert est.ledger_err_pct == pytest.approx(20.0)
 
-    # 通用场景：账本给的是区间（下界=理想流量，上界=假设重读全回 HBM）
-    low, high = 100e6, 400e6
-    near_low = estimate(_samples(), peak_gbs=900.0, window_s=2.0, ledger_range=(low, high))
-    near_low.bytes_total = low + 0.1 * (high - low)
+    # 总量账本：与整窗口估算比
+    tot = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
+                   ledger_total=1.5e12)
+    assert tot.ledger_basis == "total"
+    assert tot.ledger_err_pct == pytest.approx(20.0)
+
+    # 通用场景：账本给的是 per-launch 区间（下界=理想流量，上界=重读全回 HBM）
+    low, high = 1.6e10, 2.0e10
+    near_low = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
+                        ledger_range=(low, high))
+    near_low.bytes_per_launch = low + 0.1 * (high - low)
     assert near_low.range_verdict == "落在区间靠下界侧"
 
-    above = estimate(_samples(), peak_gbs=900.0, window_s=2.0, ledger_range=(low, high))
-    above.bytes_total = high * 1.5
+    above = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
+                     ledger_range=(low, high))
+    above.bytes_per_launch = high * 1.5
     assert "高于上界" in above.range_verdict
 
-    below = estimate(_samples(), peak_gbs=900.0, window_s=2.0, ledger_range=(low, high))
-    below.bytes_total = low * 0.5
+    below = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
+                     ledger_range=(low, high))
+    below.bytes_per_launch = low * 0.5
     assert "低于下界" in below.range_verdict
+
+
+def test_per_launch_ledger_is_compared_against_per_launch_not_window_total():
+    """真机踩到的 bug：账本按 per-launch 给（1073.7 MB），却拿整窗口总量去比。
+
+    结果误差算成 +1.9e6%，看着像账本错，其实是口径错。对拍必须同基。
+    """
+    est = estimate(_samples(10), peak_gbs=907.0, window_s=2.0, launches=1000,
+                   ledger_per_launch=1073.7e6)
+    assert est.ledger_basis == "per-launch"
+    assert est.ledger_err_pct is not None
+    assert abs(est.ledger_err_pct) < 200, "同基比较下不可能是百万级百分比"
+    # 若误用整窗口总量，误差会是百万级 —— 这正是要防止的行为
+    wrong = 100 * (est.bytes_total - 1073.7e6) / 1073.7e6
+    assert abs(wrong) > 1e4
+
+    # 口径不成立时不得给数字
+    not_attr = estimate(_samples(10), peak_gbs=907.0, window_s=2.0, launches=0,
+                        ledger_per_launch=1073.7e6)
+    assert not_attr.ledger_err_pct is None and not not_attr.ledger_ready
 
 
 def test_section_metrics_are_estimated_with_ncu_cross_reference():
     est = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=50,
-                   ledger_bytes=1.8e12, ledger_range=(1.0e12, 2.0e12))
+                   ledger_per_launch=1.8e12 / 50, ledger_range=(1.0e12, 2.0e12))
     sec = build_dram_section(BuildOptions(dram=est))
     names = {m.name: m for m in sec.metrics}
     assert set(names) >= {"est__dram_bytes_total", "est__dram_bytes_per_launch",
@@ -127,9 +158,9 @@ class _FakeSampler:
 def test_cli_reports_dram_summary_and_ledger(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "Sampler", _FakeSampler)
     base = tmp_path / "rep"
-    # 账本给成与估算同量级（2110 GB），这样误差百分比才有意义
+    # 账本按 per-launch 给：估算总量 ≈2112 GB，synthetic_gemm 有 5 次 launch → 每次 ≈422 GB
     rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
-                   "--ks-ledger-mb", "2200000", "-o", str(base), "-f"])
+                   "--ks-ledger-mb", "440000", "-o", str(base), "-f"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "DRAM 估算" in out
@@ -142,7 +173,7 @@ def test_cli_reports_dram_summary_and_ledger(monkeypatch, capsys, tmp_path):
     assert metrics["est__dram_bytes_per_launch"]["value"] > 0
     assert metrics["meas__sampler_duty_pct"]["value"] == pytest.approx(100.0)
     assert metrics["meas__sampler_duty_pct"]["unit"] == "%"
-    # 账本 2200 GB vs 估算 ~2112 GB → 轻微偏小（-4% 量级）
+    # 账本 440 GB/launch vs 估算 ~422 GB/launch → 轻微偏小（几个百分点）
     assert -10 < metrics["est__dram_vs_ledger_err_pct"]["value"] < 0
 
 

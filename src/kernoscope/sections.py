@@ -136,6 +136,12 @@ def build_dram_section(opt: BuildOptions) -> Section | None:
         if value is None:
             continue
         # per-launch / 吞吐占比需要"窗口被该 kernel 主导"，否则只能给 n/a
+        if name in ("est__dram_vs_ledger_err_pct", "est__dram_range_position_pct") and value is None:
+            s.add(Metric.unavailable(
+                name, "账本对拍的口径不成立：per-launch 需要「单一 kernel 主导窗口 + 占空比 ≥80%」，"
+                      f"当前占空比 {est.duty_pct:.0f}%、kernel 数 {'1' if est.attributable else '不确定'}"
+                      "；请用 -k 锁定单个 kernel 并让它跑满窗口"))
+            continue
         if name == "est__dram_bytes_per_launch" and not est.attributable:
             s.add(Metric.unavailable(
                 name,
