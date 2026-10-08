@@ -16,6 +16,7 @@ from typing import Any
 
 from . import __version__
 from .provenance import Metric, Provenance, Section
+from .refusals import Refusal, legacy_refusal
 
 SCHEMA_VERSION = 1
 
@@ -274,6 +275,7 @@ class Report:
                                     "reason": m.reason,
                                     "note": m.note,
                                     "resolution": m.resolution,
+                                    **({"refusal": m.refusal.to_dict()} if m.refusal else {}),
                                 }
                                 for m in s.metrics
                             ],
@@ -333,6 +335,10 @@ class Report:
                             reason=md.get("reason", ""),
                             note=md.get("note", ""),
                             resolution=md.get("resolution", ""),
+                            refusal=(Refusal.from_dict(md["refusal"]) if md.get("refusal")
+                                     else (legacy_refusal(md.get("reason", ""))
+                                           if Provenance(md["provenance"])
+                                           is Provenance.UNAVAILABLE else None)),
                         )
                     )
                 k.sections.append(s)

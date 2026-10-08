@@ -15,6 +15,7 @@ from typing import Any
 from .analyze.occupancy import theoretical_occupancy
 from .analyze.roofline import MachinePeaks, SpeedOfLight
 from .provenance import Metric, Section, UNAVAILABLE_REASONS
+from .refusals import RefusalCode
 
 # `--set` 的分级（对齐 ncu --list-sets）
 SET_SECTIONS: dict[str, list[str]] = {
@@ -30,19 +31,35 @@ SET_SECTIONS: dict[str, list[str]] = {
              "PmSampling", "Nvlink_Tables", "NumaAffinity"],
 }
 
-# 需要硬件计数器才能给出的 section 及原因
-COUNTER_SECTIONS: dict[str, str] = {
-    "ComputeWorkloadAnalysis": UNAVAILABLE_REASONS["counters"],
-    "MemoryWorkloadAnalysis": UNAVAILABLE_REASONS["counters"],
-    "MemoryWorkloadAnalysis_Tables": UNAVAILABLE_REASONS["counters"],
-    "SchedulerStats": UNAVAILABLE_REASONS["counters"],
-    "WarpStateStats": UNAVAILABLE_REASONS["counters"],
-    "SourceCounters": UNAVAILABLE_REASONS["sampling"],
-    "PmSampling": UNAVAILABLE_REASONS["counters"],
-    "Nvlink_Tables": "requires NVLink hardware with NVML counter support (not present / not supported)",
-    "NumaAffinity": "not applicable on this device",
-    "WorkloadDistribution": UNAVAILABLE_REASONS["instrumentation"],
+# 需要硬件计数器才能给出的 section 及原因。
+# W3：值从「一句散文」升级成 (拒绝码, 散文) —— 判决在码里，散文只解释。这样
+# `--strict` 的门禁、结构化拒绝、capabilities 的覆盖矩阵共用同一份判决。
+COUNTER_SECTIONS: dict[str, tuple[RefusalCode, str]] = {
+    "ComputeWorkloadAnalysis": (RefusalCode.NO_COUNTERS, UNAVAILABLE_REASONS["counters"]),
+    "MemoryWorkloadAnalysis": (RefusalCode.NO_COUNTERS, UNAVAILABLE_REASONS["counters"]),
+    "MemoryWorkloadAnalysis_Tables": (RefusalCode.NO_COUNTERS, UNAVAILABLE_REASONS["counters"]),
+    "SchedulerStats": (RefusalCode.NO_COUNTERS, UNAVAILABLE_REASONS["counters"]),
+    "WarpStateStats": (RefusalCode.NO_COUNTERS, UNAVAILABLE_REASONS["counters"]),
+    "SourceCounters": (RefusalCode.SAMPLING_UNAVAILABLE, UNAVAILABLE_REASONS["sampling"]),
+    "PmSampling": (RefusalCode.SAMPLING_UNAVAILABLE, UNAVAILABLE_REASONS["counters"]),
+    "Nvlink_Tables": (RefusalCode.NO_NVLINK,
+                      "requires NVLink hardware with NVML counter support "
+                      "(not present / not supported)"),
+    "NumaAffinity": (RefusalCode.NOT_APPLICABLE, "not applicable on this device"),
+    "WorkloadDistribution": (RefusalCode.INSTRUMENTATION_MISSING,
+                             UNAVAILABLE_REASONS["instrumentation"]),
 }
+
+
+def counter_section_reason(name: str) -> str:
+    """这个 section 被拒的散文原因（门禁消息与渲染共用）。"""
+    entry = COUNTER_SECTIONS.get(name)
+    return entry[1] if entry else ""
+
+
+def counter_section_code(name: str) -> RefusalCode:
+    entry = COUNTER_SECTIONS.get(name)
+    return entry[0] if entry else RefusalCode.INTERNAL_UNKNOWN
 
 # 这些 ncu 指标名"我们知道自己给不出"，显式登记以便 --metrics/--strict 处理
 KNOWN_COUNTER_METRICS: dict[str, str] = {
@@ -130,7 +147,7 @@ def build_device_kernel(opt: BuildOptions) -> Section:
         s.add(Metric.unavailable("meas__nvml_mem_busy_mean_pct",
                                  "没有 NVML 采样点：采样被关闭（--ks-no-nvml）或 nvidia-smi/pynvml "
                                  "不可用；没有它就无法给出显存忙碌代理",
-                                 source="NVML"))
+                                 source="NVML", code=RefusalCode.NO_NVML_SAMPLES))
     return s
 
 
@@ -149,8 +166,11 @@ def build_dram_section(opt: BuildOptions) -> Section | None:
 
     for name, value, unit, source, note, resolution in to_metrics(est, opt.ledger_basis):
         if value is None:
-            s.add(Metric.unavailable(name, est.reason_for(name, opt.ledger_basis),
-                                     source=source, resolution=resolution))
+            ref = est.refusal_for(name, opt.ledger_basis)
+            s.add(Metric.unavailable(name, ref.message, source=source, resolution=resolution,
+                                     code=ref.code, observed=ref.observed,
+                                     threshold=ref.threshold, remedy=ref.remedy,
+                                     severity=ref.severity))
         elif name == "ks__ledger_range_verdict":
             s.add(Metric.derived(name, value, unit, source=source, note=note,
                                  resolution=resolution))
@@ -189,7 +209,10 @@ def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
             s.add(Metric.estimated(name, value, unit, source=source, note=note))
     if st.dram_bytes_per_launch is None:
         s.add(Metric.unavailable("est__dram_bytes_per_launch_trace",
-                                 st.dram_bytes_unavailable_reason or "轨迹不足以给出 DRAM 字节"))
+                                 st.dram_bytes_unavailable_reason or "轨迹不足以给出 DRAM 字节",
+                                 code=RefusalCode.TRACE_UNAVAILABLE,
+                                 observed={"sampling_ratio": round(st.sampling_ratio, 4),
+                                           "records": st.records}))
     # 两条独立路径的交叉校验（NVML 代理 vs 轨迹模型）
     if (st.dram_bytes_per_launch is not None and opt.dram is not None
             and getattr(opt.dram, "bytes_per_launch", None)):
@@ -251,11 +274,17 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                 "launch__grid_size",
                 f"该 kernel 有 {len(configs)} 组不同 launch 配置（grid="
                 f"{'/'.join(str(g) for g in grids)}）：单一数值会误导 2/3 的 launch，"
-                f"故报 n/a；逐组读数见 LaunchConfigs section"))
+                f"故报 n/a；逐组读数见 LaunchConfigs section",
+                code=RefusalCode.MIXED_LAUNCH_CONFIG,
+                observed={"configs": len(configs), "grid_sizes": grids},
+                severity="degraded"))
             s.add(Metric.unavailable(
                 "launch__block_size",
                 f"该 kernel 有 {len(configs)} 组不同 launch 配置（block="
-                f"{'/'.join(str(b) for b in blocks)}）：单一数值会误导，故报 n/a"))
+                f"{'/'.join(str(b) for b in blocks)}）：单一数值会误导，故报 n/a",
+                code=RefusalCode.MIXED_LAUNCH_CONFIG,
+                observed={"configs": len(configs), "block_sizes": blocks},
+                severity="degraded"))
             s.add(Metric.exact("ks__grid_sizes_observed", "|".join(str(g) for g in grids), "",
                                source="distinct grid sizes in CUPTI activity",
                                note="取值集合口径；逐组时长与 occupancy 见 LaunchConfigs section"))
@@ -353,6 +382,7 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
         s.add(Metric.unavailable(
             "sm__maximum_warps_per_active_cycle_pct", UNAVAILABLE_REASONS["counters"],
             source="ncu computes this from hardware counters",
+            code=RefusalCode.NO_COUNTERS, severity="degraded",
         ))
         out.append(s)
 
@@ -400,13 +430,17 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                     "拒绝用该标定算 roofline 拐点：" + (caliber_note or
                     "machine-profile.json 的 measured_matmul_tflops 缺少 acc_caliber / "
                     "precision_settings / method 字段。请用新版 tools/machine-profile.py 重新标定"),
-                    source="calibration caliber check"))
+                    source="calibration caliber check",
+                    code=RefusalCode.CALIBRATION_CALIBER_MISMATCH,
+                    observed={"caliber_note": caliber_note} if caliber_note else {}))
                 s.add(Metric.unavailable(
                     "est__pct_of_measured_compute_peak",
-                    "同上：缺累加口径字段的 matmul 峰值不能用于拐点判定"))
+                    "同上：缺累加口径字段的 matmul 峰值不能用于拐点判定",
+                    code=RefusalCode.CALIBRATION_CALIBER_MISMATCH))
                 s.add(Metric.unavailable(
                     "est__bound",
-                    "同上：compute roof 不可用，无法判定 compute/memory bound"))
+                    "同上：compute roof 不可用，无法判定 compute/memory bound",
+                    code=RefusalCode.CALIBRATION_CALIBER_MISMATCH))
             s.add(Metric.estimated("est__arithmetic_intensity", round(sol.arithmetic_intensity, 2),
                                    "FLOP/B", source="user-provided workload"))
             # R-38：达成值 > 标定峰值是物理上不可能的，必须显式报红灯，
@@ -420,9 +454,12 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                 "est__achieved_tflops",
                 "workload not provided: pass --ks-gemm M,N,K or --ks-flops/--ks-bytes "
                 "(plus --ks-calibration machine-profile.json for measured peaks)",
+                code=RefusalCode.NO_WORKLOAD,
+                observed={"peaks_provided": bool(opt.peaks)}, severity="degraded",
             ))
         s.add(Metric.unavailable("sm__throughput.avg.pct_of_peak_sustained_elapsed",
-                                 UNAVAILABLE_REASONS["counters"]))
+                                 UNAVAILABLE_REASONS["counters"],
+                                 code=RefusalCode.NO_COUNTERS, severity="degraded"))
         out.append(s)
 
     # ---------------- InstructionStats（静态，来自 cubin）----------------
@@ -437,10 +474,12 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                                    source="cuobjdump -sass (static)"))
         else:
             s.add(Metric.unavailable("ks__static_sass_instructions",
-                                     "no cubin provided: pass --ks-cubin <file.so|.cubin>"))
+                                     "no cubin provided: pass --ks-cubin <file.so|.cubin>",
+                                     code=RefusalCode.NO_STATIC_INPUT))
         s.add(Metric.unavailable("smsp__inst_executed.sum", UNAVAILABLE_REASONS["counters"],
                                  source="dynamic instruction count needs counters; "
-                                        "static mix from cubin is provided instead"))
+                                        "static mix from cubin is provided instead",
+                                 code=RefusalCode.NO_COUNTERS, severity="degraded"))
         out.append(s)
 
     # ---------------- 访存轨迹（NVBit 插桩）----------------
@@ -493,7 +532,12 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                                                                 "est__dyn_instr_share_"))])
                 for name, value, unit, source, note in keep:
                     if value is None:
-                        sec.add(Metric.unavailable(name, st.unavailable_reason(), source=source))
+                        iref = st.refusal()
+                        sec.add(Metric.unavailable(name, iref.message, source=source,
+                                                   code=iref.code, observed=iref.observed,
+                                                   threshold=iref.threshold,
+                                                   remedy=iref.remedy,
+                                                   severity=iref.severity))
                     else:
                         sec.add(Metric.estimated(name, value, unit, source=source, note=note))
                 # 计数器版本的 stall 细分仍然不可得，必须显式说明
@@ -501,7 +545,8 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                     "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
                     UNAVAILABLE_REASONS["counters"] +
                     "；本工具给的是发射槽利用率上界 + 方向性判断（见本节 est__ 指标），"
-                    "不是 stall 周期细分"))
+                    "不是 stall 周期细分",
+                    code=RefusalCode.NO_COUNTERS, severity="degraded"))
                 out.append(sec)
 
     # ---------------- 明确不可得的 section ----------------
@@ -509,10 +554,12 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
     # 同一个 section 名出现两次，会让"这个 section 到底有没有数据"变得不可判定）。
     already = {s.name for s in out}
     for name in requested_sections(opt):
-        reason = COUNTER_SECTIONS.get(name)
+        reason = counter_section_reason(name)
         if reason and name not in already:
             sec = Section(name)
-            sec.add(Metric.unavailable(f"ks__{name.lower()}_status", reason))
+            sec.add(Metric.unavailable(f"ks__{name.lower()}_status", reason,
+                                       code=counter_section_code(name),
+                                       observed={"section": name}))
             out.append(sec)
 
     return out

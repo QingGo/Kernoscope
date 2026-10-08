@@ -36,6 +36,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from ..refusals import Refusal, RefusalCode, Remedy, combined_refusal
+
 # 窗口覆盖率阈值：低于 UNUSABLE 直接判为不可用；低于 WEAK 不给 per-launch 归因
 DUTY_UNUSABLE = 50.0
 DUTY_WEAK = 80.0
@@ -234,36 +236,56 @@ class DramEstimate:
             return None
         return self.trace_bytes_per_launch * self.launches
 
-    # ---- 拒绝给数的原因：点明哪一个前提没成立（R-32）----
-    def _total_failures(self) -> list[str]:
-        out: list[str] = []
+    # ---- 拒绝给数的原因：点明哪一个前提没成立（R-32）+ 结构化拒绝（W3）----
+    def _total_refusals(self) -> list[Refusal]:
+        out: list[Refusal] = []
         if self.n_samples <= 0:
-            out.append("没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）")
+            out.append(Refusal(
+                RefusalCode.NO_NVML_SAMPLES,
+                "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）",
+                observed={"nvml_samples": self.n_samples}))
         if self.peak_missing:
-            out.append("缺少本机实测峰值带宽：先跑 tools/machine-profile.py，"
-                       "再加 --ks-calibration machine-profile.json（或 --ks-peak-gbps）")
+            out.append(Refusal(
+                RefusalCode.NO_CALIBRATION,
+                "缺少本机实测峰值带宽：先跑 tools/machine-profile.py，"
+                "再加 --ks-calibration machine-profile.json（或 --ks-peak-gbps）",
+                observed={"peak_gbs": self.peak_gbs}))
         if self.n_samples > 0 and self.below_resolution:
-            out.append(
+            out.append(Refusal(
+                RefusalCode.BELOW_RESOLUTION,
                 f"显存忙碌读数 {self.mem_util_pct_mean:.1f}% 低于 NVML utilization.memory 的"
                 f"分辨率下限 {self.mem_util_resolution_pct:.0f} 个百分点："
-                f"无法区分『真的没搬』与『{self.mem_util_resolution_pct:.1f}% 被截断成 0』")
+                f"无法区分『真的没搬』与『{self.mem_util_resolution_pct:.1f}% 被截断成 0』",
+                observed={"mem_busy_pct": round(self.mem_util_pct_mean, 3)},
+                threshold={"resolution_pct": self.mem_util_resolution_pct}))
         if (self.n_samples > 0 and not self.peak_missing and not self.below_resolution
                 and self.window_coverage_pct < DUTY_UNUSABLE):
             need = _window_seconds_for(self.window_coverage_pct, DUTY_UNUSABLE,
                                        self.window_used_s or self.window_s)
-            out.append(
+            out.append(Refusal(
+                RefusalCode.COVERAGE_TOO_LOW,
                 f"窗口覆盖率 {_fmt_pct_cmp(self.window_coverage_pct, DUTY_UNUSABLE)}："
                 f"窗口没被被测负载主导，忙碌时段是否饱和无从确认"
                 + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto 只统计稳态段"
-                   if need else ""))
+                   if need else ""),
+                observed={"coverage_pct": round(self.window_coverage_pct, 1)},
+                threshold={"min_pct": DUTY_UNUSABLE},
+                remedy=Remedy("把稳态循环延长到约 "
+                              f"{need:.0f} 秒，或加 --ks-window auto 只统计稳态段",
+                              command="kernoscope --ks-window auto -- python bench_loop.py",
+                              cost_s=float(need or 0.0),
+                              then_answers=("dram_bytes",)) if need else None))
         return out
 
-    def _share_failure(self) -> str:
+    def _share_refusal(self) -> Refusal:
         """R-46：窗口主导性前提不成立时，点名份额与窗口里的其他 kernel。"""
         share = self.matched_kernel_kernel_share_pct
         if share is None:
-            return ("无法判定窗口主导性：报告里没有被匹配 kernel 的 GPU 时间"
-                    "（逐 launch 时长为空），per-launch 归因不可验证")
+            return Refusal(
+                RefusalCode.SHARE_UNKNOWN,
+                "无法判定窗口主导性：报告里没有被匹配 kernel 的 GPU 时间"
+                "（逐 launch 时长为空），per-launch 归因不可验证",
+                observed={"matched_kernel_ns": self.matched_kernel_ns})
         others = self.other_kernel_window_share_pct
         detail = ""
         if self.other_kernel_count:
@@ -271,65 +293,113 @@ class DramEstimate:
                       + (f"，按墙钟占 {others:.0f}%" if others is not None else ""))
         bias = self.attribution_bias_estimate_pct
         bound = (f"归因本身的上偏估计 +{bias:.0f}%" if bias is not None else "归因偏差未知")
-        return (f"窗口主导性不足：被匹配的 kernel 只占窗口 kernel 时间的 "
-                f"{_fmt_pct_cmp(share, SHARE_STRONG, digits=1)}，{bound}{detail}；"
-                f"把窗口缩到只含该 kernel（--ks-warmup/--ks-window-s 只跑一段），"
-                f"或改用 --ks-ledger-total-mb 走整窗口口径，"
-                f"或加 --ks-memtrace 换用**轨迹口径**（只测被追踪 kernel，不受窗口构成影响）")
+        return Refusal(
+            RefusalCode.SHARE_TOO_LOW,
+            f"窗口主导性不足：被匹配的 kernel 只占窗口 kernel 时间的 "
+            f"{_fmt_pct_cmp(share, SHARE_STRONG, digits=1)}，{bound}{detail}；"
+            f"把窗口缩到只含该 kernel（--ks-warmup/--ks-window-s 只跑一段），"
+            f"或改用 --ks-ledger-total-mb 走整窗口口径，"
+            f"或加 --ks-memtrace 换用**轨迹口径**（只测被追踪 kernel，不受窗口构成影响）",
+            observed={"matched_kernel_kernel_share_pct": round(share, 1),
+                      "other_kernel_count": self.other_kernel_count,
+                      "matched_kernel_ns": self.matched_kernel_ns,
+                      "other_kernels_ns": self.other_kernels_ns},
+            threshold={"share_pct": SHARE_STRONG})
 
-    def _attribution_failures(self) -> list[str]:
-        out = self._total_failures()
+    def _total_failures(self) -> list[str]:
+        return [r.message for r in self._total_refusals()]
+
+    def _attribution_refusals(self) -> list[Refusal]:
+        out = self._total_refusals()
         if self.launches <= 0:
-            out.append("未锁定单一 kernel（匹配到多个 kernel）：per-launch 口径不适用，"
-                       "请用 -k 只选一个 kernel")
+            out.append(Refusal(
+                RefusalCode.MULTI_KERNEL_WINDOW,
+                "未锁定单一 kernel（匹配到多个 kernel）：per-launch 口径不适用，"
+                "请用 -k 只选一个 kernel",
+                observed={"matched_kernels_in_window": self.other_kernel_count}))
             return out
         if self.reliable and self.window_coverage_pct < DUTY_WEAK:
             need = _window_seconds_for(self.window_coverage_pct, DUTY_WEAK,
                                        self.window_used_s or self.window_s)
-            out.append(
+            out.append(Refusal(
+                RefusalCode.COVERAGE_TOO_LOW,
                 f"窗口覆盖率 {_fmt_pct_cmp(self.window_coverage_pct, DUTY_WEAK)}：无法把 "
                 f"{self.bytes_total / 1e6:.0f} MB 总量归因到每个 launch"
-                + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto" if need else ""))
+                + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto" if need else ""),
+                observed={"coverage_pct": round(self.window_coverage_pct, 1)},
+                threshold={"min_pct": DUTY_WEAK}))
         share = self.matched_kernel_kernel_share_pct
         if self.reliable and (share is None or share < SHARE_STRONG):
-            out.append(self._share_failure())
+            out.append(self._share_refusal())
         return out
 
-    def reason_for(self, name: str, basis: str = "auto") -> str:
-        """某个指标为什么是 n/a —— 具体到失败条件（R-32）。"""
+    def refusal_for(self, name: str, basis: str = "auto") -> Refusal:
+        """某个指标为什么是 n/a —— 结构化版本（W3）：code + observed + threshold + remedy。"""
         if name in ("est__dram_bytes_total",):
-            fails = self._total_failures()
-            return "；".join(fails) or "无法估算（未知原因）"
+            return self._total_refusal()
         if name in ("est__dram_bytes_per_launch",):
-            fails = self._attribution_failures()
-            return "；".join(fails) or "无法归因到单个 launch（未知原因）"
+            return self._attribution_refusal()
         if name in ("est__dram_throughput_pct_of_peak",):
-            return "；".join(self._total_failures()) or "无法给出吞吐占比（未知原因）"
+            return self._total_refusal("无法给出吞吐占比（未知原因）")
         if name == "est__dram_bytes_per_launch_trace":
-            return self.trace_unavailable_reason or "轨迹未提供 per-launch 字节"
+            return self._trace_refusal()
         if name == "est__dram_vs_ledger_err_pct":
-            return self._ledger_failure(basis, need="误差")
+            return self._ledger_refusal(basis, need="误差")
         if name == "est__dram_range_position_pct":
-            return self._ledger_failure(basis, need="区间位置", want_total=False)
+            return self._ledger_refusal(basis, need="区间位置", want_total=False)
         if name in ("ks__matched_kernel_window_share_pct",
                     "ks__matched_kernel_kernel_share_pct"):
-            return self._share_failure()
+            return self._share_refusal()
         if name == "ks__attribution_bias_estimate_pct":
-            return "无法给出归因上偏估计：" + self._share_failure()
+            inner = self._share_refusal()
+            return Refusal(inner.code, "无法给出归因上偏估计：" + inner.message,
+                           observed=dict(inner.observed), threshold=dict(inner.threshold),
+                           remedy=inner.remedy, severity=inner.severity)
         if name == "ks__sampler_window_coverage_pct":
             if self.n_samples <= 0:
-                return "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：覆盖率无定义"
-            return "；".join(self.notes) or "覆盖率不可得"
+                return Refusal(
+                    RefusalCode.NO_NVML_SAMPLES,
+                    "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：覆盖率无定义",
+                    observed={"nvml_samples": self.n_samples})
+            return Refusal(RefusalCode.INTERNAL_UNKNOWN,
+                           "；".join(self.notes) or "覆盖率不可得")
         if name in ("ks__dram_window_mem_busy_mean_pct", "ks__window_busy_segments"):
-            return "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：窗口内统计量无定义"
-        return "；".join(self.notes) or "无法估算"
+            return Refusal(
+                RefusalCode.NO_NVML_SAMPLES,
+                "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：窗口内统计量无定义",
+                observed={"nvml_samples": self.n_samples})
+        return Refusal(RefusalCode.INTERNAL_UNKNOWN, "；".join(self.notes) or "无法估算")
 
-    def _ledger_failure(self, basis: str, need: str, want_total: bool | None = None) -> str:
-        why = "；".join(self._total_failures() if want_total else self._attribution_failures()) \
-            or "对拍口径不成立"
+    def _total_refusal(self, fallback: str = "无法估算（未知原因）") -> Refusal:
+        rs = self._total_refusals()
+        return combined_refusal(rs) if rs else Refusal(RefusalCode.INTERNAL_UNKNOWN, fallback)
+
+    def _attribution_refusal(self) -> Refusal:
+        rs = self._attribution_refusals()
+        return combined_refusal(rs) if rs else \
+            Refusal(RefusalCode.INTERNAL_UNKNOWN, "无法归因到单个 launch（未知原因）")
+
+    def _trace_refusal(self) -> Refusal:
+        return Refusal(
+            RefusalCode.TRACE_UNAVAILABLE,
+            self.trace_unavailable_reason or "轨迹未提供 per-launch 字节",
+            observed={"trace_bytes_per_launch": self.trace_bytes_per_launch})
+
+    def _ledger_refusal(self, basis: str, need: str, want_total: bool | None = None) -> Refusal:
+        inner = (self._total_refusal() if want_total else self._attribution_refusal())
         hint = ("；可以加 --ks-memtrace <trace> 换用**轨迹口径**的 per-launch 字节"
                 if not self.trace_available else "")
-        return f"{need}行无法给出：{why}{hint}"
+        return Refusal(
+            inner.code, f"{need}行无法给出：{inner.message or '对拍口径不成立'}{hint}",
+            observed=dict(inner.observed), threshold=dict(inner.threshold),
+            remedy=inner.remedy, severity=inner.severity, causes=inner.causes)
+
+    def reason_for(self, name: str, basis: str = "auto") -> str:
+        """散文版本 —— 与 `refusal_for` 同一来源（不允许两处各自解释，D3 的教训）。"""
+        return self.refusal_for(name, basis).message
+
+    def _ledger_failure(self, basis: str, need: str, want_total: bool | None = None) -> str:
+        return self._ledger_refusal(basis, need, want_total).message
 
     # ---- 口径解析（R-33）----
     @property

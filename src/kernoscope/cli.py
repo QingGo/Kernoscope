@@ -34,7 +34,7 @@ from .report import DeviceInfo, KernelLaunch, KernelReport, Report
 from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
                        build_device_kernel, build_dram_section, build_kernel_sections,
-                       requested_sections)
+                       counter_section_reason, requested_sections)
 
 PROG = "kernoscope"
 
@@ -773,7 +773,8 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
     #    算出来了，`--section SchedulerStats --strict` 仍然返回 2 —— 门禁在拦自己的成果。
     for s in args.section or []:
         if s in COUNTER_SECTIONS and not _section_produced(rep, s):
-            problems.append(f"requested section produced no data: {s} - {COUNTER_SECTIONS[s]}")
+            problems.append(f"requested section produced no data: {s} - "
+                            f"{counter_section_reason(s)}")
     # 4) --set 也要覆盖：只把 section 名报出来，不把 10 个 section 全铺开
     set_name = getattr(args, "set_name", "basic")
     if not (args.section or []):

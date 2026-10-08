@@ -2,6 +2,7 @@
 
 import pytest
 
+from kernoscope.refusals import RefusalCode
 from kernoscope.provenance import Metric, Provenance, ProvenanceError, Section
 
 
@@ -11,7 +12,8 @@ def test_r1_unavailable_must_be_none_and_have_reason():
                reason="counters")
     with pytest.raises(ProvenanceError, match="R1"):
         Metric("x", None, Provenance.UNAVAILABLE)  # 缺 reason
-    m = Metric.unavailable("sm__throughput.avg.pct_of_peak_sustained_elapsed", "counters restricted")
+    m = Metric.unavailable("sm__throughput.avg.pct_of_peak_sustained_elapsed",
+                                     "counters restricted", code=RefusalCode.NO_COUNTERS)
     assert m.value is None
     assert m.render_value() == "n/a"
 
@@ -35,7 +37,8 @@ def test_r2_hardened_counter_names_cannot_carry_any_value():
     with pytest.raises(ProvenanceError, match="no counter backend"):
         Metric.exact("dram__bytes.sum", 1024)
     # 正确姿势：n/a + 原因
-    assert Metric.unavailable("dram__bytes.sum", "counters restricted").value is None
+    assert Metric.unavailable("dram__bytes.sum", "counters restricted",
+                                  code=RefusalCode.NO_COUNTERS).value is None
     # 将来真接上计数器时：登记白名单即可（这里验证机制本身可用）
     from kernoscope import provenance
 
@@ -84,13 +87,15 @@ def test_section_provenance_ignores_na_rows():
     s = Section("SpeedOfLight")
     s.add(Metric.exact("gpu__time_duration.sum", 1.0))
     s.add(Metric.estimated("est__achieved_tflops", 2.0))
-    s.add(Metric.unavailable("sm__throughput.avg.pct_of_peak_sustained_elapsed", "counters"))
+    s.add(Metric.unavailable("sm__throughput.avg.pct_of_peak_sustained_elapsed", "counters",
+                                 code=RefusalCode.NO_COUNTERS))
     assert s.provenance is Provenance.ESTIMATED   # 有值指标里最保守的那个
     assert s.n_unavailable == 1
     assert s.has_values
 
     only_na = Section("SchedulerStats").add(
-        Metric.unavailable("ks__schedulerstats_status", "counters"))
+        Metric.unavailable("ks__schedulerstats_status", "counters",
+                                 code=RefusalCode.NO_COUNTERS))
     assert only_na.provenance is Provenance.UNAVAILABLE
     assert not only_na.has_values
 

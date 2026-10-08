@@ -17,8 +17,40 @@ from typing import Any, Iterable
 
 from ..provenance import Metric, Provenance
 from ..report import Report
+from ..refusals import Refusal
 
 WIDTH = 46
+
+
+def _refusal_code(m: Metric) -> str:
+    return m.refusal.code.value if m.refusal is not None else "legacy_report"
+
+
+def _refusal_cmp(ref: Refusal) -> str:
+    """observed vs threshold —— 同单位相减才知道「差多少」。"""
+    if not ref.observed and not ref.threshold:
+        return ""
+    parts = []
+    if ref.observed:
+        parts.append("observed " + ", ".join(f"{k}={v}" for k, v in ref.observed.items()))
+    if ref.threshold:
+        parts.append("threshold " + ", ".join(f"{k}={v}" for k, v in ref.threshold.items()))
+    line = " | ".join(parts)
+    return line + (f"  (downgraded: {ref.severity})" if ref.severity != "blocking" else "")
+
+
+def _cost_str(rem) -> str:
+    if rem.cost_kind == "unavailable":
+        return "本机不可行"
+    if rem.cost_kind == "manual":
+        return "需人工"
+    if rem.cost_s and rem.cost_s > 0:
+        return f"{rem.cost_s:.0f} 秒" if rem.cost_s < 90 else f"{rem.cost_s / 60:.0f} 分钟"
+    return "≈0"
+
+
+def _json_cell(d: dict) -> str:
+    return json.dumps(d, ensure_ascii=False, sort_keys=True) if d else ""
 
 
 def _fmt_value(value, unit: str, print_units: str = "auto") -> tuple[str, str]:
@@ -110,8 +142,19 @@ def render_text(rep: Report, *, quiet: bool = False, summary: str = "none",
             for m in shown:
                 name = f"{s.name}.{m.name}" if print_metric_name == "full" else m.name
                 if m.provenance is Provenance.UNAVAILABLE:
+                    # W3：先给闭集 code，再给观测值/门槛与补救办法 —— 人话负责解释，
+                    # code 负责让下游（agent、门禁、统计）可编程处理。
                     out.append(f"    {name:<{WIDTH}} {'n/a':>14} {'':<8} "
-                               f"{m.provenance.tag}  {m.reason[:160]}")
+                               f"{m.provenance.tag}  [{_refusal_code(m)}] {m.reason[:160]}")
+                    if m.refusal is not None:
+                        cmp_line = _refusal_cmp(m.refusal)
+                        if cmp_line:
+                            out.append(f"        {cmp_line}")
+                        rem = m.refusal.remedy_or_default
+                        if rem and rem.action:
+                            cost = _cost_str(rem)
+                            out.append(f"        fix: {rem.action}"
+                                       + (f"  (代价≈{cost})" if cost else ""))
                 else:
                     value_str, unit = _fmt_value(m.value, m.unit or "", print_units)
                     line = f"    {name:<{WIDTH}} {value_str:>14} {unit:<8} {m.provenance.tag}"
@@ -141,7 +184,8 @@ def render_text(rep: Report, *, quiet: bool = False, summary: str = "none",
 
 
 CSV_COLUMNS = ["kernel", "section", "section_provenance", "metric", "value", "unit",
-               "provenance", "resolution", "source", "reason", "note"]
+               "provenance", "resolution", "source", "reason", "refusal_code",
+               "refusal_observed", "refusal_threshold", "refusal_remedy", "note"]
 
 LAUNCH_CSV_COLUMNS = ["kernel", "launch_index", "config", "grid_x", "grid_y", "grid_z",
                       "block_x", "block_y", "block_z", "start_ns", "end_ns", "duration_ns",
@@ -170,6 +214,10 @@ def render_csv(rep: Report, metrics: Iterable[str] | None = None) -> str:
                     "resolution": m.resolution,
                     "source": m.source,
                     "reason": m.reason,
+                    "refusal_code": m.refusal.code.value if m.refusal else "",
+                    "refusal_observed": _json_cell(m.refusal.observed if m.refusal else {}),
+                    "refusal_threshold": _json_cell(m.refusal.threshold if m.refusal else {}),
+                    "refusal_remedy": (m.refusal.remedy_or_default.action if m.refusal else ""),
                     "note": m.note,
                 })
     return buf.getvalue()

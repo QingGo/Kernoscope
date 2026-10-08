@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 from ..backends.opcode_hist import LaunchHistogram
 from ..backends.cubin import CATEGORY
+from ..refusals import Refusal, RefusalCode, combined_refusal
 
 # 每 SM 的 warp 调度器数（Volta 及以后为 4；这是"每周期最多发几条 warp 指令"的上限）
 SCHEDULERS_PER_SM = 4
@@ -52,16 +53,35 @@ class IssueStats:
                 and self.sm_count > 0 and self.clock_mhz > 0)
 
     def unavailable_reason(self) -> str:
-        miss: list[str] = []
+        return self.refusal().message
+
+    def refusal(self) -> Refusal:
+        """结构化拒绝（W3）：哪一条前提没成立 + 观测值 + 补救办法。
+
+        发射槽上界需要四个量同时成立。缺时钟是最常见的一种（`--ks-no-nvml` 或
+        NVML 不可用），它和"缺 SM 数"要分开报 —— 补救办法不同。
+        """
+        facts = {"warp_instrs": self.warp_instrs, "duration_ns": self.duration_ns,
+                 "sm_count": self.sm_count, "clock_mhz": self.clock_mhz}
+        out: list[Refusal] = []
         if self.warp_instrs <= 0:
-            miss.append("没有解析到动态指令数（opcode_hist 没产出记录？）")
+            out.append(Refusal(RefusalCode.NO_INSTR_HIST,
+                               "没有解析到动态指令数（opcode_hist 没产出记录？）",
+                               observed=facts))
         if self.duration_ns <= 0:
-            miss.append("缺少 kernel 时长：需要同一次运行的 gpu__time_duration.sum")
+            out.append(Refusal(RefusalCode.SHARE_UNKNOWN,
+                               "缺少 kernel 时长：需要同一次运行的 gpu__time_duration.sum",
+                               observed=facts, severity="degraded"))
         if self.sm_count <= 0:
-            miss.append("缺少 SM 数：加 --ks-sm-count <N>")
+            out.append(Refusal(RefusalCode.UNKNOWN_ARCH,
+                               "缺少 SM 数：加 --ks-sm-count <N>", observed=facts))
         if self.clock_mhz <= 0:
-            miss.append("缺少 SM 时钟：加 --ks-clock-mhz <MHz>（或让 NVML 采样开着）")
-        return "；".join(miss)
+            out.append(Refusal(RefusalCode.NO_CLOCK_READING,
+                               "缺少 SM 时钟：加 --ks-clock-mhz <MHz>（或让 NVML 采样开着）",
+                               observed=facts))
+        if not out:
+            raise ValueError("refusal() called on an available IssueStats")
+        return combined_refusal(out)
 
     @property
     def issue_slots(self) -> float:

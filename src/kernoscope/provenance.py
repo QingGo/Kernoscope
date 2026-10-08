@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, Sequence
 
+from .refusals import Refusal, RefusalCode, Remedy
+
 
 class Provenance(str, Enum):
     """数据出处。继承 str 便于 JSON/CSV 直出。"""
@@ -100,6 +102,8 @@ class Metric:
     resolution  量化的**分辨率下限**（R-31）：例如 NVML utilization.memory 是 1 个百分点、
                 采样周期 200 ms。读数为 0 时"真的是 0"与"0.3% 被截断成 0"不可区分，
                 所以分辨率必须与数字同时出现。
+    refusal     UNAVAILABLE 时的**结构化**拒绝（W3）：闭集 code + 实测值 + 门槛 + 补救办法。
+                `reason` 只是它的人话版本；判决在 `refusal` 里，所以 agent 可以编程处理。
     """
 
     name: str
@@ -110,6 +114,7 @@ class Metric:
     reason: str = ""
     note: str = ""
     resolution: str = ""
+    refusal: "Refusal | None" = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -123,7 +128,22 @@ class Metric:
                 )
             if not self.reason:
                 raise ProvenanceError(f"R1: unavailable metric needs a reason ({self.name})")
+            if self.refusal is None:
+                raise ProvenanceError(
+                    f"R1/W3: unavailable metric {self.name!r} has no structured refusal; "
+                    f"call Metric.unavailable(name, reason, code=RefusalCode....) so that "
+                    f"refusals carry a code + remedy instead of prose only"
+                )
+            if self.refusal.message != self.reason:
+                raise ProvenanceError(
+                    f"W3: {self.name!r}: reason and refusal.message disagree "
+                    f"({self.reason!r} vs {self.refusal.message!r}) - one source, one text"
+                )
             return
+        if self.refusal is not None:
+            raise ProvenanceError(
+                f"W3: {self.name!r} carries a value and a refusal at the same time"
+            )
 
         if _in_namespace(self.name, COUNTER_NAMESPACES) and not _in_namespace(
             self.name, EXACT_NCU_NAMESPACES
@@ -190,9 +210,22 @@ class Metric:
 
     @staticmethod
     def unavailable(name: str, reason: str, source: str = "",
-                    resolution: str = "") -> "Metric":
+                    resolution: str = "", *, code: "RefusalCode",
+                    observed: dict[str, object] | None = None,
+                    threshold: dict[str, object] | None = None,
+                    remedy: "Remedy | None" = None,
+                    severity: str = "blocking") -> "Metric":
+        """构造一个带**结构化拒绝**的 n/a 指标。
+
+        `code` 是必填关键字参数：无法给数时，必须说明是哪一类拒绝、观测到什么、
+        门槛是多少、以及怎么办。想加一个新的拒绝类型，就先去 `refusals.py` 的
+        `RefusalCode` 闭集里登记（登记时同时写 remedy）—— 这是「不存在散文式拒绝」
+        在类型层面的执行点。
+        """
+        ref = Refusal(code=code, message=reason, observed=dict(observed or {}),
+                      threshold=dict(threshold or {}), remedy=remedy, severity=severity)
         return Metric(name, None, Provenance.UNAVAILABLE, source=source, reason=reason,
-                      resolution=resolution)
+                      resolution=resolution, refusal=ref)
 
     # ---- 展示 ----
     def render_value(self) -> str:
