@@ -18,12 +18,12 @@ from .provenance import Metric, Provenance, Section, UNAVAILABLE_REASONS
 
 # `--set` 的分级（对齐 ncu --list-sets）
 SET_SECTIONS: dict[str, list[str]] = {
-    "basic": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic",
+    "basic": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic", "MemoryTrace",
               "WorkloadDistribution"],
-    "detailed": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic",
+    "detailed": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic", "MemoryTrace",
                  "WorkloadDistribution",
                  "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis", "SourceCounters"],
-    "full": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic",
+    "full": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic", "MemoryTrace",
              "WorkloadDistribution",
              "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis", "MemoryWorkloadAnalysis_Tables",
              "InstructionStats", "SchedulerStats", "WarpStateStats", "SourceCounters",
@@ -70,6 +70,7 @@ class BuildOptions:
     cubin_sass: dict[str, Any] | None = None
     nvml_summary: dict[str, float] = field(default_factory=dict)
     dram: Any = None      # analyze.dram.DramEstimate（避免循环 import）
+    memtrace: Any = None  # {kernel: analyze.memtrace.MemTraceStats}
     sm_count: int = 0
     device_name: str = ""
     arch: str = "sm_89"
@@ -149,6 +150,40 @@ def build_dram_section(opt: BuildOptions) -> Section | None:
                 f"总量归因到每个 launch（请用 -k 选单个 kernel，并让它在紧循环里跑满）"))
             continue
         s.add(Metric.estimated(name, value, unit, source=source, note=note))
+    return s
+
+
+def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
+    """访存轨迹 section（NVBit 插桩口径）。
+
+    provenance 规则：`meas__` 前缀 → measured（采样比 <100% 时为 estimated，
+    因为样本代表性是假设）；`est__` 前缀 → estimated。前缀本身由 R3 强制。
+    """
+    from .analyze.memtrace import to_metrics
+
+    if st is None:
+        return None
+    s = Section("MemoryTrace")
+    sampled = st.sampling_ratio < 0.999
+    for name, value, unit, source, note in to_metrics(st):
+        if value is None:
+            continue
+        if name.startswith("meas__") and not sampled:
+            s.add(Metric.measured(name, value, unit, source=source, note=note))
+        else:
+            s.add(Metric.estimated(name, value, unit, source=source, note=note))
+    if st.dram_bytes_per_launch is None:
+        s.add(Metric.unavailable("est__dram_bytes_per_launch_trace",
+                                 st.dram_bytes_unavailable_reason or "轨迹不足以给出 DRAM 字节"))
+    # 两条独立路径的交叉校验（NVML 代理 vs 轨迹模型）
+    if (st.dram_bytes_per_launch is not None and opt.dram is not None
+            and getattr(opt.dram, "bytes_per_launch", None)):
+        ratio = 100.0 * st.dram_bytes_per_launch / opt.dram.bytes_per_launch
+        s.add(Metric.derived(
+            "ks__dram_trace_vs_nvml_pct", round(ratio, 1), "%",
+            "轨迹模型（L2 miss×32B）/ NVML 代理（显存忙碌×峰值带宽）",
+            note=("两条独立路径的比值；接近 100% 说明结论稳，"
+                  "偏差大要查采样代表性或 L2 模型参数")))
     return s
 
 
@@ -302,6 +337,14 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                                  source="dynamic instruction count needs counters; "
                                         "static mix from cubin is provided instead"))
         out.append(s)
+
+    # ---------------- 访存轨迹（NVBit 插桩）----------------
+    if "MemoryTrace" in want and opt.memtrace:
+        st = _lookup_in(opt.memtrace, kr)
+        if st is not None:
+            sec = build_memtrace_section(st, opt)
+            if sec is not None:
+                out.append(sec)
 
     # ---------------- 明确不可得的 section ----------------
     for name in requested_sections(opt):

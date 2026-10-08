@@ -127,6 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="账本预测的整窗口 DRAM 字节数（MB，总量口径）：与整窗口估算对拍")
     k.add_argument("--ks-ledger-range-mb", default=None,
                    help="账本给出的区间 LOW,HIGH（MB）：报告里给出估算落在区间的哪一侧")
+    k.add_argument("--ks-memtrace", default=None,
+                   help="NVBit 访存轨迹（ks-memtrace v1）：给出 sectors/request、合并效率、"
+                        "L1/L2 命中率模型与 trace 口径的 DRAM 字节")
+    k.add_argument("--ks-l2-bytes", type=int, default=0, help="覆盖 L2 容量（字节）")
     k.add_argument("--ks-keep-intermediate", action="store_true",
                    help="保留 nsys 中间产物（.nsys-rep/.sqlite）；给了 -o 时默认保留在其旁边")
     k.add_argument("--strict", action="store_true",
@@ -250,6 +254,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .occupancy_cmd import occupancy_main
 
         return occupancy_main(argv[1:])
+    if argv and argv[0] == "memtrace":
+        from .memtrace_cmd import memtrace_main
+
+        return memtrace_main(argv[1:])
 
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"
@@ -387,6 +395,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ---------- DRAM 流量估算（NVML 代理）----------
     from .analyze.dram import estimate as estimate_dram
 
+    memtrace_stats = {}
+    if args.ks_memtrace:
+        from .analyze.memtrace import analyze_memtrace
+        from .backends.memtrace import MemTraceError, load_memtrace
+
+        try:
+            _tr = load_memtrace(args.ks_memtrace)
+            _st = analyze_memtrace(_tr, l2_bytes=args.ks_l2_bytes or None)
+            memtrace_stats[_st.kernel] = _st
+            log(f"memtrace: {_st.kernel} 载入 {_st.records} 条记录")
+        except (OSError, MemTraceError) as e:
+            log(f"error: 访存轨迹读取失败: {e}")
+            return 1
+
     grouped_dram: dict[str, list[KernelLaunch]] = {}
     for l in matched:
         grouped_dram.setdefault(l.display_name(args.kernel_name_base), []).append(l)
@@ -421,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arch=arch,
         peak_gbs=peak_gbs,
         dram=dram_est,
+        memtrace=memtrace_stats,
     )
 
     rep = Report(device=device)
