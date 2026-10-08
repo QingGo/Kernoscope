@@ -1,0 +1,45 @@
+Kernoscope
+Copyright 2026 Kernoscope contributors
+
+This product includes software developed as part of the Kernoscope project
+(https://github.com/kernoscope/kernoscope) and is licensed under the Apache
+License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------
+NOTICE - third party and trademark statements
+--------------------------------------------------------------------------
+
+1. No affiliation with NVIDIA.
+   Kernoscope is an independent project. It is not affiliated with, endorsed
+   by, sponsored by, or approved by NVIDIA Corporation. "NVIDIA", "CUDA",
+   "Nsight", "Nsight Compute" and "ncu" are trademarks or product names of
+   NVIDIA Corporation, used here only descriptively to indicate compatibility
+   or the format of data that Kernoscope reads.
+
+2. NVBit is an OPTIONAL, EXTERNALLY INSTALLED dependency - it is NOT
+   distributed with Kernoscope.
+   NVBit (https://github.com/NVlabs/NVBit) is licensed by NVIDIA under
+   "LicenseRef-NvidiaProprietary", which prohibits redistribution. Kernoscope
+   does not bundle, vendor, or redistribute NVBit binaries, headers, or the
+   tools built from them. Users who want SASS-level instrumentation install
+   NVBit themselves and point Kernoscope at it. Tool binaries built from NVBit
+   (e.g. by the user, or by the Intra-Kernel Profiler project) are likewise
+   not redistributed by Kernoscope.
+
+3. Intra-Kernel Profiler (IKP) - design reference and optional integration.
+   Some region-level tracing design ideas and optional interoperability follow
+   the Intra-Kernel Profiler project by yao-jz
+   (https://github.com/yao-jz/intra-kernel-profiler), licensed under the
+   Apache License, Version 2.0. No IKP source code is copied into Kernoscope at
+   this time; if it is, the attribution above and the Apache-2.0 NOTICE
+   requirements apply.
+
+4. Nsight Systems (nsys) and CUPTI are used through their official command
+   line interfaces / published APIs only. They are not bundled. Data read from
+   nsys SQLite exports is the user's own profiling data.
+
+5. Data honesty policy (project rule, enforced by tests).
+   Every number Kernoscope prints carries a provenance label
+   (exact / derived / measured / estimated / unavailable). Metrics that would
+   require GPU hardware performance counters are reported as "unavailable"
+   with a reason, never as substituted values. See docs/provenance.md.

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.ksreport.json
+*.perfetto.json
+*_nsys.nsys-rep
+*_nsys.sqlite
+
+
+docs/
