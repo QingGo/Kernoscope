@@ -91,6 +91,7 @@ class DiffResult:
     protocol_diffs: dict[str, Any] = field(default_factory=dict)
     mdd: dict[str, float] = field(default_factory=dict)
     mdd_source: str = ""
+    mdd_caveat: str = ""
     comparisons: list[Comparison] = field(default_factory=list)
     not_judged: list[Comparison] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -130,6 +131,8 @@ class DiffResult:
         if self.mdd:
             out.append("  MDD（来自 " + (self.mdd_source or "?") + "）："
                        + " · ".join(f"{k}={v}%" for k, v in sorted(self.mdd.items())))
+            if self.mdd_caveat:
+                out.append(f"    {self.mdd_caveat}")
         else:
             out.append("  没有 MDD：分不出噪声与真差别 —— 跑一次 `kernoscope selftest` "
                        "并把结果用 --selfcheck 传进来")
@@ -223,6 +226,7 @@ def diff_packets(pa: dict[str, Any], pb: dict[str, Any], *,
         if vals:
             mdd[key] = max(vals)
     res.mdd = mdd
+    res.mdd_caveat = ((selfcheck or {}).get("mdd") or {}).get("caveat", "")
     res.mdd_source = ("包内误差带 + --selfcheck" if (mdd and selfcheck) else
                       ("包内误差带（--ks-selfcheck 生成）" if mdd else ""))
 

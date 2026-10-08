@@ -106,7 +106,7 @@ def test_cross_process_samples_widen_sd():
     res.workloads = [_run("copy", 9.0), _run("copy", 9.1)]     # 同进程：几乎不抖
     _fill_band_and_mdd(res, extra_runs={"copy": [4.0, 14.0]})  # 跨进程：抖得多
     assert res.mdd["run_to_run_sd_pct"] > 3.0
-    assert res.mdd["cross_process_samples"] == {"copy": 2}
+    assert res.mdd["cross_process_samples"] == {"copy": [4.0, 14.0]}
 
 
 def test_mdd_never_below_half_a_point():

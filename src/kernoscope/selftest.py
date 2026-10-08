@@ -132,6 +132,8 @@ class SelftestResult:
                        f"（本次 SD={m.get('run_to_run_sd_pct')}% · "
                        f"分辨率下限={m.get('resolution_floor_pct')}% · "
                        f"误差带半宽={m.get('band_half_width_pct')}%）")
+            if m.get("caveat"):
+                out.append(f"  适用范围：{m['caveat']}")
         if self.peaks:
             out.append("")
             out.append("顺带量到的本机峰值（可直接当 --ks-calibration 用）："
@@ -468,7 +470,15 @@ def _fill_band_and_mdd(res: SelftestResult,
     res.mdd["run_to_run_sd_pct"] = round(sd, 2)
     res.mdd["resolution_floor_pct"] = round(floor, 2)
     res.mdd["band_half_width_pct"] = round(half_band, 2)
-    res.mdd["cross_process_samples"] = {k: len(v) for k, v in sorted(extra.items())}
+    # 原始跨进程样本要留下来：MDD 是被 diff 用来下判词的门槛，它必须可复核
+    res.mdd["cross_process_samples"] = {k: [round(x, 2) for x in v]
+                                        for k, v in sorted(extra.items())}
+    # MDD 是"这段机器状态下"的噪声估计，不是机器的固有常数：真机实测同一台卡在两次
+    # selftest 里给出过 SD=0.13% 与 SD=5.38% 两种结果（前者是热机稳定态，后者紧跟在
+    # 别的负载之后）。所以必须把适用范围一起写出来，否则 diff 会给出过于自信的判词。
+    res.mdd["caveat"] = ("MDD 只对测出它的那段机器状态成立：换机器、时钟/温度状态或"
+                         "同机其他租户负载变化后都要重跑 selftest；比较两次运行前"
+                         "先让 GPU 进入稳态")
     # kernel 时长的 MDD：用同一负载单次迭代时长的相对离散度近似（CUPTI 时长口径同源）
     ms_errs: list[float] = []
     for wid in DRAM_BOUND_IDS:

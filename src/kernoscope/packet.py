@@ -620,8 +620,8 @@ def enforce_budget(packet: dict[str, Any],
 
     steps = [
         ("unmeasured_examples", lambda: [g.pop("examples", None) for g in packet["unmeasured"]]),
-        ("next_pointers", lambda: packet.pop("next", None)),
         ("verdict_metrics", lambda: [v.pop("metrics", None) for v in packet["verdicts"]]),
+        ("next_pointers", lambda: packet.pop("next", None)),
         ("unmeasured_groups", lambda: _cap_list(packet, "unmeasured", 3)),
         ("passing_premises", _drop_passing_premises),
         ("remedy_commands",
