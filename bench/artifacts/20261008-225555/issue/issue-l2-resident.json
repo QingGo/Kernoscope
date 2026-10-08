@@ -1,0 +1,126 @@
+{
+  "kernel": "norm_k(float const*, float const*, float*, long)",
+  "launches": 1019,
+  "warp_instrs": 926588928,
+  "thread_blocks": 1043456,
+  "duration_ns": 3000000000.0,
+  "sm_count": 128,
+  "clock_mhz": 2450.0,
+  "issue_slots": 3763200000000.0,
+  "issue_slot_utilization_pct": 0.024622367346938775,
+  "issued_ipc_per_sm": 0.000984894693877551,
+  "category_pct": {
+    "alu": 81.08024473051351,
+    "control": 5.405644362710426,
+    "memory": 5.405644362710426,
+    "fp": 4.504703635592022,
+    "sync": 3.6037629084736174
+  },
+  "stall_direction": "偏延迟受限：发射槽只用掉约 0%、显存也不忙 ⇒ 大部分时间在等（长依赖链 / 访存延迟 / 同步），需要看 ILP、占用率与访存模式",
+  "available": true,
+  "unavailable_reason": "",
+  "opcode_counts": {
+    "BRA": 33390592,
+    "BSSY": 16695296,
+    "BSYNC": 16695296,
+    "EXIT": 16695296,
+    "F2I.FTZ.U32.TRUNC.NTZ": 8347648,
+    "FMUL": 16695296,
+    "I2F.U32.RP": 8347648,
+    "IADD3": 150257664,
+    "IADD3.X": 41738240,
+    "IMAD": 25042944,
+    "IMAD.HI.U32": 16695296,
+    "IMAD.IADD": 16695296,
+    "IMAD.MOV": 16695296,
+    "IMAD.MOV.U32": 116867072,
+    "IMAD.SHL.U32": 33390592,
+    "IMAD.WIDE.U32": 25042944,
+    "IMAD.X": 75128832,
+    "ISETP.GE.AND.EX": 8347648,
+    "ISETP.GE.U32.AND": 33390592,
+    "ISETP.GE.U32.AND.EX": 8347648,
+    "ISETP.NE.AND.EX": 25042944,
+    "ISETP.NE.U32.AND": 41697280,
+    "LDG.E.CONSTANT": 33390592,
+    "LOP3.LUT": 58433536,
+    "MOV": 16695296,
+    "MUFU.RCP": 8347648,
+    "S2R": 16695296,
+    "SHF.L.U64.HI": 16695296,
+    "STG.E": 16695296,
+    "ULDC.64": 8347648
+  },
+  "metrics": [
+    {
+      "name": "est__dynamic_warp_instructions",
+      "value": 926588928.0,
+      "unit": "",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "动态指令构成：alu 81.1%、control 5.4%、memory 5.4%、fp 4.5%；发射槽上限 = SM 数 × 4 调度器 × 时钟 × 时长；动态指令数按 **warp 级**计（NVBit count_warp_level=1），因此这是发射槽占用的直接计数"
+    },
+    {
+      "name": "est__issue_slot_utilization_pct",
+      "value": 0.0,
+      "unit": "%",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "**上界口径**：每 SM 4 个调度器、每周期各发 1 条；真实可用发射槽只会更少"
+    },
+    {
+      "name": "est__issued_ipc_per_sm",
+      "value": 0.001,
+      "unit": "warp-instr/SM/cycle",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "同为上界口径"
+    },
+    {
+      "name": "est__stall_direction",
+      "value": "偏延迟受限：发射槽只用掉约 0%、显存也不忙 ⇒ 大部分时间在等（长依赖链 / 访存延迟 / 同步），需要看 ILP、占用率与访存模式",
+      "unit": "",
+      "source": "由发射槽利用率 + 显存忙碌 + 指令构成推出的方向性判断",
+      "note": "**不是** ncu 的 stall 计数器细分（smsp__warp_issue_stalled_*）：这里只回答「到底发不出去还是在等数据」，且标 estimated"
+    },
+    {
+      "name": "est__warp_instructions_per_launch",
+      "value": 909312.0,
+      "unit": "",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "共 1019 次 launch"
+    },
+    {
+      "name": "est__dyn_instr_share_alu",
+      "value": 81.1,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权"
+    },
+    {
+      "name": "est__dyn_instr_share_control",
+      "value": 5.4,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权"
+    },
+    {
+      "name": "est__dyn_instr_share_memory",
+      "value": 5.4,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权"
+    },
+    {
+      "name": "est__dyn_instr_share_fp",
+      "value": 4.5,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权"
+    },
+    {
+      "name": "est__dyn_instr_share_sync",
+      "value": 3.6,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权"
+    }
+  ]
+}

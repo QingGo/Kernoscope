@@ -24,31 +24,45 @@ python tools/machine-profile.py --out bench/machine-profile.json
   "gpu": "NVIDIA GeForce RTX 4090",
   "cc": "8.9", "sm_count": 128, "l2_mib": 72.0,
   "nvidia_smi": "580.105, 3105, 450.00, 4, 16",     // driver, maxSM, power, pcie gen, width
-  "measured_dram": {"copy_gbs": 906.7, "read_gbs": 897.1, "write_gbs": 935.8},
-  "l2_info": {"l2_resident_max_mb": 32, "l2_drop_mb": 64, "l2_read_peak_gbs": 3100.0},
+  "measured_dram": {"copy_gbs": 909.2, "read_gbs": 905.8, "write_gbs": 940.0},
+  "l2_info": {"l2_resident_max_mb": 64, "l2_drop_mb": 96, "l2_read_peak_gbs": 2211.7},
   "measured_matmul_tflops": {
     "torch.bfloat16": {
-      "tflops": 171.7, "size": 8192, "ms": 6.64,
+      "tflops": 169.0, "size": 16384, "ms": 52.1,
       "acc_caliber": "bf16 (fp32 accumulate)",
       "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
                              "fp32_precision": "none", "allow_tf32": true},
-      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192]",
-      "caliber_variants_tflops": {"default": 165.6,
-                                  "reduced_precision_reduction_off": 164.3,
-                                  "fp32_ieee": 157.4},
-      "caliber_spread_pct": 5.0,
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {"default": 169.0,
+                                  "reduced_precision_reduction_off": 167.3,
+                                  "fp32_ieee": 162.6},
+      "caliber_spread_pct": 3.9,
       "caliber_distinguishable": true
+    },
+    "torch.float32": {
+      "tflops": 57.3, "size": 8192, "ms": 19.2,
+      "acc_caliber": "fp32 (fp32 accumulate)",
+      "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
+                             "fp32_precision": "none", "allow_tf32": true},
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {"default": 57.3,
+                                  "reduced_precision_reduction_off": 57.1,
+                                  "fp32_ieee": 57.3},
+      "caliber_spread_pct": 0.4,
+      "caliber_distinguishable": false
     }
   },
   "precision_settings_at_end": { "...": "..." },
-  "clocks_during_measurement": {"sm_clock_min": 2459, "sm_clock_max": 2495,
-                                "power_max": 460.1, "util_mean": 99.0},
-  "bandwidth_sweep": [{"size_mb": 128, "copy_gbs": 906.7, "...": "..."}],
+  "clocks_during_measurement": {"sm_clock_min": 1980, "sm_clock_max": 2775,
+                                "sm_clock_mean": 2397, "power_max": 450.7, "util_mean": 88.1},
+  "bandwidth_sweep": [{"size_mb": 128, "copy_gbs": 900.2, "...": "..."}],
   "torch": "2.12.1+cu130",
-  "ts": "2026-10-08 22:00:00",
+  "ts": "2026-10-08 22:56:00",
   "tool": "tools/machine-profile.py"
 }
 ```
+
+（以上取自一次真机标定，原始产物与 `bandwidth_sweep` 明细见 `bench/artifacts/`。）
 
 ## 为什么标定必须记录"累加口径"
 
@@ -59,6 +73,11 @@ matmul 的 TFLOP/s 不是机器常数，它取决于**累加口径**：fp16/bf16
 更关键的是：**"口径能不能被分辨"本身就是一个测量结果，不是一个可以假设的常量。**
 同一台机器相隔一天的两次标定，一次给出三种设置最大相对差 0.4%（不可分辨），
 另一次给出 5.0%（可分辨）。5% 的离散度足以让 roofline 在拐点附近翻转判定。
+
+同一次标定里，不同 dtype 的结论也可以**相反** —— 上面那份产物就是：
+bf16 三个口径差 3.9%（可分辨）、fp16 差 10.9%（可分辨）、而 fp32 只差 0.4%（**不可分辨**，
+三种设置下都是 57 TFLOP/s 上下）。所以 fp32 那一档报"精确单值"是不诚实的，
+报告里会带上 `caliber_spread_pct` 与 `caliber_distinguishable`，让读者自己判断。
 
 所以标定产物必须带：
 

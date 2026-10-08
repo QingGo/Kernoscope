@@ -4,8 +4,14 @@
 在受限的多租户容器实例上验证过：结果与 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 一致。
 
 达到 occupancy 是 ncu 用硬件计数器算的量；这里用**区间重叠法**从
-`(smid, 起止时间)` 重建 —— 已在真机验证：3.00/3（25% 上限）与 9.72/12（100% 上限）。
-它需要 kernel 内有我们的探针（见 docs/probes.md），因此出处是 `measured` 而非 `exact`。
+`(smid, 起止时间)` 重建 —— 真机测量（RTX 4090，128 线程/块，产物见 bench/artifacts）：
+
+    无 smem        : CUDA API 理论 12 blocks/SM = 100% → 区间重叠实测 11.27 = 93.9%
+    32 KB 静态 smem: CUDA API 理论  3 blocks/SM =  25% → 区间重叠实测  2.99 =  24.9%
+
+差距来自 ramp-up 与 tail（block 陆续开工/收尾），所以报告里同时给出实测并发块数的
+均值与峰值，而不是只给一个百分比。它需要 kernel 内有我们的探针
+（见 tools/probes/occupancy_probe.cu），因此出处是 `measured` 而非 `exact`。
 """
 
 from __future__ import annotations

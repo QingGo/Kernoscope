@@ -1,0 +1,3 @@
+输出方式,报告字节数
+默认 JSON（含逐 launch 数组）,134315762
+--ks-json-no-launches -c 50,15549

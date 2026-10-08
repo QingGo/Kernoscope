@@ -1,0 +1,14 @@
+{
+  "kernel": "k_occ_smem32k",
+  "arch": "sm_89",
+  "threads_per_block": 128,
+  "sm_count": 128,
+  "grid_blocks": 12288,
+  "n_records": 12288,
+  "avg_concurrent_blocks": 2.9926805134448102,
+  "peak_concurrent_blocks": 3.0,
+  "occupancy": 0.24939004278706753,
+  "occupancy_pct": 24.939004278706754,
+  "samples": 128.0,
+  "theoretical_occupancy_pct": 25.0
+}

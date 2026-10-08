@@ -1,0 +1,211 @@
+{
+  "schema_version": 2,
+  "tool": "kernoscope",
+  "tool_version": "0.1.0",
+  "ok": true,
+  "host": {
+    "platform": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+    "python": "3.12.3"
+  },
+  "device": {
+    "name": "NVIDIA GeForce RTX 4090",
+    "driver": "580.105.08",
+    "compute_capability": "8.9",
+    "memory_mib": "24564",
+    "max_sm_clock_mhz": "3105",
+    "power_limit_w": "450.00",
+    "count": 1,
+    "sm_count": 128
+  },
+  "tools": {
+    "nsys": {
+      "name": "nsys",
+      "path": "/usr/local/bin/nsys",
+      "in_path": true,
+      "found": true,
+      "searched_dirs": [
+        "/usr/local/bin"
+      ]
+    },
+    "ncu": {
+      "name": "ncu",
+      "path": "/usr/local/cuda-13.0/bin/ncu",
+      "in_path": true,
+      "found": true,
+      "searched_dirs": [
+        "/usr/local/cuda-13.0/bin"
+      ]
+    },
+    "cuobjdump": {
+      "name": "cuobjdump",
+      "path": "/usr/local/cuda-13.0/bin/cuobjdump",
+      "in_path": true,
+      "found": true,
+      "searched_dirs": [
+        "/usr/local/cuda-13.0/bin"
+      ]
+    },
+    "nvidia-smi": {
+      "name": "nvidia-smi",
+      "path": "/usr/bin/nvidia-smi",
+      "in_path": true,
+      "found": true,
+      "searched_dirs": [
+        "/usr/bin"
+      ]
+    }
+  },
+  "counter_state": "denied",
+  "counter_state_note": "ncu 存在于 /usr/local/cuda-13.0/bin/ncu，实测被拒（ERR_NVGPUCTRPERM，policy）",
+  "checks": [
+    {
+      "group": "host",
+      "name": "Python",
+      "status": "ok",
+      "detail": "3.12.3 on Linux 5.15.0-94-generic",
+      "impact": ""
+    },
+    {
+      "group": "hardware",
+      "name": "GPU",
+      "status": "ok",
+      "detail": "NVIDIA GeForce RTX 4090 · driver 580.105.08 · sm_89 · 24564 MiB",
+      "impact": ""
+    },
+    {
+      "group": "policy",
+      "name": "内核驱动策略",
+      "status": "warn",
+      "detail": "RmProfilingAdminOnly = 1（仅 admin 可用性能计数器）",
+      "impact": "ncu/DCGM PROF 等计数器类工具会报 ERR_NVGPUCTRPERM"
+    },
+    {
+      "group": "permissions",
+      "name": "进程身份",
+      "status": "ok",
+      "detail": "uid=0（root）",
+      "impact": ""
+    },
+    {
+      "group": "permissions",
+      "name": "CAP_SYS_ADMIN",
+      "status": "fail",
+      "detail": "生效集无，边界集也没有",
+      "impact": "容器内无法获得硬件计数器权限（su/setuid/file-cap 都无法突破 CapBnd）"
+    },
+    {
+      "group": "permissions",
+      "name": "CAP_PERFMON",
+      "status": "fail",
+      "detail": "生效集无，边界集也没有",
+      "impact": "容器内无法获得硬件计数器权限（su/setuid/file-cap 都无法突破 CapBnd）"
+    },
+    {
+      "group": "toolchain",
+      "name": "nsys",
+      "status": "ok",
+      "detail": "2025.3.1",
+      "impact": "提供 exact 的 LaunchStats / 时长（CUPTI activity，不需要计数器）"
+    },
+    {
+      "group": "toolchain",
+      "name": "cuobjdump",
+      "status": "ok",
+      "detail": "13.0",
+      "impact": "提供静态寄存器/共享内存与 SASS 指令混合（exact，且不需要 GPU）"
+    },
+    {
+      "group": "toolchain",
+      "name": "nvidia-smi",
+      "status": "ok",
+      "detail": "present",
+      "impact": "提供设备级计数器：能耗/显存忙碌/时钟功耗（measured，无需 admin）"
+    },
+    {
+      "group": "toolchain",
+      "name": "pynvml",
+      "status": "ok",
+      "detail": "已安装",
+      "impact": "可读能量累加器 → 每 kernel 能耗"
+    },
+    {
+      "group": "toolchain",
+      "name": "CPU perf_event_paranoid",
+      "status": "warn",
+      "detail": "= 4",
+      "impact": "CPU 侧硬件计数器（perf）对非特权用户不可用"
+    },
+    {
+      "group": "optional",
+      "name": "NVBit",
+      "status": "ok",
+      "detail": "<workdir>/lab/nvbit_release_x86_64",
+      "impact": "指令级归因 / 访存轨迹 / sectors-per-request / locality"
+    },
+    {
+      "group": "counters",
+      "name": "硬件计数器（ncu）",
+      "status": "fail",
+      "detail": "/usr/local/cuda-13.0/bin/ncu 实测被拒：ERR_NVGPUCTRPERM",
+      "impact": "requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports ERR_NVGPUCTRPERM"
+    }
+  ],
+  "capabilities": [
+    {
+      "provenance": "exact",
+      "items": [
+        "kernel 时长与 launch 配置 (LaunchStats)",
+        "同一 kernel 的多组 launch 配置（LaunchConfigs，形状扫描用）",
+        "理论 occupancy 上界与限制因素",
+        "静态寄存器/共享内存、SASS 指令混合"
+      ],
+      "reason": ""
+    },
+    {
+      "provenance": "measured",
+      "items": [
+        "NVML 原始读数：显存忙碌占比 / 时钟 / 功耗 / 能量（管理计数器）",
+        "访存轨迹入口（NVBit 外部工具产出的 trace）：sectors/request、合并效率、工作集"
+      ],
+      "reason": ""
+    },
+    {
+      "provenance": "estimated",
+      "items": [
+        "DRAM 字节/吞吐代理（NVML 显存忙碌 × 本机实测峰值，误差带见 bench/artifacts）",
+        "roofline 与 SpeedOfLight（需 --ks-calibration 本机标定 + 你提供 FLOPs/bytes）",
+        "访存轨迹的 L1/L2 命中率与 DRAM 字节（缓存模型，上界口径）"
+      ],
+      "reason": ""
+    },
+    {
+      "provenance": "derived",
+      "items": [
+        "采样窗口覆盖率（由 NVML 采样点统计）",
+        "账本对拍误差与区间判词（由估算与你的账本推出）"
+      ],
+      "reason": ""
+    },
+    {
+      "provenance": "unavailable",
+      "items": [
+        "MemoryWorkloadAnalysis（精确字节/命中率/sector 效率）",
+        "ComputeWorkloadAnalysis（各 pipe 动态利用率）",
+        "SchedulerStats / WarpStateStats（stall 周期归因）",
+        "SourceCounters（PC 采样）与 PmSampling"
+      ],
+      "reason": "requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports ERR_NVGPUCTRPERM"
+    }
+  ],
+  "backend_plan": [
+    "nsys → LaunchStats / 时长 / 时间线 (exact)",
+    "NVML/nvidia-smi → 设备级计数器 (measured)",
+    "cuobjdump → 静态资源与 SASS 混合 (exact)"
+  ],
+  "advice": [
+    "首次使用先做一次机器标定：`uv run python tools/machine-profile.py --quick`，然后加 `--ks-calibration machine-profile.json` 得到可信 roofline（标定会同时记录累加口径与口径离散度；缺字段时 compute roof 会被拒绝，见 R-09）",
+    "报告里出现 `n/a` 属预期：那是需要硬件计数器的指标，用 `--strict` 可让 CI 在请求这类数据时直接失败",
+    "想拿账本对拍：`--ks-ledger-mb <每次 launch 的 MB>`（或 --ks-ledger-total-mb 总量口径），并让被测 kernel 在紧循环里跑满；默认 `--ks-window auto` 会自动裁掉 import/JIT 的启动开销",
+    "代理口径不成立（显存忙碌读数为 0、窗口覆盖率不足）时，用 `--ks-memtrace <trace>` 换用访存轨迹口径做账本对拍（R-33）"
+  ]
+}

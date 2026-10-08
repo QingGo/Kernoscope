@@ -37,6 +37,7 @@ NSYS="$(command -v nsys || true)"
 TARGET_BIG="${TARGET_BIG:-8}"      # 代理精度 / 账本对拍
 TARGET_MID="${TARGET_MID:-1.2}"    # 覆盖率落在 50%~80% 之间（裁决行必须是 n/a 而不是消失）
 MB=$(( QUICK ? 64 : 256 ))
+ITERS_HINT=$(( QUICK ? 1000 : 8000 ))   # 只用于 --analyze-only 打印 total_bytes 的占位
 
 declare -a STEPS=()
 record() { STEPS+=("$1 rc=$2"); echo "[bench] $1 -> rc=$2"; }
@@ -81,6 +82,8 @@ echo "== 2) 编译 bench/ledger_probe.cu =="
 "$NVCC" -O3 -o "$BUILD/ledger_probe" bench/ledger_probe.cu > "$HOSTDIR/nvcc.log" 2>&1
 record nvcc $?
 PROBE="$BUILD/ledger_probe"
+SM_COUNT="$("$PY" -c 'import torch;print(torch.cuda.get_device_properties(0).multi_processor_count)' 2>/dev/null || echo 0)"
+[[ -z "$SM_COUNT" || "$SM_COUNT" == "0" ]] && SM_COUNT=128
 
 # ------------------------------------------------- 3) DRAM 代理精度（已知字节数）
 echo "== 3) DRAM 代理精度：账本 = 解析真值 =="
@@ -88,7 +91,7 @@ if [[ -x "$PROBE" ]]; then
   for K in copy read write; do
     LOG="$HOSTDIR/probe-$K.log"
     # 真值不需要 GPU：--analyze-only 只打印解析字节数
-    "$PROBE" --kernel "$K" --mb "$MB" --iters "$ITERS_BIG" --analyze-only > "$LOG" 2>&1
+    "$PROBE" --kernel "$K" --mb "$MB" --iters "$ITERS_HINT" --analyze-only > "$LOG" 2>&1
     record "probe-$K" $?
     ANALYTIC="$(grep -m1 '^ANALYTIC' "$LOG" || true)"
     MB_PER_LAUNCH="$(echo "$ANALYTIC" | sed -n 's/.*bytes_per_launch=\([0-9.]*\).*/\1/p')"
@@ -105,10 +108,10 @@ if [[ -x "$PROBE" ]]; then
   done
 fi
 
-# ------------------------------------------------- 4) B1：口径不成立时不许消失
-echo "== 4) B1/R-02：per-launch 账本 + 覆盖率不足 ⇒ 行必须存在且 --strict 变红 =="
+# --------------------------- 4) 口径不成立时裁决行不许消失（且 --strict 要能红）
+echo "== 4) per-launch 账本 + 覆盖率不足 ⇒ 裁决行必须存在，且 --strict 变红 =="
 if [[ -x "$PROBE" ]]; then
-  "$PROBE" --kernel copy --mb "$MB" --iters 400 --analyze-only \
+  "$PROBE" --kernel copy --mb "$MB" --iters "$ITERS_HINT" --analyze-only \
       > "$HOSTDIR/probe-lowduty.log" 2>&1
   KSC --set basic --ks-calibration "$CAL" --ks-window full \
       --ks-ledger-mb "$(awk -v m="$MB" 'BEGIN{printf "%.4f", 2*m*1048576/1e6}')" \
@@ -120,7 +123,7 @@ if [[ -x "$PROBE" ]]; then
       > "$HOSTDIR/rep-lowduty.ledger-line-count" || true
 fi
 
-# ------------------------------------------------- 5) 形状扫描（R-04/B4）
+# ------------------------------------------------- 5) 形状扫描（多组 launch 配置）
 echo "== 5) 形状扫描：同名 kernel、三组 launch 配置 =="
 if [[ -x "$PROBE" ]]; then
   KSC --set basic --ks-no-nvml -k regex:copy_k --launch-csv \
@@ -144,11 +147,25 @@ if [[ -x "$PROBE" ]]; then
       > "$HOSTDIR/rep-compute.txt" 2> "$HOSTDIR/rep-compute.err"
   record report-compute-bound $?
   # 小工作集（2 MB）常驻 L2：显存几乎不动 ⇒ 代理必须拒绝给数，并点明分辨率下限
-  KSC --set basic --ks-calibration "$CAL" --ks-window auto -k regex:norm_k \
-      -o "$HOSTDIR/rep-l2resident" -f \
+  # 小 kernel × 长循环 = 十万级 launch：报告体积会爆（这正是"成本可预算"要解决的问题），
+  # 所以这里用 -c 限流 + JSON 不带逐 launch 数组。
+  KSC --set basic --ks-calibration "$CAL" --ks-window auto -k regex:norm_k -c 50 \
+      --ks-json-no-launches -o "$HOSTDIR/rep-l2resident" -f \
       -- "$PROBE" --kernel norm --mb 2 --target-s "$TARGET_MID" \
       > "$HOSTDIR/rep-l2resident.txt" 2> "$HOSTDIR/rep-l2resident.err"
   record report-l2-resident $?
+  # 同一次运行的体积对比：逐 launch 数组 vs --ks-json-no-launches（要的是可预算，不是劝告）
+  KSC --set basic --ks-calibration "$CAL" --ks-window auto -k regex:norm_k \
+      -o "$HOSTDIR/rep-l2resident-full" -f \
+      -- "$PROBE" --kernel norm --mb 2 --target-s "$TARGET_MID" \
+      > "$HOSTDIR/rep-l2resident-full.txt" 2> "$HOSTDIR/rep-l2resident-full.err"
+  record report-l2-resident-full $?
+  {
+    echo "输出方式,报告字节数"
+    echo "默认 JSON（含逐 launch 数组）,$(stat -c%s "$HOSTDIR/rep-l2resident-full.ksreport.json" 2>/dev/null || echo 0)"
+    echo "--ks-json-no-launches -c 50,$(stat -c%s "$HOSTDIR/rep-l2resident.ksreport.json" 2>/dev/null || echo 0)"
+  } > "$HOSTDIR/size-comparison.csv"
+  rm -f "$HOSTDIR"/rep-l2resident-full.ksreport.json "$HOSTDIR"/rep-l2resident-full.perfetto.json
 fi
 
 # ------------------------------------------------- 7) 达到的 occupancy（measured）
@@ -169,18 +186,23 @@ if [[ -n "${NVBIT_PATH:-}" && -f tools/probes/nvbit_memtrace/collect.sh ]]; then
   L2="$("$PY" -c 'import torch;print(int(torch.cuda.get_device_properties(0).L2_cache_size))' 2>/dev/null || echo 0)"
   if [[ -z "$L2" || "$L2" == "0" ]]; then L2=75497472; fi
   echo "L2 bytes = $L2"
-  # 用一个访存密集的小负载产轨迹（形状简单，便于人工核对已知答案）
+  # 轨迹体积 ∝ 流量 × launch 次数（插桩不区分预热），所以用小负载 + 小预热：
+  # 一个 80 MB 工作集 + 默认 50 次预热曾写出 10 GB 文本（真事）。小工作集（1 MB）常驻 L2，
+  # 这恰好演示"换口径不是为了凑数，而是换一个前提成立的问法"：轨迹口径会告诉你
+  # "这份 DRAM 账本对不上，因为流量根本没出 L2"。
   KS_MEMTRACE_OUT="$HOSTDIR/memtrace-official.txt" NVBIT_PATH="$NVBIT_PATH" \
       bash tools/probes/nvbit_memtrace/collect.sh -- \
-      "$PROBE" --kernel copy --mb 8 --iters 60 \
+      "$PROBE" --kernel copy --mb 1 --iters 1 --warmup 2 --grid 16 --block 128 \
       > "$HOSTDIR/nvbit-collect.log" 2>&1
   record nvbit-collect $?
   if [[ -s "$HOSTDIR/memtrace-official.txt" ]]; then
-    KSC memtrace --from "$HOSTDIR/memtrace-official.txt" --l2-bytes "$L2" --json \
+    head -40 "$HOSTDIR/memtrace-official.txt" > "$HOSTDIR/memtrace-sample.txt"
+    KSC memtrace --from "$HOSTDIR/memtrace-official.txt" --l2-bytes "$L2" \
+        --max-accesses 8000000 --json \
         > "$HOSTDIR/memtrace.json" 2> "$HOSTDIR/memtrace.err"
     record memtrace-analyze $?
     # 轨迹口径参与账本对拍：显存忙碌低到无法定标时，仍然要能给出误差
-    "$PROBE" --kernel copy --mb 8 --iters 60 --analyze-only \
+    "$PROBE" --kernel copy --mb 1 --iters 1 --analyze-only \
         > "$HOSTDIR/probe-tracebasis.log" 2>&1
     TB_MB="$(grep -m1 '^ANALYTIC' "$HOSTDIR/probe-tracebasis.log" \
              | sed -n 's/.*bytes_per_launch=\([0-9.]*\).*/\1/p' || true)"
@@ -189,19 +211,50 @@ if [[ -n "${NVBIT_PATH:-}" && -f tools/probes/nvbit_memtrace/collect.sh ]]; then
       KSC --set basic --ks-calibration "$CAL" --ks-window full \
           --ks-memtrace "$HOSTDIR/memtrace-official.txt" --ks-l2-bytes "$L2" \
           --ks-ledger-mb "$TB_LEDGER" -k regex:copy_k -o "$HOSTDIR/rep-tracebasis" -f \
-          -- "$PROBE" --kernel copy --mb 8 --iters 60 \
+          --ks-json-no-launches \
+          -- "$PROBE" --kernel copy --mb 1 --iters 1 --warmup 2 --grid 16 --block 128 \
           > "$HOSTDIR/rep-tracebasis.txt" 2> "$HOSTDIR/rep-tracebasis.err"
       record report-trace-basis $?
     fi
   fi
 fi
 
-# ------------------------------------------------- 9) manifest
+# ------------------------------------------------- 9) 发射槽上界（可选外部依赖）
+if [[ -n "${NVBIT_PATH:-}" && -x "$PROBE" ]]; then
+  echo "== 9) 发射槽利用率上界（NVBit opcode_hist）=="
+  PROBE="$PROBE" PY="$PY" NVBIT_PATH="$NVBIT_PATH" OUTDIR="$HOSTDIR/issue" \
+      bash bench/issue_probe.sh "$HOSTDIR/issue" 2>&1 | tail -8
+  record issue-probe $?
+  # 分母必须来自与直方图**同等工作量**的运行，所以把直方图喂给报告路径
+  #（时长取自 CUPTI gpu__time_duration.sum），而不是手填一个秒数。
+  for K in dram-copy l2-resident; do
+    case "$K" in
+      dram-copy)   ARGS=(--kernel copy --mb "$MB" --target-s "$TARGET_MID"); RX=copy_k ;;
+      *)           ARGS=(--kernel norm --mb 2 --target-s "$TARGET_MID"); RX=norm_k ;;
+    esac
+    if [[ -s "$HOSTDIR/issue/hist-$K.txt" ]]; then
+      KSC --set full --ks-calibration "$CAL" --ks-json-no-launches \
+          --ks-instr-hist "$HOSTDIR/issue/hist-$K.txt" --ks-sm-count "$SM_COUNT" \
+          -k regex:"$RX" -o "$HOSTDIR/rep-issue-$K" -f \
+          -- "$PROBE" "${ARGS[@]}" \
+          > "$HOSTDIR/rep-issue-$K.txt" 2> "$HOSTDIR/rep-issue-$K.err"
+      record "report-issue-$K" $?
+    fi
+  done
+  rm -f "$HOSTDIR"/issue/hist-*.txt     # 原始直方图按需重采（体积随 launch 数增长）
+fi
+
+# ------------------------------------------------- 9.5) 脱敏（提交前就该是干净的）
+# 路径规则按**本仓库的位置**生成，所以脚本里不出现任何平台路径。
+"$PY" bench/sanitize_artifacts.py "$HOSTDIR" --repo-path "$ROOT" || true
+record sanitize $?
+
+# ------------------------------------------------- 10) manifest
 {
   echo "{"
   echo "  \"stamp\": \"$STAMP\","
   echo "  \"quick\": $QUICK,"
-  echo "  \"iters_big\": $ITERS_BIG, \"iters_small\": $ITERS_SMALL, \"mb\": $MB,"
+  echo "  \"target_big_s\": \"$TARGET_BIG\", \"target_mid_s\": \"$TARGET_MID\", \"mb\": $MB,"
   echo "  \"steps\": ["
   first=1
   for s in "${STEPS[@]}"; do

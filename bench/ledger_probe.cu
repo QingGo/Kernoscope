@@ -13,6 +13,7 @@
 //   ./ledger_probe --kernel strided --mb 256 --iters 4000    # 同样字节数，但合并很差
 //   ./ledger_probe --kernel copy  --mb 64 --iters 300 --grid 64|256|1024   # 形状扫描
 //   ./ledger_probe --kernel copy  --mb 256 --iters 400 --analyze-only      # 只打印真值
+//   ./ledger_probe --kernel copy  --mb 1 --iters 1 --warmup 2 --grid 16 --block 128  # 采 NVBit 轨迹用的小负载
 //
 // 输出（stdout 上机器可读的两行）：
 //   ANALYTIC kernel=copy bytes_per_launch=1073741824 iters=4000 total_bytes=4.29e12 grid=… block=… n=…
@@ -85,7 +86,7 @@ static void launch(const char* k, int grid, int block, const float* x, const flo
 int main(int argc, char** argv) {
     const char* kernel = "copy";
     long mb = 256;
-    int iters = 4000, block = 256, grid = 0, device = 0, analyze_only = 0;
+    int iters = 4000, block = 256, grid = 0, device = 0, analyze_only = 0, warmup = 50;
     double target_s = 0.0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--kernel") && i + 1 < argc) kernel = argv[++i];
@@ -96,6 +97,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--grid") && i + 1 < argc) grid = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--device") && i + 1 < argc) device = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--analyze-only")) analyze_only = 1;
+        else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
 
@@ -127,8 +129,10 @@ int main(int argc, char** argv) {
     CHECK(cudaMalloc(&w, 1024 * 4)); CHECK(cudaMalloc(&out, 4));
     CHECK(cudaMemset(x, 1, n * 4)); CHECK(cudaMemset(w, 1, 1024 * 4));
 
-    // 预热（把 JIT / 首次分配 / 时钟爬升挪出测量窗）
-    for (int i = 0; i < 50; i++) launch(kernel, grid, block, x, w, y, out, n);
+    // 预热（把 JIT / 首次分配 / 时钟爬升挪出测量窗）。
+    // 采集 NVBit 轨迹时把它调小（--warmup 2）：插桩会把**每一次** launch 都写进轨迹，
+    // 50 次预热足以让轨迹文件涨到 GB 级。
+    for (int i = 0; i < warmup; i++) launch(kernel, grid, block, x, w, y, out, n);
     CHECK(cudaDeviceSynchronize());
 
     cudaEvent_t t0, t1; CHECK(cudaEventCreate(&t0)); CHECK(cudaEventCreate(&t1));

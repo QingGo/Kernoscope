@@ -1,0 +1,2 @@
+==PROF== 输出体积: json 546 KB / perfetto 515 KB（1050 次 launch）
+==PROF== 提示：体积主要来自逐 launch 记录。要限流可用 -c <N>（每个 kernel 只报 N 次）、--ks-json-no-launches（JSON 不带逐 launch 数组）、或 --launch-csv 单独出表

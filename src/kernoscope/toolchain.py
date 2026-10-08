@@ -1,7 +1,7 @@
 """统一的工具发现（R-16/R-17）—— **不得只看 PATH**。
 
-为什么需要它（真机实测）：一台 AutoDL 4090 实例上 `ncu` / `cuobjdump` / `nvcc` 都在
-`/usr/local/cuda-13.0/bin/`，而默认 `PATH` 里没有这个目录。于是：
+为什么需要它（真机实测）：某共享租用的 GPU 容器里 `ncu` / `cuobjdump` / `nvcc` 都在
+`/usr/local/cuda-<版本>/bin/`，而默认 `PATH` 里没有这个目录。于是：
 
     doctor（只看 PATH）      → "未安装 ncu，无法实测判定"
     后端 find_cuobjdump()    → /usr/local/cuda-13.0/bin/cuobjdump   ← 同一台机器，两个答案

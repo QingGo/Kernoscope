@@ -30,7 +30,6 @@ from .analyze.roofline import MachinePeaks, gemm_workload
 from .backends import cubin as cubin_backend
 from .backends import nsys as nsys_backend
 from .backends.nvml import Sampler
-from .provenance import Metric, Provenance, UNAVAILABLE_REASONS
 from .report import DeviceInfo, KernelLaunch, KernelReport, Report
 from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
@@ -151,6 +150,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "与 trace 口径的 per-launch DRAM 字节（支持 ks-memtrace v1 与 NVBit "
                         "官方 mem_trace 输出，自动判别）")
     k.add_argument("--ks-l2-bytes", type=int, default=0, help="覆盖 L2 容量（字节）")
+    k.add_argument("--ks-max-accesses", type=int, default=0,
+                   help="访存轨迹缓存模型最多分析多少次访问（0=默认 4e6）。"
+                        "超过上限时会拒绝给 DRAM 字节而不是给一个偏小的值")
+    k.add_argument("--ks-instr-hist", default=None,
+                   help="NVBit 官方 opcode_hist 的 stdout：给出动态指令数、"
+                        "发射槽利用率**上界**与瓶颈方向（SchedulerStats/WarpStateStats）")
+    k.add_argument("--ks-clock-mhz", type=float, default=None,
+                   help="发射槽上界用的 SM 时钟（默认取 NVML 实测均值）")
     k.add_argument("--ks-keep-intermediate", action="store_true",
                    help="保留 nsys 中间产物（.nsys-rep/.sqlite）；给了 -o 时默认保留在其旁边")
     k.add_argument("--strict", action="store_true",
@@ -297,6 +304,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .memtrace_cmd import memtrace_main
 
         return memtrace_main(argv[1:])
+    if argv and argv[0] == "issue":
+        from .issue_cmd import issue_main
+
+        return issue_main(argv[1:])
 
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"
@@ -476,7 +487,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             l2_bytes = args.ks_l2_bytes or int(device.l2_mib * 2 ** 20)
             trace = load_memtrace_auto(args.ks_memtrace, sm_count=sm_count, l2_bytes=l2_bytes)
-            st = analyze_memtrace(trace, l2_bytes=l2_bytes or None)
+            st = analyze_memtrace(trace, l2_bytes=l2_bytes or None,
+                                  max_accesses=(args.ks_max_accesses or 4_000_000))
             memtrace_stats[st.kernel] = st
             trace_kernel = st.kernel
             trace_bytes_per_launch = st.dram_bytes_per_launch
@@ -488,6 +500,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 + "）")
         except (OSError, MemTraceError) as e:
             log(f"error: 访存轨迹读取失败: {e}")
+            return 1
+
+    issue_hist = None
+    if args.ks_instr_hist:
+        from .backends.opcode_hist import OpcodeHistError, load as load_hist
+
+        try:
+            issue_hist = load_hist(args.ks_instr_hist)
+            log(f"instr-hist: 载入 {len(issue_hist.launches)} 条 launch 记录，"
+                f"{len(issue_hist.kernels)} 个 kernel")
+        except OpcodeHistError as e:
+            log(f"error: 指令直方图读取失败: {e}")
             return 1
 
     grouped_dram: dict[str, list[KernelLaunch]] = {}
@@ -525,6 +549,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .analyze.occupancy import arch_for
 
     arch = arch_for(device.compute_capability or "8.9")
+    nvml_summary = sampler.result.summary()
+    clock_mhz = float(args.ks_clock_mhz or nvml_summary.get("sm_clock_mean") or 0.0)
+    if issue_hist is not None and not clock_mhz:
+        log("warn: 没有 SM 时钟读数（NVML 被关掉？）：发射槽上界算不出来，"
+            "加 --ks-clock-mhz <MHz> 或用 --ks-no-nvml 之外的方式采样")
     opt = BuildOptions(
         set_name=args.set_name,
         sections=list(args.section),
@@ -534,7 +563,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         achieved_occupancy=achieved,
         cubin_res=cubin_res,
         cubin_sass=cubin_sass,
-        nvml_summary=sampler.result.summary(),
+        nvml_summary=nvml_summary,
         sm_count=sm_count,
         device_name=device.name,
         arch=arch,
@@ -543,6 +572,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ledger_basis=args.ks_ledger_basis,
         dram=dram_est,
         memtrace=memtrace_stats,
+        issue_hist=issue_hist,
+        clock_mhz=clock_mhz,
     )
 
     rep = Report(device=device)

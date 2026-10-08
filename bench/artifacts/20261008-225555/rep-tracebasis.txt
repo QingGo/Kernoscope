@@ -1,0 +1,79 @@
+==PROF== Kernoscope 0.1.0 - provenance-honest profile (no performance counters required)
+==PROF== Target: bench/artifacts/.build/ledger_probe --kernel copy --mb 1 --iters 1 --warmup 2 --grid 16 --block 128
+==PROF== DRAM 估算不可用：显存忙碌读数 0.0% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+==PROF== Kernel time: 0.017 ms of 2851.502 ms wall (0.0%)
+==PROF== Window: mode=full 采样 13 点 / 参与积分 2.6 s / 裁掉 0.2 s / 进程 wall 2.9 s
+==PROF== source[kernel activity]: nsys sqlite CUPTI_ACTIVITY_KIND_KERNEL (no counters needed)
+==PROF== source[device counters]: pynvml (energy/PCIe/mem-busy are management counters, available without admin)
+==PROF== source[static]: not used
+==PROF== source[peaks]: measured calibration (bench/artifacts/20261008-225555/machine-profile.json)
+
+Kernel: copy_k(const float *, float *, long)
+  nsys short name: copy_k
+  3 launch(es), 0.0169 ms total, 0.0056 ms mean
+
+  Section: Duration                           [exact]
+    gpu__time_duration.sum                                 0.0169 ms       [exact]
+    ks__launch_time_mean                                   0.0056 ms       [exact]
+    ks__launch_time_min                                    0.0055 ms       [exact]
+    ks__launch_time_max                                    0.0058 ms       [exact]
+    ks__launch_count                                            3          [exact]
+
+  Section: LaunchStats                        [exact]
+    launch__grid_size                                          16          [exact]
+    launch__block_size                                        128          [exact]
+    launch__thread_count                                     2048          [exact]
+    launch__registers_per_thread                               32          [exact]
+    ks__registers_used_for_occupancy                           32          [exact]
+    launch__shared_mem_per_block_static                         0 B        [exact]
+    launch__shared_mem_per_block_dynamic                        0 B        [exact]
+    launch__local_mem_per_thread                                0 B        [exact]
+    ks__cuda_graph_capture                                    yes          [exact]
+
+  Section: Occupancy                          [exact] (+1 n/a)
+    ks__theoretical_occupancy_pct                             100 %        [exact]
+    ks__blocks_per_sm                                          12          [exact]
+    ks__warps_per_sm                                           48          [exact]
+    ks__occupancy_limiter                           threads+warps          [exact]  (并列的限制因素用 + 连接)
+    sm__maximum_warps_per_active_cycle_pct                    n/a          [unavailable]  requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+
+  Section: SpeedOfLight                       [unavailable] (+2 n/a)
+    est__achieved_tflops                                      n/a          [unavailable]  workload not provided: pass --ks-gemm M,N,K or --ks-flops/--ks-bytes (plus --ks-calibration machine-profile.json for measured peaks)
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            n/a          [unavailable]  requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+
+  Section: MemoryTrace                        [estimated]
+    meas__sectors_per_request                                   4          [measured]  (全量（49152 条 warp 指令记录）；每个 sector 32B)
+    meas__coalescing_efficiency_pct                           100 %        [measured]  (100% 表示无浪费；<50% 通常是跨步/未对齐访问)
+    meas__trace_working_set_mb                              2.097 MB       [measured]  (全量（49152 条 warp 指令记录）；用于判断工作集是否超过 L2)
+    meas__trace_records                                     49152          [measured]  (全量（49152 条 warp 指令记录）)
+    est__l2_hit_rate_l2only_pct                              66.7 %        [estimated]  (**上界口径**：所有访问都当到达 L2，会把 L1 命中误记为 L2 命中（高估）)
+    est__l2_hit_rate_with_l1_pct                             66.7 %        [estimated]  (比上界口径更接近真实；两种口径之差就是 L1 吸收了多少；SM id 由 CTA 近似分配（官方 mem_trace 不输出 SM id），故『先过 L1』口径仅供参考)
+    est__dram_bytes_per_launch_trace                        0.699 MB       [estimated]  (与 NVML 代理是**两条独立路径**：一致说明结论稳，不一致要查采样代表性)
+
+----------------------------------------------------------------------------------------------------
+Kernel: (device)
+  0 launch(es), 0.0000 ms total, 0.0000 ms mean
+
+  Section: DeviceStatistics                   [estimated]
+    meas__nvml_mem_busy_mean_pct                                0 %        [measured]  [resolution 1 %（整数百分比）]  (区间平均；是「显存子系统忙碌占比」，不是 DRAM 吞吐本身。读数 0.0% 只说明低于分辨率下限，不等于「DRAM 完全没动」；必须让 GPU 保持饱和，否则会被宿主间隙稀释（实测 96.8% vs 6.3%）)
+    est__dram_busy_equivalent_gbs                               0 GB/s     [estimated]  [resolution 1 %]  (等效带宽口径；与按字节/时间的口径略有差异)
+    meas__sm_clock_mean_mhz                                1595.8 MHz      [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__sm_clock_max_mhz                                   2520 MHz      [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__power_max_w                                        60.6 W        [measured]  [resolution 1 MHz / 1 W（驱动报数粒度）]
+    meas__device_energy_j                                 114.364 J        [measured]  [resolution 1 mJ]  (ncu 不提供能耗指标)
+
+  Section: DramTraffic                        [estimated] (+3 n/a)
+    est__dram_bytes_total                                     n/a          [unavailable]  显存忙碌读数 0.0% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+    est__dram_bytes_per_launch                                n/a          [unavailable]  显存忙碌读数 0.0% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+    est__dram_throughput_pct_of_peak                          n/a          [unavailable]  显存忙碌读数 0.0% 低于 NVML utilization.memory 的分辨率下限 1 个百分点：无法区分『真的没搬』与『1.0% 被截断成 0』
+    ks__sampler_window_coverage_pct                             0 %        [derived]  [resolution 1 个采样点]  (前提①「窗口被被测负载主导」：<80% 不给 per-launch 归因，<50% 连总量也不给)
+    est__dram_bytes_per_launch_trace                        0.699 MB       [estimated]  (第二条口径：与 NVML 代理独立；NVML 口径不成立时用它做账本对拍)
+    est__dram_vs_ledger_err_pct                             -66.7 %        [estimated]  (账本 2.1 MB；对拍常用 |误差| < 10% 作为验收线；此次用**轨迹口径**，因为 NVML 代理口径不成立)
+
+----------------------------------------------------------------------------------------------------
+
+Provenance summary: exact=18, derived=1, measured=9, estimated=6, unavailable=6
+Legend: exact=与 ncu 同源 | derived=本机实测标定/模型 | measured=我们的探针实测 | estimated=采样或代理(附误差) | unavailable=需要硬件计数器，只报 n/a
+Output(json): bench/artifacts/20261008-225555/rep-tracebasis.ksreport.json
+Output(perfetto): bench/artifacts/20261008-225555/rep-tracebasis.perfetto.json
+Open the timeline at https://ui.perfetto.dev -> Load trace -> the file above

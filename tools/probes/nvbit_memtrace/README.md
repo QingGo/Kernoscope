@@ -77,6 +77,14 @@ NVBIT_MEMTRACE_SO=/path/to/mem_trace.so KS_MEMTRACE_OUT=t.txt ./collect.sh -- ./
 kernoscope memtrace --from t.txt --sm-count 128 --l2-bytes 75497472 --kernel <子串>
 ```
 
+`collect.sh` 会在 `$NVBIT_PATH/tools/build/mem_trace/mem_trace.so` 里自动找官方工具
+（也可以直接给 `NVBIT_MEMTRACE_SO`）；`kernoscope memtrace` 缺 `--l2-bytes` 时会取本机 L2 容量。
+报告路径同样吃官方输出（`--ks-memtrace <file>`，自动判别格式），
+缓存模型的访问上限用 `--ks-max-accesses` 调（超限时**拒绝**给 DRAM 字节而不是给偏小的值）。
+
+⚠️ 轨迹体积 ∝ 流量 × launch 次数，而插桩**不区分预热**：一次 80 MB 工作集 + 默认 50 次预热
+能写出 10 GB 文本。采轨迹时用小负载，并把预热调小（`bench/ledger_probe.cu --warmup 2`）。
+
 **必须 `NO_EAGER_LOAD=0`**：NVBit 1.8 默认懒加载模块，会让插桩错过时机 ——
 表现是"程序正常跑完、一条记录都没有"。这是本项目在本环境踩了很久的坑，
 `collect.sh` 已内置该变量。若你看到 0 条记录，先查这个。

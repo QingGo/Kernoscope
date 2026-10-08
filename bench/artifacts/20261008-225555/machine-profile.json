@@ -1,0 +1,155 @@
+{
+  "schema_version": 2,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "cc": "8.9",
+  "sm_count": 128,
+  "l2_mib": 72.0,
+  "nvidia_smi": "580.105.08, 3105, 450.00, 2, 16",
+  "measured_dram": {
+    "copy_gbs": 909.2,
+    "read_gbs": 905.8,
+    "write_gbs": 940.0
+  },
+  "l2_info": {
+    "l2_resident_max_mb": 64,
+    "l2_drop_mb": 96,
+    "l2_read_peak_gbs": 2193.1
+  },
+  "measured_matmul_tflops": {
+    "torch.bfloat16": {
+      "tflops": 169.0,
+      "size": 16384,
+      "ms": 52.04680189490318,
+      "acc_caliber": "bf16 (fp32 accumulate)",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "ieee",
+        "allow_tf32": false
+      },
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {
+        "default": 168.2,
+        "reduced_precision_reduction_off": 167.5,
+        "fp32_ieee": 161.6
+      },
+      "caliber_spread_pct": 3.9,
+      "caliber_distinguishable": true
+    },
+    "torch.float16": {
+      "tflops": 167.4,
+      "size": 4096,
+      "ms": 0.8209608495235443,
+      "acc_caliber": "fp16 (fp32 accumulate; \u5141\u8bb8 reduced-precision reduction)",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "ieee",
+        "allow_tf32": false
+      },
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {
+        "default": 145.5,
+        "reduced_precision_reduction_off": 163.2,
+        "fp32_ieee": 163.3
+      },
+      "caliber_spread_pct": 10.9,
+      "caliber_distinguishable": true
+    },
+    "torch.float32": {
+      "tflops": 57.3,
+      "size": 8192,
+      "ms": 19.19136941432953,
+      "acc_caliber": "fp32 (fp32 accumulate)",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "ieee",
+        "allow_tf32": false
+      },
+      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
+      "caliber_variants_tflops": {
+        "default": 54.7,
+        "reduced_precision_reduction_off": 54.9,
+        "fp32_ieee": 54.9
+      },
+      "caliber_spread_pct": 0.4,
+      "caliber_distinguishable": false
+    }
+  },
+  "precision_settings_at_end": {
+    "allow_fp16_reduced_precision_reduction": true,
+    "fp32_precision": "ieee",
+    "allow_tf32": false
+  },
+  "clocks_during_measurement": {
+    "sm_clock_min": 1980.0,
+    "sm_clock_max": 2775.0,
+    "sm_clock_mean": 2397.0,
+    "power_max": 450.67,
+    "util_mean": 88.1,
+    "n_samples": 10
+  },
+  "bandwidth_sweep": [
+    {
+      "size_mb": 2,
+      "copy_gbs": 329.49953375552354,
+      "read_gbs": 118.74076216437713,
+      "write_gbs": 191.60992287995643
+    },
+    {
+      "size_mb": 4,
+      "copy_gbs": 797.0972791806188,
+      "read_gbs": 252.61384492766973,
+      "write_gbs": 419.0174569566893
+    },
+    {
+      "size_mb": 8,
+      "copy_gbs": 1315.3036294890467,
+      "read_gbs": 471.87758040344676,
+      "write_gbs": 706.1147110960326
+    },
+    {
+      "size_mb": 16,
+      "copy_gbs": 2003.380617157694,
+      "read_gbs": 854.8974235707092,
+      "write_gbs": 1112.824222231405
+    },
+    {
+      "size_mb": 32,
+      "copy_gbs": 2664.8518505150864,
+      "read_gbs": 1425.640907682968,
+      "write_gbs": 1538.9029992723376
+    },
+    {
+      "size_mb": 48,
+      "copy_gbs": 989.8021159056035,
+      "read_gbs": 1882.7757639508761,
+      "write_gbs": 1654.9239199058657
+    },
+    {
+      "size_mb": 64,
+      "copy_gbs": 882.7558440477279,
+      "read_gbs": 2193.1334927540765,
+      "write_gbs": 898.473741121296
+    },
+    {
+      "size_mb": 96,
+      "copy_gbs": 894.4587144727897,
+      "read_gbs": 828.9087936508167,
+      "write_gbs": 912.3678213263659
+    },
+    {
+      "size_mb": 128,
+      "copy_gbs": 903.8721797008058,
+      "read_gbs": 859.0966908046156,
+      "write_gbs": 920.8167510661171
+    },
+    {
+      "size_mb": 256,
+      "copy_gbs": 909.186726868058,
+      "read_gbs": 905.7695909436098,
+      "write_gbs": 940.0124457045494
+    }
+  ],
+  "torch": "2.12.1+cu130",
+  "ts": "2026-10-08 22:56:11",
+  "tool": "tools/machine-profile.py"
+}

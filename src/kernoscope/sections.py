@@ -12,9 +12,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .analyze.occupancy import arch_for, theoretical_occupancy
+from .analyze.occupancy import theoretical_occupancy
 from .analyze.roofline import MachinePeaks, SpeedOfLight
-from .provenance import Metric, Provenance, Section, UNAVAILABLE_REASONS
+from .provenance import Metric, Section, UNAVAILABLE_REASONS
 
 # `--set` 的分级（对齐 ncu --list-sets）
 SET_SECTIONS: dict[str, list[str]] = {
@@ -71,6 +71,8 @@ class BuildOptions:
     nvml_summary: dict[str, float] = field(default_factory=dict)
     dram: Any = None      # analyze.dram.DramEstimate（避免循环 import）
     memtrace: Any = None  # {kernel: analyze.memtrace.MemTraceStats}
+    issue_hist: Any = None  # backends.opcode_hist.OpcodeHist（NVBit 官方 opcode_hist 输出）
+    clock_mhz: float = 0.0  # 用于发射槽上限的 SM 时钟（NVML 实测或用户给定）
     sm_count: int = 0
     device_name: str = ""
     arch: str = "sm_89"
@@ -443,6 +445,59 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
             if sec is not None:
                 out.append(sec)
 
+    # ---------------- SchedulerStats / WarpStateStats（发射槽上界，R-08）----------------
+    issue_want = [n for n in ("SchedulerStats", "WarpStateStats") if n in want]
+    if issue_want and opt.issue_hist is not None:
+        from .analyze.issue import from_histogram, to_metrics as issue_metrics
+
+        hist = opt.issue_hist
+        sub = hist.for_kernel(_simple_name(kr.name))
+        if not sub.launches:
+            sub = hist.for_kernel(kr.alias or "")
+        if not sub.launches:
+            for cand in hist.kernels:
+                if _lookup_in({cand: cand}, kr):
+                    sub = hist.for_kernel(cand)
+                    break
+        if sub.launches:
+            merged = sub.merged()
+            # 指令直方图与本次报告的 launch 数可能不同（通常轨迹跑得短、报告跑得长）。
+            # 两者都是"每次 launch 处理同样的工作量"，所以按 per-launch 平均对齐，
+            # 并把这件事写进 note —— 不这么做的结果取决于两次运行各跑了多少次，没有意义。
+            n_hist = max(1, getattr(merged, "n_launches", 1) or 1)
+            n_report = max(1, kr.launch_count or 1)
+            scaled = merged.warp_instrs
+            ratio_note = ""
+            if n_hist != n_report:
+                scaled = merged.warp_instrs * n_report / n_hist
+                ratio_note = (f"；指令数按 per-launch 平均对齐到本报告的 {n_report} 次 launch"
+                              f"（直方图那次是 {n_hist} 次）")
+            merged.warp_instrs = int(round(scaled))
+            st = from_histogram(
+                merged, duration_ns=float(kr.total_ns), sm_count=opt.sm_count,
+                clock_mhz=opt.clock_mhz,
+                dram_throughput_pct=getattr(opt.dram, "throughput_pct_of_peak", None))
+            if ratio_note:
+                st.notes.append(ratio_note)
+            metrics = issue_metrics(st)
+            for section_name in issue_want:
+                sec = Section(section_name)
+                keep = (metrics if section_name == "SchedulerStats" else
+                        [m for m in metrics if m[0].startswith(("est__stall_direction",
+                                                                "est__dyn_instr_share_"))])
+                for name, value, unit, source, note in keep:
+                    if value is None:
+                        sec.add(Metric.unavailable(name, st.unavailable_reason(), source=source))
+                    else:
+                        sec.add(Metric.estimated(name, value, unit, source=source, note=note))
+                # 计数器版本的 stall 细分仍然不可得，必须显式说明
+                sec.add(Metric.unavailable(
+                    "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
+                    UNAVAILABLE_REASONS["counters"] +
+                    "；本工具给的是发射槽利用率上界 + 方向性判断（见本节 est__ 指标），"
+                    "不是 stall 周期细分"))
+                out.append(sec)
+
     # ---------------- 明确不可得的 section ----------------
     for name in requested_sections(opt):
         reason = COUNTER_SECTIONS.get(name)
@@ -531,6 +586,12 @@ def _lookup_in(d: dict, kr) -> object | None:
         if score > best_score:
             best, best_score = v, score
     return best
+
+
+def _simple_name(name: str) -> str:
+    """把 demangled 全签名压成"第一个标识符"，用于在外部工具输出里找同名 kernel。"""
+    m = re.search(r"[A-Za-z_][A-Za-z0-9_]*", name or "")
+    return m.group(0) if m else ""
 
 
 def _strip(name: str) -> str:
