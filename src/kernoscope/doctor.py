@@ -79,6 +79,8 @@ class DoctorReport:
     # 计数器四态：not-installed / not-in-path / denied / available / unknown
     counter_state: str = "unknown"
     counter_state_note: str = ""
+    # NVBit 的发现结果（能力分层要用：有它才是 tier 3 指令级）
+    nvbit_path: str = ""
 
     def add(self, group: str, name: str, status: str, detail: str = "", impact: str = "") -> None:
         self.checks.append(Check(group, name, status, detail, impact))
@@ -94,6 +96,7 @@ class DoctorReport:
             "tools": self.tools,
             "counter_state": self.counter_state,
             "counter_state_note": self.counter_state_note,
+            "nvbit_path": self.nvbit_path,
             "checks": [asdict(c) for c in self.checks],
             "capabilities": [asdict(c) for c in self.capabilities],
             "backend_plan": self.backend_plan,
@@ -362,6 +365,7 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
 
     # ---- 可选的 instrumentation 后端 ----
     nvbit_hint = os.environ.get("NVBIT_PATH") or _find_nvbit()
+    r.nvbit_path = nvbit_hint or ""
     r.add("optional", "NVBit", OK if nvbit_hint else WARN,
           nvbit_hint or "未配置（可选外部依赖，需自行安装，许可证禁止随本项目分发）",
           impact="指令级归因 / 访存轨迹 / sectors-per-request / locality")

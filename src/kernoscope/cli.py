@@ -18,7 +18,9 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -30,6 +32,7 @@ from .analyze.roofline import MachinePeaks, gemm_workload
 from .backends import cubin as cubin_backend
 from .backends import nsys as nsys_backend
 from .backends.nvml import Sampler
+from .refusals import Refusal, RefusalCode
 from .report import DeviceInfo, KernelLaunch, KernelReport, Report
 from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
@@ -228,10 +231,25 @@ def load_synthetic() -> list[KernelLaunch]:
     return launches
 
 
+def _target_command(program: Sequence[str]) -> list[str]:
+    """把 `-- <cmd>` 后面的内容还原成 argv。
+
+    `argparse.REMAINDER` 会保留一个单独的 `--`，而 shell 传进来时也可能是**一个**字符串
+    `"-- python train.py"`（测试与某些封装就是这样调的）。降级路径要直接 exec 它，
+    所以这两种形状都必须还原成 argv，而不是交给 nsys 去猜。
+    """
+    raw = [a for a in program if a != "--"]
+    if len(raw) == 1 and raw[0].strip().startswith("-- "):
+        return shlex.split(raw[0].strip()[3:])
+    return raw
+
+
 def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str, Any], int]:
     """返回 (launches, extra_meta, target_exit_code)。
 
     R-19：缺依赖/文件不存在时给**自家风格的错误 + 安装建议**，不能抛裸 traceback。
+    W1：缺 nsys **不是**错误 —— 它只让我们退到设备级（NVML），所以这里返回
+    `degraded="device-only"` 并照常跑目标命令，让报告给出「能拿到什么 + 缺什么会多出什么」。
     """
     meta: dict[str, Any] = {}
     rc = 0
@@ -245,11 +263,39 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
         meta["nsys_sqlite"] = db
         return nsys_backend.parse_kernels(db), meta, 0
 
-    cmd = [a for a in args.program if a != "--"]
+    cmd = _target_command(args.program)
     if not cmd:
         log("error: no target command. Put it after '--', or use --ks-sqlite/--ks-synthetic.")
         raise SystemExit(1)
     meta["target"] = " ".join(cmd)
+
+    if not nsys_backend.find_nsys():
+        # ---- W1：优雅降级。没有 nsys ≠ 没有信息 ----
+        # 仍然把目标命令跑起来，好让 NVML 在这段时间里采设备级读数；报告会明确写出
+        # 「kernel 级数据缺失」是哪一个 code，以及装上 nsys 之后会多出什么。
+        meta["degraded"] = "device-only"
+        ref = Refusal(
+            RefusalCode.NSYS_MISSING,
+            "没有 nsys：kernel 级数据（时长/launch 配置/occupancy 上界）本次不可得；"
+            "本次报告只有设备级实测（NVML）",
+            observed={"nsys": "not found"})
+        meta["environment_refusals"] = [ref.to_dict()]
+        if args.ks_no_nvml:
+            log("warn: 没有 nsys 且 --ks-no-nvml 打开：本次不会有任何测量值；"
+                "去掉 --ks-no-nvml 可拿到设备级读数")
+            return [], meta, 0
+        log("note: 没有 nsys —— 退到设备级模式（只用 NVML 采样），继续运行目标命令："
+            f"{' '.join(cmd)}")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            rc = proc.returncode
+            if rc != 0:
+                log(f"warn: 目标命令退出码 {rc}；报告仍然是这台机器在运行期间的设备级读数")
+        except OSError as e:
+            log(f"error: 目标命令无法执行：{e}")
+            raise SystemExit(1)
+        return [], meta, rc
+
     keep = bool(getattr(args, "ks_keep_intermediate", False))
     if args.export:
         base = args.export[:-len(".json")] if args.export.endswith(".json") else args.export
@@ -308,6 +354,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .issue_cmd import issue_main
 
         return issue_main(argv[1:])
+    if argv and argv[0] == "capabilities":
+        from .capabilities_cmd import capabilities_main
+
+        return capabilities_main(argv[1:])
 
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"
@@ -436,9 +486,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         achieved = json.loads(Path(args.ks_achieved_occupancy).read_text())
 
     # ---------- 过滤 ----------
+    degraded = str(meta.get("degraded") or "")
     if not launches:
-        log("error: no kernel activity found (was the run collected with --trace=cuda?)")
-        return 1
+        if degraded:
+            # W1：设备级模式下没有 kernel 记录是**预期**的，不是错误。报告仍然给出
+            # 设备级实测 + 结构化拒绝（缺 nsys 会多出什么）。退出码 0。
+            log("note: 本次没有任何 kernel 记录（设备级模式）；报告只含设备级读数与"
+                "「装上 nsys 会多出什么」")
+        else:
+            ref = Refusal(RefusalCode.NO_LAUNCH_ACTIVITY,
+                          "没有采到任何 kernel 活动：确认目标命令真的在 GPU 上跑 kernel，"
+                          "且采集时带上了 CUDA activity（--trace=cuda）")
+            log(f"error: {ref.message}")
+            log(f"hint: {ref.remedy_or_default.action}"
+                + (f" [{ref.remedy_or_default.command}]" if ref.remedy_or_default.command else ""))
+            return 1
     if args.devices:
         try:
             want_dev = {int(x) for x in str(args.devices).replace(" ", "").split(",") if x != ""}
@@ -454,9 +516,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
     matched = select_launches(launches, args.kernel_name, args.launch_skip,
                               args.launch_count, args.launch_skip_before_match)
-    if not matched:
+    kernelless = bool(degraded) and not launches
+    if not matched and not kernelless:
         names = sorted({l.demangled for l in launches})[:8]
-        log(f"error: no kernels matched {args.kernel_name!r}. Available examples: {names}")
+        ref = Refusal(RefusalCode.NO_KERNEL_MATCH,
+                      f"no kernels matched {args.kernel_name!r}；可用名字示例：{names}",
+                      observed={"pattern": args.kernel_name or "",
+                                "available_names": names})
+        log(f"error: {ref.message}")
+        log(f"hint: {ref.remedy_or_default.action}")
         return 1
 
     # ---------- R-46：窗口主导性所需的「谁在窗口里」----------
@@ -755,6 +823,11 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
     problems: list[str] = []
     if used_noop:
         problems.append(f"no-op ncu flags used: {', '.join(used_noop)}")
+    # 0) 环境缺件（W1）：降级跑出来的报告在 --strict 下必须失败 —— 用户要的是 kernel 级
+    #    数据，而这台机器给不出来。降级只在非 strict 时是"成功路径"。
+    for d in (rep.meta.get("environment_refusals") or []):
+        problems.append(f"environment cannot provide requested data: "
+                        f"{d.get('code', '?')} - {d.get('message', '')}")
     requested = [n for v in (args.metrics or []) for n in v.split(",") if n.strip()]
     unavailable = rep.unavailable_metrics()
     unavailable_names = {m.name for m in unavailable}

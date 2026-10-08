@@ -122,15 +122,34 @@ def test_launch_csv_is_one_row_per_launch(capsys, tmp_path: Path):
     assert rows[0]["config"].startswith("grid")
 
 
-def test_missing_nsys_is_a_readable_error(capsys, tmp_path: Path, monkeypatch):
-    """R-19/B7-b 的负样本：缺 nsys 时给一行可读错误 + 建议，不抛裸 traceback。"""
+def test_missing_nsys_degrades_to_device_only(capsys, monkeypatch):
+    """W1：缺 nsys 不是错误，而是退到设备级模式。
+
+    旧行为（R-19）是一行可读错误 + exit 1。新要求是：**必须仍然成功**，并说清
+    「这次少了什么、怎么补上」。exit 1 会让 CI/agent 以为工具坏了。
+    """
+    from kernoscope.backends import nsys as nsys_backend
+
+    monkeypatch.setattr(nsys_backend, "find_nsys", lambda: None)
+    monkeypatch.setattr(nsys_backend, "device_info_from_smi", lambda: __import__(
+        "kernoscope.report", fromlist=["DeviceInfo"]).DeviceInfo())
+    rc, out, err = run(capsys, "--ks-no-nvml", "--", "python", "-c", "pass")
+    assert rc == 0
+    assert "Traceback" not in err
+    assert "nsys" in err                     # 说清缺什么
+    assert "设备级" in err                    # 说清退到了哪一层
+
+
+def test_nsys_found_but_profile_fails_is_still_an_error(capsys, monkeypatch):
+    """nsys 在场但采集失败 = 真错误：不能悄悄降级掩盖它。"""
     from kernoscope.backends import nsys as nsys_backend
 
     def boom(*a, **k):
-        raise nsys_backend.NsysError("nsys not found in PATH (install Nsight Systems)")
+        raise nsys_backend.NsysError("nsys profile failed (rc=1)")
 
+    monkeypatch.setattr(nsys_backend, "find_nsys", lambda: "/usr/local/bin/nsys")
     monkeypatch.setattr(nsys_backend, "run_profile", boom)
-    rc, out, err = run(capsys, "-- python train.py")
+    rc, out, err = run(capsys, "--", "python", "-c", "pass")
     assert rc == 1
     assert "Traceback" not in err
     assert "nsys" in err and "hint:" in err
