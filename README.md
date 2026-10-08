@@ -403,6 +403,21 @@ DRAM 代理精度 → 账本对拍 → **覆盖率不足时的裁决行** → �
 
 ---
 
+## 拿不到数字时先看这里
+
+| 你看到的现象 | 真实原因 | 怎么做 |
+|---|---|---|
+| `n/a` + "requires GPU hardware performance counters" | 宿主 `RmProfilingAdminOnly=1` 且容器无 `CAP_SYS_ADMIN`/`CAP_PERFMON` | 换物理观测量：本机标定 + DRAM 代理 / 访存轨迹；不要去找"绕过权限"的办法 |
+| `doctor` 说"未安装 ncu"，但你 `ls` 到了它 | 工具只查了 PATH（旧行为） | 现在会给出四态结论与路径；`doctor --json` 的 `tools` 里是"找过哪些目录" |
+| `est__dram_bytes_*` 全是 `n/a` | 窗口覆盖率 < 50%（启动开销把窗口稀释了），或显存忙碌读数低于分辨率下限 | 看 `n/a` 行给的具体前提；加 `--ks-window auto`（默认已开）、把稳态循环按**目标秒数**加长 |
+| 账本误差行是 `n/a` 而不是数字 | per-launch 口径要求"单一 kernel + 覆盖率 ≥80%" | `-k` 锁定一个 kernel；或改用 `--ks-ledger-total-mb`；或加 `--ks-memtrace` 走轨迹口径 |
+| 误差百分比大得离谱（百万级） | 口径混用（per-launch 账本 vs 整窗口估算） | 同基比较：`--ks-ledger-mb` 对 per-launch，`--ks-ledger-total-mb` 对总量，区间永远 per-launch |
+| roofline 的 compute 侧是 `n/a` | 标定文件缺 `acc_caliber`/`precision_settings`/`method` | 用新版 `tools/machine-profile.py` 重新标定（带宽侧不受影响） |
+| 报告 JSON 上百 MB | 逐 launch 明细随 iteration 数线性增长 | `-c <N>` 限流、`--ks-json-no-launches`、逐 launch 明细改走 `--launch-csv` |
+| 轨迹文件几个 GB | 记录数 ∝ 流量 × launch 次数（插桩不区分预热） | 用小工作集 + 小的预热次数（见 [`bench/README.md`](bench/README.md)） |
+| 形状扫描只剩一行均值 | 同名 kernel 的多组 launch 配置被聚合 | 现在会逐组给出 `LaunchConfigs`；`launch__grid_size` 在混合时改报 `n/a` + 取值集合 |
+| `--strict` 一直红 | 请求了产不出来的数据（含"账本裁决行算不出来"） | 这正是它的用途；`--strict` 的报错会逐条说明是哪个请求、为什么 |
+
 ## 状态与路线
 
 - ✅ **MVP**：ncu 兼容 CLI、LaunchStats/时长（exact）、理论与达到 occupancy、实测峰值 roofline、
