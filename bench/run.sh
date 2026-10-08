@@ -51,10 +51,15 @@ fi
 # doctor 现在会按深度 1..3 找它。harness 也必须用同一份发现逻辑，否则步骤 8/9 会被
 # 静默跳过（真事：一次产物里完全没有 NVBit 证据，而机器上装着 NVBit）。
 if [[ -z "${NVBIT_PATH:-}" ]]; then
-  for d in . "$HOME" /root /opt /usr/local /workspace /mnt \
-           "$HOME"/* "$HOME"/*/* /root/* /root/*/* /opt/* /usr/local/*; do
-    if [[ -f "$d/core/libnvbit.a" ]]; then NVBIT_PATH="$(cd "$d" && pwd)"; break; fi
+  found=""
+  for base in . "$HOME" /root /opt /usr/local /workspace /mnt; do
+    # 深度 1..3（与 doctor 的发现逻辑一致）：真实布局常见是
+    # ~/<项目数据目录>/lab/nvbit_release_x86_64 —— 只找顶层会静默跳过步骤 8/9
+    for d in "$base"/nvbit_release* "$base"/*/nvbit_release* "$base"/*/*/nvbit_release*; do
+      if [[ -f "$d/core/libnvbit.a" ]]; then found="$(cd "$d" && pwd)"; break 2; fi
+    done
   done
+  [[ -n "$found" ]] && NVBIT_PATH="$found"
 fi
 if [[ -n "${NVBIT_PATH:-}" ]]; then
   export NVBIT_PATH
