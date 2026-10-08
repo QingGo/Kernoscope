@@ -1,10 +1,11 @@
 [project]
 name = "kernoscope"
 version = "0.2.0"
-description = "Provenance-honest CUDA kernel profiler for locked-down / multi-tenant GPUs. ncu-compatible CLI."
+description = "Provenance-honest CUDA kernel profiler for locked-down / multi-tenant GPUs; ncu-compatible CLI."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Kernoscope contributors" }]
 keywords = [
     "ncu", "nsight-compute", "gpu-profiler", "cuda", "profiling",
@@ -16,26 +17,33 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Debuggers",
     "Topic :: System :: Monitoring",
 ]
+# 运行时零第三方依赖：只用标准库 + 外部命令（nsys / nvidia-smi / cuobjdump）。
 dependencies = []
 
 [project.optional-dependencies]
-# 设备级计数器（能耗等）：可选
+# 设备级计数器（能耗/显存忙碌）：可选；优先 pynvml，缺它时退回 nvidia-smi 子进程轮询
 nvml = ["nvidia-ml-py>=12.535"]
-# 参考实现 / 交叉验证：可选
-analyze = ["numpy>=1.24"]
 
 [project.scripts]
 kernoscope = "kernoscope.cli:main"
 ksc = "kernoscope.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/kernoscope/kernoscope"
-Documentation = "https://github.com/kernoscope/kernoscope/tree/main/docs"
-Issues = "https://github.com/kernoscope/kernoscope/issues"
+Homepage = "https://github.com/QingGo/Kernoscope"
+Repository = "https://github.com/QingGo/Kernoscope"
+Documentation = "https://github.com/QingGo/Kernoscope#readme"
+Issues = "https://github.com/QingGo/Kernoscope/issues"
+Changelog = "https://github.com/QingGo/Kernoscope/commits/main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

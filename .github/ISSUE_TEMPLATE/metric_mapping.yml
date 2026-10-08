@@ -1,0 +1,74 @@
+name: 指标映射（这个 ncu 指标对应什么）
+description: 你知道一个 ncu 指标/读数，想确认它在 Kernoscope 里对应什么（或为什么没有）
+title: "[metric] "
+labels: ["metric-mapping"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Kernoscope **不占用 ncu 的指标名**（规则 R3）：能在受限环境重建的量用自有意前缀
+        （`est__` / `meas__` / `ks__`），不能重建的计数器名只报 `n/a` + 原因。
+        本模板用来核对一条映射。开始前请先跑：
+
+        ```bash
+        kernoscope capabilities --json
+        kernoscope doctor --json
+        ```
+
+  - type: input
+    id: ncu_metric
+    attributes:
+      label: ncu 指标名或 section
+      description: 原样抄写，例如 `dram__bytes.sum`、`lts__t_sector_hit_rate.pct`、`--section SchedulerStats`。
+      placeholder: "dram__bytes.sum"
+    validations:
+      required: true
+
+  - type: textarea
+    id: meaning
+    attributes:
+      label: 这个读数在你眼里是什么
+      description: 你想用它下什么结论？（例如"DRAM 实际搬了多少字节，判断是不是 DRAM bound"）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provenance
+    attributes:
+      label: 你期望的出处等级
+      description: 出处等级见 PROVENANCE.md；非 `exact` 一律使用自有前缀。
+      options:
+        - exact（与 ncu 同源；必须真的同源才可能）
+        - measured（我们探针实测）
+        - derived（由实测再算出的统计量/判词）
+        - estimated（模型/代理，必须带误差带与前提）
+        - unavailable（拿不到就报 n/a + 原因，我理解）
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 你知道的对应关系（可留空）
+      description: 如果你已经查过，请给出证据：ncu 文档、源码、或你在有权限机器上的实测对照。
+    validations:
+      required: false
+
+  - type: textarea
+    id: capabilities_out
+    attributes:
+      label: capabilities --json 的输出
+      description: 让维护者看到你这台机器上这个问题现在是能答/更弱/不答。
+      render: json
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我理解"在 ncu 指标名下填一个模型算出来的数"是本项目明确禁止的
+          required: true
+        - label: 我贴的输出去掉了主机名/绝对路径/实例名
+          required: true

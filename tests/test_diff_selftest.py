@@ -46,18 +46,67 @@ def _filled(workloads, mdd_note=True) -> SelftestResult:
 
 
 def test_band_is_union_of_known_answer_errors():
+    """matmul 是 compute-bound：**不进**字节误差带（口径不适用，不是测量误差）。"""
     res = _filled([_run("copy", 9.1), _run("read", -4.1), _run("write", 12.5),
-                   _run("matmul", 3.0)])
+                   _run("matmul", 900.0)])
     b = res.band["dram_bytes_pct"]
     assert b["low"] == -4.1 and b["high"] == 12.5
-    assert "已知答案" in b["basis"]
+    assert "已知答案" in b["basis"] and "DRAM-bound" in b["basis"]
+    assert "matmul" in res.band["excluded"]
 
 
 def test_mdd_uses_run_to_run_spread_and_resolution_floor():
-    # 同负载重复：偏差 20.0 / 21.0 → SD≈0.7 → 2SD≈1.4；分辨率下限 100*1/50=2.0 → 取 2.0
+    # 同负载重复：偏差 20.0 / 21.0 → SD≈0.7 → 2SD≈1.4；分辨率下限 100*1/50=2.0；
+    # 误差带半宽 = (21-20)/2 = 0.5 → 取最大 2.0
     res = _filled([_run("copy", 20.0, util=50.0), _run("copy", 21.0, util=50.0)])
     assert res.mdd["dram_bytes_pct"] == 2.0
     assert res.mdd["resolution_floor_pct"] == 2.0
+    assert res.mdd["band_half_width_pct"] == 0.5
+    assert "max(" in res.mdd["basis"]
+
+
+def test_mdd_never_smaller_than_half_the_band():
+    """不同访问模式的代理偏差本身就能差几个百分点 —— MDD 必须把偏差差也算进去。
+
+    （真机反例：copy +9.6% / read +7.8% / write +5.6%，同进程重复的 SD 只有 ~0.01%，
+    如果 MDD 只看 SD 就会报 1.0%，于是"换了个 kernel 导致偏差变了 3 个点"会被判成真退化。）
+    """
+    res = _filled([_run("copy", 9.6), _run("read", 7.8), _run("write", 5.6)])
+    assert res.mdd["band_half_width_pct"] == 2.0
+    assert res.mdd["dram_bytes_pct"] >= 2.0
+
+
+def test_cross_process_children_do_not_recurse(monkeypatch):
+    """真机踩过的坑：子进程若继承 --cross-process，就会指数级起进程（永不结束）。"""
+    import kernoscope.selftest as st
+
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"workloads": [{"id": "copy", "err_pct": 9.0}]}'
+
+    def fake_run(cmd, **kw):
+        seen.append(list(cmd))
+        return _Proc()
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    res = st.SelftestResult(ok=True, size_mb=64, duration_s=0.5, dtype="bf16")
+    st._cross_process_samples(res, 2, ("copy", "read", "write"))
+    assert len(seen) == 2
+    for cmd in seen:
+        assert "--cross-process" in cmd and cmd[cmd.index("--cross-process") + 1] == "0"
+
+
+def test_cross_process_samples_widen_sd():
+    from kernoscope.selftest import _fill_band_and_mdd
+
+    res = SelftestResult(ok=True)
+    res.workloads = [_run("copy", 9.0), _run("copy", 9.1)]     # 同进程：几乎不抖
+    _fill_band_and_mdd(res, extra_runs={"copy": [4.0, 14.0]})  # 跨进程：抖得多
+    assert res.mdd["run_to_run_sd_pct"] > 3.0
+    assert res.mdd["cross_process_samples"] == {"copy": 2}
 
 
 def test_mdd_never_below_half_a_point():
@@ -104,6 +153,21 @@ def test_selftest_json_is_also_a_calibration_file():
     for k in ("acc_caliber", "precision_settings", "method"):
         assert mm[k], f"标定口径字段 {k} 缺失（roofline 会拒绝用它算拐点）"
     assert d["band"]["dram_bytes_pct"] and d["mdd"]["dram_bytes_pct"]
+
+
+def test_torch_dtype_names_are_mapped_correctly():
+    """真机踩过的坑：torch.bf16 不存在（是 torch.bfloat16），写错会静默变成"分配失败"。"""
+    from kernoscope.selftest import TORCH_DTYPE_ATTR
+
+    assert TORCH_DTYPE_ATTR == {"fp32": "float32", "bf16": "bfloat16", "fp16": "float16"}
+
+    class FakeTorch:
+        float32 = "f32"
+        bfloat16 = "bf16"
+        float16 = "f16"
+
+    for short, attr in TORCH_DTYPE_ATTR.items():
+        assert getattr(FakeTorch, attr)
 
 
 def test_selftest_schema_fields():

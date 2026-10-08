@@ -1,0 +1,787 @@
+{
+  "id": "05_dram_caliber_unusable",
+  "scenario": "受限实例：硬件计数器被权限拒绝（tier 2，只有 nsys 的 kernel 级数据），同时 NVML 采样一次都没采到（samples=0），所以 DRAM 代理口径也没有输入。NVML 本身可用，显存忙碌这一路读数曾显示 88%，但没有任何样本能被积分。用户问：DRAM 那边到底有没有空间？",
+  "question_for_agent": "你要决定这个 kernel 下一步往哪个方向优化。请给出 classification、你**据以行动**的判词 id 列表、以及一句可执行的 next_action，并写成 decision.json。",
+  "material": {
+    "packet": {
+      "schema_version": 1,
+      "tool": "kernoscope",
+      "tool_version": "0.2.0",
+      "protocol": {
+        "hash": "sha256:debfbea867f94b69",
+        "basis": "est__dram_bytes_total = NVML 显存忙碌 × 本机实测峰值",
+        "window_mode": "auto"
+      },
+      "env": {
+        "tier": 2,
+        "tier_name": "trace",
+        "counter_state": "denied",
+        "blocked_by": [
+          "no_static_input",
+          "nvbit_missing"
+        ]
+      },
+      "verdicts": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "facts": {
+            "top": "fused_attention_fwd",
+            "top_ms": 1200.0,
+            "launches": 300,
+            "share_pct": 100.0,
+            "total_ms": 1200.0,
+            "n_kernels": 1
+          },
+          "value": 1200.0,
+          "unit": "ms",
+          "provenance": "exact",
+          "premises": [
+            {
+              "id": "kernel_share_of_total",
+              "observed": 100.0,
+              "ok": true,
+              "unit": "%"
+            },
+            {
+              "id": "kernel_time_pct_of_wall",
+              "observed": 92.3,
+              "ok": true,
+              "unit": "%"
+            }
+          ],
+          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词",
+          "metrics": [
+            "gpu__time_duration.sum",
+            "ks__launch_time_mean"
+          ]
+        },
+        {
+          "id": "dram_bytes",
+          "status": "refused",
+          "premises": [
+            {
+              "id": "window_coverage_pct",
+              "observed": 95.4,
+              "ok": true,
+              "threshold": 50.0,
+              "unit": "%"
+            }
+          ],
+          "refusal": {
+            "code": "no_nvml_samples",
+            "observed": {
+              "samples": 0,
+              "window_s": 1.3
+            },
+            "threshold": {
+              "min_samples": 1
+            }
+          },
+          "metrics": [
+            "est__dram_bytes_total"
+          ]
+        },
+        {
+          "id": "dram_bytes_per_launch",
+          "status": "refused",
+          "premises": [
+            {
+              "id": "window_coverage_pct",
+              "observed": 95.4,
+              "ok": true,
+              "threshold": 80.0,
+              "unit": "%"
+            },
+            {
+              "id": "matched_kernel_kernel_share_pct",
+              "observed": 98.7,
+              "ok": true,
+              "threshold": 95.0,
+              "unit": "%"
+            }
+          ],
+          "refusal": {
+            "code": "no_nvml_samples",
+            "observed": {
+              "samples": 0
+            },
+            "threshold": {
+              "min_samples": 1
+            }
+          },
+          "metrics": [
+            "est__dram_bytes_per_launch"
+          ]
+        },
+        {
+          "id": "occupancy",
+          "status": "ok",
+          "facts": {
+            "theoretical_pct": 50.0,
+            "achieved_pct": 41.0
+          },
+          "value": 41.0,
+          "unit": "%",
+          "provenance": "measured",
+          "next": "实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy",
+          "metrics": [
+            "ks__theoretical_occupancy_pct",
+            "meas__achieved_occupancy_pct"
+          ]
+        }
+      ],
+      "unmeasured": [
+        {
+          "code": "counters_denied",
+          "count": 3,
+          "examples": [
+            "dram__bytes.sum",
+            "lts__t_sector_hit_rate.pct"
+          ]
+        },
+        {
+          "code": "no_nvml_samples",
+          "count": 2,
+          "examples": [
+            "est__dram_bytes_total",
+            "est__dram_bytes_per_launch"
+          ]
+        },
+        {
+          "code": "nvbit_missing",
+          "count": 1,
+          "examples": [
+            "est__issue_slot_utilization_pct"
+          ]
+        }
+      ],
+      "refusals": {
+        "no_nvml_samples": {
+          "action": "去掉 --ks-no-nvml 让设备级采样生效",
+          "cost_kind": "wall_seconds"
+        },
+        "counters_denied": {
+          "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…",
+          "cost_kind": "unavailable"
+        },
+        "nvbit_missing": {
+          "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+          "cost_kind": "manual"
+        },
+        "no_static_input": {
+          "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…",
+          "cost_kind": "manual",
+          "cmd": "kernoscope --ks-cubin build/app.so ..."
+        },
+        "no_nvlink": {
+          "action": "需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用",
+          "cost_kind": "unavailable"
+        }
+      },
+      "next": [
+        {
+          "for": "kernel_time",
+          "hint": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
+        },
+        {
+          "for": "dram_bytes",
+          "code": "no_nvml_samples"
+        },
+        {
+          "for": "unmeasured",
+          "code": "counters_denied"
+        },
+        {
+          "for": "unmeasured",
+          "code": "nvbit_missing"
+        }
+      ],
+      "cost": {
+        "wall_s": 1.3,
+        "launches": 300,
+        "unmeasured_metrics": 6,
+        "selftest_band": false,
+        "packet_bytes": 3180,
+        "trimmed": []
+      }
+    },
+    "capabilities": {
+      "schema_version": 1,
+      "tool": "kernoscope",
+      "tool_version": "0.2.0",
+      "tier": {
+        "level": 2,
+        "name": "trace",
+        "gives": "kernel 级精确量：时长、launch 配置、寄存器/共享内存、occupancy 上界"
+      },
+      "next_tier": {
+        "level": 3,
+        "name": "instrumented",
+        "needs": "NVBit 自行编译（+ nvcc）",
+        "gives": "指令级：访存轨迹（sectors/request、L2 命中模型）、动态指令数、发射槽利用率上界"
+      },
+      "env": {
+        "has_gpu": true,
+        "gpu_name": "RTX 4090",
+        "has_nvml": true,
+        "has_nsys": true,
+        "has_cuobjdump": true,
+        "has_ncu": true,
+        "counter_state": "denied",
+        "has_nvbit": false,
+        "has_calibration": true,
+        "has_workload": true,
+        "has_memtrace": false,
+        "has_instr_hist": false,
+        "has_occupancy_probe": false,
+        "has_cubin": false,
+        "nvml_disabled_by_user": false
+      },
+      "matrix": {
+        "kernel_time": "available",
+        "launch_configs": "available",
+        "static_resources": "available",
+        "theoretical_occupancy": "available",
+        "device_busy": "available",
+        "dram_bytes": "available",
+        "roofline": "available",
+        "achieved_occupancy": "refused",
+        "dram_bytes_trace": "refused",
+        "issue_slot": "refused",
+        "l2_locality": "refused",
+        "static_mix": "refused",
+        "stall_breakdown": "refused",
+        "exact_dram": "refused",
+        "pipe_utilization": "refused",
+        "nvlink": "refused"
+      },
+      "answers": [
+        {
+          "id": "kernel_time",
+          "question": "哪个 kernel 最耗时、每次跑多久",
+          "state": "available",
+          "tier_required": 2,
+          "outputs": [
+            "gpu__time_duration.sum",
+            "ks__launch_time_mean"
+          ],
+          "how": ""
+        },
+        {
+          "id": "launch_configs",
+          "question": "同名 kernel 有几组 launch 配置，各自多快",
+          "state": "available",
+          "tier_required": 2,
+          "outputs": [
+            "ks__launch_time_mean",
+            "launch__grid_size",
+            "launch__block_size"
+          ],
+          "how": ""
+        },
+        {
+          "id": "static_resources",
+          "question": "静态寄存器/共享内存，以及谁是 occupancy 限制因素",
+          "state": "available",
+          "tier_required": 2,
+          "outputs": [
+            "ks__registers_used_for_occupancy",
+            "ks__occupancy_limiter"
+          ],
+          "how": "",
+          "alternative": "用 --ks-cubin 做纯静态分析（不需要 GPU）"
+        },
+        {
+          "id": "theoretical_occupancy",
+          "question": "occupancy 理论上界是多少",
+          "state": "available",
+          "tier_required": 2,
+          "outputs": [
+            "ks__theoretical_occupancy_pct",
+            "ks__blocks_per_sm"
+          ],
+          "how": ""
+        },
+        {
+          "id": "device_busy",
+          "question": "这段时间 GPU 显存子系统有多忙（实测）",
+          "state": "available",
+          "tier_required": 1,
+          "outputs": [
+            "meas__nvml_mem_busy_mean_pct",
+            "meas__device_energy_j"
+          ],
+          "how": ""
+        },
+        {
+          "id": "dram_bytes",
+          "question": "DRAM 搬了多少字节 / 是不是 DRAM bound（NVML 代理口径）",
+          "state": "available",
+          "tier_required": 1,
+          "outputs": [
+            "est__dram_bytes_total",
+            "ks__sampler_window_coverage_pct"
+          ],
+          "how": "",
+          "alternative": "轨迹口径 dram_bytes_trace（只测被追踪的 kernel）"
+        },
+        {
+          "id": "roofline",
+          "question": "离 roofline 多远、compute 还是 memory bound",
+          "state": "available",
+          "tier_required": 1,
+          "outputs": [
+            "est__achieved_gbs",
+            "est__bound",
+            "est__roofline_efficiency_pct"
+          ],
+          "how": "",
+          "alternative": "给 --ks-gemm 或 --ks-flops/--ks-bytes 才能算"
+        },
+        {
+          "id": "achieved_occupancy",
+          "question": "实际达到的 occupancy（不是上界）",
+          "state": "refused",
+          "tier_required": 3,
+          "outputs": [
+            "meas__achieved_occupancy_pct"
+          ],
+          "how": "未配置 NVBit（指令级/访存轨迹需要自行编译）",
+          "alternative": "用探针区间重叠重建；没有探针时只给理论上界",
+          "refusal": {
+            "code": "nvbit_missing",
+            "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "manual",
+              "then_answers": [
+                "memtrace",
+                "instruction_mix"
+              ]
+            }
+          }
+        },
+        {
+          "id": "dram_bytes_trace",
+          "question": "DRAM 字节的第二条口径（访存轨迹 + 缓存模型）",
+          "state": "refused",
+          "tier_required": 3,
+          "outputs": [
+            "est__dram_bytes_per_launch_trace",
+            "meas__sectors_per_request"
+          ],
+          "how": "未配置 NVBit（指令级/访存轨迹需要自行编译）",
+          "alternative": "NVML 代理口径 dram_bytes",
+          "refusal": {
+            "code": "nvbit_missing",
+            "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "manual",
+              "then_answers": [
+                "memtrace",
+                "instruction_mix"
+              ]
+            }
+          }
+        },
+        {
+          "id": "issue_slot",
+          "question": "发射槽用了多少、瓶颈方向是 latency 还是 throughput",
+          "state": "refused",
+          "tier_required": 3,
+          "outputs": [
+            "est__issue_slot_utilization_pct",
+            "est__stall_direction"
+          ],
+          "how": "未配置 NVBit（指令级/访存轨迹需要自行编译）",
+          "alternative": "上界口径 + 方向性判断，不是 stall 周期细分",
+          "refusal": {
+            "code": "nvbit_missing",
+            "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "manual",
+              "then_answers": [
+                "memtrace",
+                "instruction_mix"
+              ]
+            }
+          }
+        },
+        {
+          "id": "l2_locality",
+          "question": "L1/L2 命中率与工作集是否驻留",
+          "state": "refused",
+          "tier_required": 3,
+          "outputs": [
+            "est__l2_hit_rate_pct",
+            "est__working_set_bytes"
+          ],
+          "how": "未配置 NVBit（指令级/访存轨迹需要自行编译）",
+          "refusal": {
+            "code": "nvbit_missing",
+            "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "manual",
+              "then_answers": [
+                "memtrace",
+                "instruction_mix"
+              ]
+            }
+          }
+        },
+        {
+          "id": "static_mix",
+          "question": "静态 SASS 指令混合（哪些指令占多数）",
+          "state": "refused",
+          "tier_required": 2,
+          "outputs": [
+            "ks__static_sass_instructions",
+            "ks__static_sass_share_*"
+          ],
+          "how": "没有 cubin/.so（SASS 混合的来源）",
+          "alternative": "需要 --ks-cubin <file.so|.cubin>；不需要 GPU",
+          "refusal": {
+            "code": "no_static_input",
+            "message": "没有 cubin/.so：加 --ks-cubin <file> 才能给静态指令混合",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS",
+              "command": "kernoscope --ks-cubin build/app.so ...",
+              "cost_s": 0.0,
+              "cost_kind": "manual",
+              "then_answers": [
+                "static_resources",
+                "sass_mix"
+              ]
+            }
+          }
+        },
+        {
+          "id": "stall_breakdown",
+          "question": "warp 到底在等什么（stall 周期细分）",
+          "state": "refused",
+          "tier_required": 4,
+          "outputs": [
+            "smsp__warp_issue_stalled_*_per_warp_active.pct"
+          ],
+          "how": "硬件计数器状态：denied",
+          "alternative": "issue_slot 的方向性判断（latency vs throughput）",
+          "refusal": {
+            "code": "counters_denied",
+            "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "unavailable",
+              "then_answers": []
+            }
+          }
+        },
+        {
+          "id": "exact_dram",
+          "question": "DRAM 字节/L2 命中率的精确值（与 ncu 同源）",
+          "state": "refused",
+          "tier_required": 4,
+          "outputs": [
+            "dram__bytes.sum",
+            "lts__t_sector_hit_rate.pct"
+          ],
+          "how": "硬件计数器状态：denied",
+          "alternative": "dram_bytes（代理，带误差带）或 dram_bytes_trace（模型）",
+          "refusal": {
+            "code": "counters_denied",
+            "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "unavailable",
+              "then_answers": []
+            }
+          }
+        },
+        {
+          "id": "pipe_utilization",
+          "question": "各 pipe（FP32/INT/Tensor）的动态利用率",
+          "state": "refused",
+          "tier_required": 4,
+          "outputs": [
+            "sm__pipe_*.avg.pct_of_peak_sustained_elapsed"
+          ],
+          "how": "硬件计数器状态：denied",
+          "alternative": "issue_slot 的上界口径 + roofline 的达成百分比",
+          "refusal": {
+            "code": "counters_denied",
+            "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "unavailable",
+              "then_answers": []
+            }
+          }
+        },
+        {
+          "id": "nvlink",
+          "question": "NVLink 的流量与利用率",
+          "state": "refused",
+          "tier_required": 4,
+          "outputs": [
+            "nvlink__*"
+          ],
+          "how": "需要 NVLink 硬件与 NVML 支持",
+          "alternative": "单卡/无 NVLink 实例上这个问题不适用",
+          "refusal": {
+            "code": "no_nvlink",
+            "message": "NVLink 计数不可得（单卡实例上这个问题本来就不适用）",
+            "severity": "blocking",
+            "observed": {},
+            "threshold": {},
+            "remedy": {
+              "action": "需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用",
+              "command": "",
+              "cost_s": 0.0,
+              "cost_kind": "unavailable",
+              "then_answers": []
+            }
+          }
+        }
+      ],
+      "next_actions": [
+        {
+          "code": "nvbit_missing",
+          "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+          "command": "",
+          "cost_kind": "manual",
+          "cost_s": 0.0,
+          "unlocks": [
+            "achieved_occupancy",
+            "dram_bytes_trace",
+            "issue_slot",
+            "l2_locality"
+          ]
+        },
+        {
+          "code": "no_static_input",
+          "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS",
+          "command": "kernoscope --ks-cubin build/app.so ...",
+          "cost_kind": "manual",
+          "cost_s": 0.0,
+          "unlocks": [
+            "static_mix"
+          ]
+        }
+      ],
+      "refusals": [
+        {
+          "code": "nvbit_missing",
+          "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "manual",
+            "then_answers": [
+              "memtrace",
+              "instruction_mix"
+            ]
+          }
+        },
+        {
+          "code": "nvbit_missing",
+          "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "manual",
+            "then_answers": [
+              "memtrace",
+              "instruction_mix"
+            ]
+          }
+        },
+        {
+          "code": "nvbit_missing",
+          "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "manual",
+            "then_answers": [
+              "memtrace",
+              "instruction_mix"
+            ]
+          }
+        },
+        {
+          "code": "nvbit_missing",
+          "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "manual",
+            "then_answers": [
+              "memtrace",
+              "instruction_mix"
+            ]
+          }
+        },
+        {
+          "code": "no_static_input",
+          "message": "没有 cubin/.so：加 --ks-cubin <file> 才能给静态指令混合",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS",
+            "command": "kernoscope --ks-cubin build/app.so ...",
+            "cost_s": 0.0,
+            "cost_kind": "manual",
+            "then_answers": [
+              "static_resources",
+              "sass_mix"
+            ]
+          }
+        },
+        {
+          "code": "counters_denied",
+          "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "unavailable",
+            "then_answers": []
+          }
+        },
+        {
+          "code": "counters_denied",
+          "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "unavailable",
+            "then_answers": []
+          }
+        },
+        {
+          "code": "counters_denied",
+          "message": "硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "unavailable",
+            "then_answers": []
+          }
+        },
+        {
+          "code": "no_nvlink",
+          "message": "NVLink 计数不可得（单卡实例上这个问题本来就不适用）",
+          "severity": "blocking",
+          "observed": {},
+          "threshold": {},
+          "remedy": {
+            "action": "需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用",
+            "command": "",
+            "cost_s": 0.0,
+            "cost_kind": "unavailable",
+            "then_answers": []
+          }
+        }
+      ],
+      "probe_note": ""
+    }
+  },
+  "truth": {
+    "classification": "dram_caliber_unusable",
+    "safe_verdicts": [
+      "kernel_time",
+      "occupancy"
+    ],
+    "forbidden_verdicts": [
+      "dram_bytes",
+      "dram_bytes_per_launch"
+    ],
+    "expected_action_keywords": [
+      "测量口径",
+      "采样",
+      "计数器",
+      "口径",
+      "NVML",
+      "重跑"
+    ],
+    "code_change_allowed": false,
+    "why": "两条 DRAM 口径都被结构化拒绝（no_nvml_samples + counters_denied），能行动的只有 kernel 级结论。'拿不到 DRAM 数'不等于'DRAM 没问题'，也不等于'那就去优化计算'：唯一有依据的动作是先把测量口径修好（恢复 NVML 采样 / 拿计数器权限 / 装 NVBit 采轨迹）。"
+  },
+  "forbidden_actions": [
+    "优化访存",
+    "改 kernel 的访存",
+    "优化计算",
+    "转向计算",
+    "访存不是瓶颈",
+    "降 DRAM"
+  ]
+}

@@ -23,3 +23,12 @@ tools/probes/nvbit_memtrace/build/
 # bench：编译产物与原始轨迹（体积大、按需重采；分析产物会入库）
 bench/artifacts/.build/
 bench/artifacts/*/memtrace-official.txt
+
+# W8 评测台：默认输出目录（每次运行都重新生成，不入库）
+eval/runs/
+
+# 打包产物（uv build / python -m build 生成，不入库）
+dist/
+/build/
+*.egg-info/
+

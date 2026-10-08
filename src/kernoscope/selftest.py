@@ -39,7 +39,17 @@ DEFAULT_DURATION_S = 2.0
 DEFAULT_RUNS = 3
 MIN_SATURATION_MEM_UTIL_PCT = 50.0     # 低于它说明负载没把显存打满，误差带不可信
 WORKLOAD_IDS = ("copy", "read", "write", "matmul")
+# 只有 DRAM-bound 的负载能做"已知答案"对拍：matmul 是 compute-bound，DRAM 忙碌只有
+# 20%~40%，用"忙碌时间×峰值"去折算必然高估 —— 那不是误差，是口径不适用（真机实测
+# 偏差 +800%…+1600%，正是这个原因）。所以它只作为**负样本**报告，不进误差带。
+DRAM_BOUND_IDS = ("copy", "read", "write")
+# 采样前先跑一段：NVML 的 utilization.memory 是窗口平均，刚开始的 1~4 个采样点会
+# 读到上一段空闲的 0%（真机实测：不预热会让 copy 的偏差从 +9% 变成 +72%）。
+WARMUP_S = 1.0
 ITEM_BYTES = {"fp32": 4, "bf16": 2, "fp16": 2}
+# torch 的 dtype 属性名和我们的短名不是一回事：`torch.bf16` 不存在，`torch.bfloat16` 才存在。
+# 这个映射被真机踩过一次（当时错误信息还说成"显存不足"，更难查）。
+TORCH_DTYPE_ATTR = {"fp32": "float32", "bf16": "bfloat16", "fp16": "float16"}
 
 
 @dataclass
@@ -107,13 +117,21 @@ class SelftestResult:
         b = self.band.get("dram_bytes_pct") or {}
         if b:
             out.append("")
-            out.append(f"本机误差带（DRAM 字节代理）：{b.get('low'):+.1f}% … "
-                       f"{b.get('high'):+.1f}%   ← 单边偏高是代理口径的已知性质，不是 bug")
+            out.append(f"本机误差带（DRAM 字节代理，只用 {b.get('basis', '')}）："
+                       f"{b.get('low'):+.1f}% … {b.get('high'):+.1f}%   "
+                       f"← 单边偏高是代理口径的已知性质，不是 bug")
+            ex = (self.band.get("excluded") or {}).get("matmul")
+            if ex:
+                out.append(f"  （matmul 不进误差带：{ex}）")
         m = self.mdd or {}
         if m:
             out.append(f"MDD（两次运行差多少才算真差别）：DRAM 字节 "
                        f"{m.get('dram_bytes_pct')}% · kernel 时长 "
                        f"{m.get('kernel_time_pct')}%")
+            out.append(f"  口径：{m.get('basis')}"
+                       f"（本次 SD={m.get('run_to_run_sd_pct')}% · "
+                       f"分辨率下限={m.get('resolution_floor_pct')}% · "
+                       f"误差带半宽={m.get('band_half_width_pct')}%）")
         if self.peaks:
             out.append("")
             out.append("顺带量到的本机峰值（可直接当 --ks-calibration 用）："
@@ -170,7 +188,7 @@ class SelftestResult:
 def _allocate(torch, size_mb: int, dtype: str):
     """按 MB 分配三个张量（拷贝类负载需要 2 个输入 1 个输出）。"""
     n = max(1, int(size_mb * 2 ** 20 // ITEM_BYTES[dtype]))
-    mk = getattr(torch, "float32" if dtype == "fp32" else dtype)
+    mk = getattr(torch, TORCH_DTYPE_ATTR[dtype])
     a = torch.empty(n, dtype=mk, device="cuda").normal_()
     b = torch.empty(n, dtype=mk, device="cuda").normal_()
     c = torch.empty(n, dtype=mk, device="cuda")
@@ -201,25 +219,33 @@ def _one_iter(wid: str, t, a, b, c, mm: tuple[int, int, int, int]):
         t.matmul(am, bm, out=cm)
 
 
+def _spin(t, wid: str, seconds: float, a, b, c, mm) -> tuple[int, float]:
+    """跑一段饱和循环，返回 (迭代数, 实测秒数)。迭代数按 20 个一批计数。"""
+    t0 = time.monotonic()
+    iters = 0
+    while time.monotonic() - t0 < seconds:
+        for _ in range(20):
+            _one_iter(wid, t, a, b, c, mm)
+        t.cuda.synchronize()
+        iters += 20
+    return iters, time.monotonic() - t0
+
+
+def _window(sampler: Sampler, mark: float | None) -> list:
+    return [s for s in sampler.result.samples if mark is None or s.t >= mark]
+
+
 def _measure_one(t, sampler: Sampler, wid: str, args, a, b, c, nbytes,
                  mm: tuple[int, int, int, int], peak_gbs: float) -> WorkloadRun:
     """跑一段饱和循环，用 NVML 采样估字节，并与解析值对拍。"""
     from .analyze.dram import estimate as estimate_dram
 
-    for _ in range(3):                     # warmup：避免首轮 JIT / 缺页污染
-        _one_iter(wid, t, a, b, c, mm)
-    t.cuda.synchronize()
-
-    t0 = time.monotonic()
+    _spin(t, wid, min(WARMUP_S, max(args.duration_s, 0.5)), a, b, c, mm)  # 预热（不计数）
     mark = sampler.result.samples[-1].t if sampler.result.samples else None
-    iters = 0
-    while time.monotonic() - t0 < args.duration_s:
-        for _ in range(20):
-            _one_iter(wid, t, a, b, c, mm)
-        t.cuda.synchronize()
-        iters += 20
-    elapsed = time.monotonic() - t0
-    samples = [s for s in sampler.result.samples if mark is None or s.t >= mark]
+    iters, elapsed = _spin(t, wid, args.duration_s, a, b, c, mm)
+    samples = _window(sampler, mark)
+    # 与主流程**同一套算法**（同样的窗口自动裁剪、同样的末点外推），因为我们量的是
+    # "本工具自己的误差"，不是"一个理想算法的误差"。
     est = estimate_dram(samples, peak_gbs=peak_gbs, window_s=elapsed, launches=iters,
                         window_mode="full")
     measured_per_iter = (est.bytes_total / iters) if iters else 0.0
@@ -257,7 +283,15 @@ def _measure_matmul_tflops(t, a, b, c, mm, seconds: float = 1.5) -> float:
 # 主流程
 # --------------------------------------------------------------------------
 def run_selftest(size_mb: int = DEFAULT_SIZE_MB, duration_s: float = DEFAULT_DURATION_S,
-                 runs: int = DEFAULT_RUNS, dtype: str = "bf16") -> SelftestResult:
+                 runs: int = DEFAULT_RUNS, dtype: str = "bf16",
+                 only: tuple[str, ...] = WORKLOAD_IDS,
+                 cross_process: int = 0) -> SelftestResult:
+    """跑已知答案自检。
+
+    `only` 限定负载（跨进程子测量只跑 DRAM-bound 的三个，省时间）；
+    `cross_process`>0 时另起 N 个**新进程**重测一遍，用来把"跨进程漂移"计进 MDD ——
+    只测同一进程内的重复会系统性低估噪声（真机实测：同进程 1.0%，换进程可达数个百分点）。
+    """
     res = SelftestResult(
         dtype=dtype, size_mb=size_mb, duration_s=duration_s, runs=runs)
     try:
@@ -298,15 +332,18 @@ def run_selftest(size_mb: int = DEFAULT_SIZE_MB, duration_s: float = DEFAULT_DUR
         try:
             a, b, c, nbytes = _allocate(torch, size_mb, dtype)
         except Exception as e:  # noqa: BLE001
+            # 不说成"显存不足"：真实原因可能是 dtype 名字、驱动、被别的进程占满 ——
+            # 归因错了比不归因更糟（这是本项目反复踩到的坑）。
             res.refusal = Refusal(RefusalCode.NO_GPU,
-                                  f"显存不足，无法分配 {size_mb} MB × 3：{e}")
+                                  f"无法分配 {size_mb} MB × 3 张量（dtype={dtype}）："
+                                  f"{type(e).__name__}: {e}")
             return res
         mm = _matmul_shape(nbytes, dtype)
         # 自标定峰值带宽（copy），再用它把 NVML 忙碌时间折算成字节
         peak_gbs = _measure_peak_gbs_live(torch, sampler, args, a, b, c, nbytes, mm)
         res.peaks["copy_gbs"] = round(peak_gbs, 1)
         res.peaks["peak_method"] = "饱和 copy 循环 + NVML 显存忙碌折算"
-        for wid in ("copy", "read", "write", "matmul"):
+        for wid in [w for w in WORKLOAD_IDS if w in only]:
             for _ in range(runs):
                 run = _measure_one(torch, sampler, wid, args, a, b, c, nbytes, mm, peak_gbs)
                 res.workloads.append(run)
@@ -314,15 +351,50 @@ def run_selftest(size_mb: int = DEFAULT_SIZE_MB, duration_s: float = DEFAULT_DUR
                          ("write", "write_gbs")):
             got = [w for w in res.workloads if w.id == wid]
             if got:
-                res.peaks[key] = round(
-                    statistics.fmean(w.analytic_bytes_per_iter / max(w.duration_s, 1e-9)
-                                     / max(w.mem_util_pct / 100.0, 1e-6)
-                                     for w in got) / 1e9, 1)
+                # 每个负载的**峰值** = 解析字节÷（忙碌时间）：必须乘上迭代数，
+                # 否则算出来的是"每次搬运的字节 ÷ 秒"（真机第一次跑就错在这里，
+                # 报出 0 GB/s）。
+                res.peaks[key] = round(statistics.fmean(
+                    w.analytic_bytes_per_iter * w.iters / max(w.duration_s, 1e-9)
+                    / max(w.mem_util_pct / 100.0, 1e-6) for w in got) / 1e9, 1)
         res.peaks["matmul_tflops"] = round(_measure_matmul_tflops(torch, a, b, c, mm), 2)
 
-    _fill_band_and_mdd(res)
+    _fill_band_and_mdd(res, extra_runs=_cross_process_samples(res, cross_process, only))
     res.ok = True
     return res
+
+
+def _cross_process_samples(res: SelftestResult, n: int,
+                           only: tuple[str, ...]) -> dict[str, list[float]]:
+    """另起 n 个进程重测同一批负载，返回 {workload_id: [err_pct, ...]}（跨进程样本）。
+
+    子进程失败不影响主结果：如实记进 notes（"跨进程样本拿不到"比"假装没有漂移"诚实）。
+    """
+    out: dict[str, list[float]] = {}
+    if n <= 0:
+        return out
+    import subprocess
+
+    wl = ",".join(w for w in DRAM_BOUND_IDS if w in only)
+    for i in range(n):
+        # `--cross-process 0` 是关键：子进程若也默认起子进程，就会指数爆炸
+        # （真机第一次跑时 7 个进程同时跑、永不结束）。
+        cmd = [sys.executable, "-m", "kernoscope", "selftest", "--json", "--quiet",
+               "--cross-process", "0", "--only", wl, "--size-mb", str(res.size_mb),
+               "--duration", str(res.duration_s), "--runs", "2", "--dtype", res.dtype]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if proc.returncode != 0:
+                res.notes.append(f"跨进程第 {i + 1} 次测量失败（rc={proc.returncode}）："
+                                 f"MDD 只含同进程重复的离散度，偏乐观")
+                continue
+            d = json.loads(proc.stdout)
+            for w in d.get("workloads", []):
+                out.setdefault(w["id"], []).append(float(w["err_pct"]))
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+            res.notes.append(f"跨进程第 {i + 1} 次测量失败（{type(e).__name__}）："
+                             f"MDD 只含同进程重复的离散度，偏乐观")
+    return out
 
 
 def _matmul_shape(nbytes: int, dtype: str) -> tuple[int, int, int, int]:
@@ -335,63 +407,78 @@ def _matmul_shape(nbytes: int, dtype: str) -> tuple[int, int, int, int]:
 
 
 def _measure_peak_gbs_live(torch, sampler, args, a, b, c, nbytes, mm) -> float:
-    """自标定：饱和 copy 的解析字节 ÷（NVML 忙碌时间）＝ 峰值带宽。"""
+    """自标定：饱和 copy 的解析字节 ÷（NVML 忙碌时间）＝ 峰值带宽。
+
+    注意这里**假设 copy 打满了 DRAM**（4090 上实测 mem_util=100%、达成 ≈920 GB/s）。
+    假设不成立时自检会在 note 里报"显存忙碌低于 50%"，误差带随即不可信。
+    """
     from .analyze.dram import estimate as estimate_dram
 
-    for _ in range(3):
-        _one_iter("copy", torch, a, b, c, mm)
-    torch.cuda.synchronize()
-    t0 = time.monotonic()
+    _spin(torch, "copy", max(WARMUP_S, 1.0), a, b, c, mm)
     mark = sampler.result.samples[-1].t if sampler.result.samples else None
-    iters = 0
-    while time.monotonic() - t0 < max(args.duration_s, 2.0):
-        for _ in range(20):
-            _one_iter("copy", torch, a, b, c, mm)
-        torch.cuda.synchronize()
-        iters += 20
-    elapsed = time.monotonic() - t0
-    samples = [s for s in sampler.result.samples if mark is None or s.t >= mark]
+    iters, elapsed = _spin(torch, "copy", max(args.duration_s, 2.0), a, b, c, mm)
+    samples = _window(sampler, mark)
     est = estimate_dram(samples, peak_gbs=1.0, window_s=elapsed, launches=iters,
                         window_mode="full")
     busy_frac = max(est.mem_util_pct_mean / 100.0, 1e-6)
     return _analytic_bytes("copy", nbytes, mm) * iters / (busy_frac * elapsed) / 1e9
 
 
-def _fill_band_and_mdd(res: SelftestResult) -> None:
-    """误差带 = 各负载偏差的并集；MDD = 同负载重复间的离散度与仪器分辨率下限取大。"""
+def _fill_band_and_mdd(res: SelftestResult,
+                       extra_runs: dict[str, list[float]] | None = None) -> None:
+    """误差带 = DRAM-bound 负载偏差的并集；MDD = 三者取大：
+
+      ① 同负载重复（含跨进程）的 2×SD —— 噪声
+      ② NVML 1 个百分点的分辨率下限 —— 仪器
+      ③ 本机误差带的半宽 —— 不同访问模式下代理**偏差**的差别。
+         diff 比较的两次运行不一定跑的是同一个 kernel，所以偏差差也必须算进 MDD，
+         否则会把"换了个 kernel 导致偏差变了 3 个百分点"判成"真退化"。
+
+    `extra_runs` 是跨进程样本（{id: [err_pct,...]}）。
+    """
     if not res.workloads:
         return
-    errs = [w.err_pct for w in res.workloads]
+    extra = extra_runs or {}
+    bound = [w for w in res.workloads if w.id in DRAM_BOUND_IDS]
+    errs = [w.err_pct for w in bound]
     res.band = {"dram_bytes_pct": {
         "low": round(min(errs), 1), "high": round(max(errs), 1),
-        "basis": "copy/read/write/matmul 的已知答案偏差并集",
-        "n": len(errs)}}
+        "basis": f"{'/'.join(DRAM_BOUND_IDS)} 的已知答案偏差并集（DRAM-bound 负载）",
+        "n": len(errs)},
+        "excluded": {"matmul": "compute-bound：显存忙碌只有 20%~40%，"
+                               "「忙碌时间×峰值」口径不适用（偏差可达 +1000%，"
+                               "这不是测量误差而是口径错用）"}}
     # DRAM 字节的 MDD：同负载重复间的 SD ×2（近似 95%），再加分辨率下限
     sds: list[float] = []
     floors: list[float] = []
-    for wid in WORKLOAD_IDS:
+    for wid in DRAM_BOUND_IDS:
         runs = res.by_id(wid)
-        if len(runs) >= 2:
-            sds.append(statistics.stdev([r.err_pct for r in runs]))
+        vals = [r.err_pct for r in runs] + list(extra.get(wid, []))
+        if len(vals) >= 2:
+            sds.append(statistics.stdev(vals))
         for r in runs:
             if r.mem_util_pct > 0:
                 floors.append(100.0 * 1.0 / r.mem_util_pct)   # ±1 个百分点的忙碌读数
     sd = max(sds) if sds else 0.0
     floor = max(floors) if floors else 0.0
-    res.mdd["dram_bytes_pct"] = round(max(2.0 * sd, floor, 0.5), 1)
-    res.mdd["basis"] = ("同负载重复间离散度（2×SD）与 NVML 1 个百分点分辨率的较大者")
+    half_band = (max(errs) - min(errs)) / 2.0 if len(errs) > 1 else 0.0
+    res.mdd["dram_bytes_pct"] = round(max(2.0 * sd, floor, half_band, 0.5), 1)
+    res.mdd["basis"] = ("max(同负载重复的 2×SD（含跨进程，若有）, NVML 1 个百分点分辨率下限, "
+                        "本机误差带半宽)")
     res.mdd["run_to_run_sd_pct"] = round(sd, 2)
     res.mdd["resolution_floor_pct"] = round(floor, 2)
+    res.mdd["band_half_width_pct"] = round(half_band, 2)
+    res.mdd["cross_process_samples"] = {k: len(v) for k, v in sorted(extra.items())}
     # kernel 时长的 MDD：用同一负载单次迭代时长的相对离散度近似（CUPTI 时长口径同源）
     ms_errs: list[float] = []
-    for wid in WORKLOAD_IDS:
+    for wid in DRAM_BOUND_IDS:
         runs = res.by_id(wid)
         if len(runs) >= 2:
             mean = statistics.fmean(r.kernel_ms for r in runs)
             if mean > 0:
                 ms_errs.append(100.0 * statistics.stdev([r.kernel_ms for r in runs]) / mean)
     res.mdd["kernel_time_pct"] = round(max(2.0 * (max(ms_errs) if ms_errs else 0.0), 0.5), 1)
-    sat = [w for w in res.workloads if w.mem_util_pct < MIN_SATURATION_MEM_UTIL_PCT]
+    sat = [w for w in bound if w.mem_util_pct < MIN_SATURATION_MEM_UTIL_PCT]
     if sat:
         res.notes.append(
             f"{len(sat)} 次测量的显存忙碌低于 {MIN_SATURATION_MEM_UTIL_PCT:.0f}%"
@@ -417,6 +504,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="每类负载每次测量的饱和循环时长（秒）")
     p.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="每类负载重复次数")
     p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
+    p.add_argument("--only", default=",".join(WORKLOAD_IDS),
+                   help=f"只跑这些负载（逗号分隔，默认全部；可选 {','.join(WORKLOAD_IDS)}）")
+    p.add_argument("--cross-process", type=int, default=2,
+                   help="另起 N 个新进程重测，把跨进程漂移计进 MDD（0=不做）")
     p.add_argument("--quick", action="store_true", help="1 秒 × 2 次的快速版（误差带更粗）")
     p.add_argument("--strict", action="store_true", help="没能完成自检时 exit 2（CI 用）")
     p.add_argument("--quiet", action="store_true")
@@ -428,8 +519,15 @@ def selftest_main(argv: list[str]) -> int:
     if args.quick:
         args.duration = min(args.duration, 1.0)
         args.runs = min(args.runs, 2)
+    only = tuple(x.strip() for x in args.only.split(",") if x.strip())
+    bad = [x for x in only if x not in WORKLOAD_IDS]
+    if bad or not only:
+        print(f"error: --only 只接受 {','.join(WORKLOAD_IDS)}，收到 {args.only!r}",
+              file=sys.stderr)
+        return 1
     res = run_selftest(size_mb=args.size_mb, duration_s=args.duration, runs=args.runs,
-                       dtype=args.dtype)
+                       dtype=args.dtype, only=only,
+                       cross_process=args.cross_process)
     if args.out:
         Path(args.out).write_text(json.dumps(res.to_dict(), indent=2, ensure_ascii=False) + "\n")
         if not args.quiet:

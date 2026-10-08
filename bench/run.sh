@@ -156,6 +156,7 @@ if [[ -x "$PROBE" ]]; then
       LEDGER_MB="$(awk -v b="$MB_PER_LAUNCH" 'BEGIN{printf "%.4f", b/1e6}')"
       KSC --set basic --ks-calibration "$CAL" --ks-window auto \
           --ks-ledger-mb "$LEDGER_MB" -k "regex:${K}_k" -o "$HOSTDIR/rep-$K" -f \
+          --packet "$HOSTDIR/rep-$K.packet.json" \
           -- "$PROBE" --kernel "$K" --mb "$MB" --target-s "$TARGET_BIG" \
           > "$HOSTDIR/rep-$K.txt" 2> "$HOSTDIR/rep-$K.err"
       record "report-$K" $?
@@ -339,6 +340,76 @@ if [[ -n "${NVBIT_PATH:-}" && -x "$PROBE" ]]; then
     fi
   done
   rm -f "$HOSTDIR"/issue/hist-*.txt     # 原始直方图按需重采（体积随 launch 数增长）
+fi
+
+
+# ------------------------------------------- 9.6) 能力分层 / 决策包 / 自检 / 对拍（W1–W7）
+echo "== 9.6) 能力清单 + 一屏 + 本机自检 + 误差带对拍 =="
+KSC capabilities --json > "$HOSTDIR/capabilities.json" 2> "$HOSTDIR/capabilities.err"
+record capabilities-json $?
+KSC capabilities > "$HOSTDIR/capabilities.txt" 2>> "$HOSTDIR/capabilities.err"
+record capabilities-text $?
+# 计数器实测探测：静态推断 vs 实测是两种证据，结论必须分开写
+KSC capabilities --probe --json > "$HOSTDIR/capabilities-probe.json" 2>/dev/null
+record capabilities-probe $?
+
+# 一屏（人视图）：与 --packet 同一份判词，只是排版不同
+if [[ -f "$HOSTDIR/rep-copy.ksreport.json" ]]; then
+  KSC -i "$HOSTDIR/rep-copy.ksreport.json" --screen only \
+      > "$HOSTDIR/rep-copy.onepage.txt" 2> "$HOSTDIR/rep-copy.onepage.err"
+  record onepage $?
+  KSC -i "$HOSTDIR/rep-copy.ksreport.json" --packet - \
+      > "$HOSTDIR/rep-copy.packet-only.json" 2>/dev/null
+  record packet-from-report $?
+  "$PY" - "$HOSTDIR/rep-copy.packet.json" "$HOSTDIR/rep-copy.packet-only.json" \
+      > "$HOSTDIR/packet-size.txt" 2>&1 <<'EOF'
+import json, sys
+buf = []
+for path in sys.argv[1:]:
+    try:
+        d = json.load(open(path))
+        buf.append(f"{path}: {d['cost'].get('packet_bytes')} B, "
+                   f"{len(d.get('verdicts', []))} verdicts, "
+                   f"trimmed={d['cost'].get('trimmed')}")
+    except Exception as e:  # noqa: BLE001
+        buf.append(f"{path}: 读不了（{e}）")
+print("\n".join(buf))
+EOF
+  cat "$HOSTDIR/packet-size.txt"
+fi
+
+# 本机自检：已知答案 → 误差带 + MDD（纯 torch + NVML，不需要 nsys/nvcc/NVBit）
+KSC selftest --out "$HOSTDIR/machine-selfcheck.json" --duration 2 --runs 3 \
+    > "$HOSTDIR/selftest.txt" 2> "$HOSTDIR/selftest.err"
+record selftest $?
+
+# 误差带对拍：同协议两次运行必须报"分不出来"；换窗口模式（协议不同）必须报"不可比"
+if [[ -f "$HOSTDIR/rep-copy.ksreport.json" && -x "$PROBE" ]]; then
+  KSC --set basic --ks-calibration "$CAL" --ks-window auto \
+      --ks-ledger-mb "$(grep -m1 '^ANALYTIC' "$HOSTDIR/probe-copy.log" 2>/dev/null | sed -n 's/.*bytes_per_launch=\([0-9.]*\).*/\1/p' | awk '{printf "%.4f", $1/1e6}')" \
+      -k regex:copy_k -o "$HOSTDIR/rep-copy-again" -f \
+      -- "$PROBE" --kernel copy --mb "$MB" --target-s "$TARGET_BIG" \
+      > "$HOSTDIR/rep-copy-again.txt" 2> "$HOSTDIR/rep-copy-again.err"
+  record report-copy-again $?
+  if [[ -f "$HOSTDIR/rep-copy-again.ksreport.json" ]]; then
+    KSC diff "$HOSTDIR/rep-copy.ksreport.json" "$HOSTDIR/rep-copy-again.ksreport.json" \
+        --selfcheck "$HOSTDIR/machine-selfcheck.json" --json \
+        > "$HOSTDIR/diff-same-protocol.json" 2> "$HOSTDIR/diff-same-protocol.err"
+    record diff-same-protocol $?
+    KSC diff "$HOSTDIR/rep-copy.ksreport.json" "$HOSTDIR/rep-copy-again.ksreport.json" \
+        --selfcheck "$HOSTDIR/machine-selfcheck.json" \
+        > "$HOSTDIR/diff-same-protocol.txt" 2>> "$HOSTDIR/diff-same-protocol.err"
+    # 协议不同的负样本：把窗口模式换掉（口径不同 ⇒ 只能给差值，不给方向）
+    KSC --set basic --ks-calibration "$CAL" --ks-window full \
+        -k regex:copy_k -o "$HOSTDIR/rep-copy-fullwin" -f \
+        -- "$PROBE" --kernel copy --mb "$MB" --target-s "$TARGET_BIG" \
+        > "$HOSTDIR/rep-copy-fullwin.txt" 2> "$HOSTDIR/rep-copy-fullwin.err"
+    KSC diff "$HOSTDIR/rep-copy.ksreport.json" "$HOSTDIR/rep-copy-fullwin.ksreport.json" \
+        --json > "$HOSTDIR/diff-protocol-mismatch.json" 2>&1
+    record diff-protocol-mismatch $?
+    KSC diff "$HOSTDIR/rep-copy.ksreport.json" "$HOSTDIR/rep-copy-fullwin.ksreport.json" \
+        > "$HOSTDIR/diff-protocol-mismatch.txt" 2>&1
+  fi
 fi
 
 # ------------------------------------------------- 9.5) 脱敏（提交前就该是干净的）

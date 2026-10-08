@@ -1,12 +1,12 @@
 # Kernoscope 内核镜
+**在拿不到硬件性能计数器的多租户 GPU 上，为算子优化提供「每个数字都标注出处」的性能证据。**
 
-**在拿不到硬件性能计数器的机器上，也能看清 kernel；每个数字都标注来源。**
+它回答三类问题：① 哪个 kernel 慢、launch 配置如何（`exact`）；② 离 roofline 多远、是不是 DRAM bound（`estimated`，带误差带）；③ 实际达到的 occupancy、发射槽上界与瓶颈方向（`measured`/`estimated`）。
+它**不能回答**：精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 这些与 ncu 同源的硬件计数器我们不给数字，只报 `n/a` + 原因 + 替代口径；完整三态清单见 [COVERAGE.md](COVERAGE.md)。
 
-> Provenance-honest CUDA kernel profiler for locked-down / multi-tenant GPUs.
-> CLI-compatible with `ncu` (NVIDIA Nsight Compute), so existing scripts keep working.
+30 秒上手（没有 GPU 也能跑通）：`kernoscope doctor` —— 先看这台机器能答什么、拿不到什么、为什么。
 
-Kernoscope is **not affiliated with, endorsed by, or sponsored by NVIDIA Corporation.**
-"NVIDIA", "CUDA", "Nsight" and "ncu" are used descriptively only.
+与 `ncu` 的关系：CLI 兼容，但数据源不同（它读硬件计数器，我们读物理观测量，绝不占用它的指标名）；与 `nsys` 的关系：复用它的 CUPTI activity，是它的消费者而不是替代品；与 `torch.profiler` 的关系：它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信"。
 
 ---
 
@@ -40,6 +40,13 @@ $ ncu --set basic -- python train.py
 最后一行是重点：**我们拒绝在 ncu 的计数器指标名下面填一个模型算出来的数。**
 这由**类型系统**强制（规则 R1–R4 见 [PROVENANCE.md](PROVENANCE.md)），并有测试守住。
 
+### 它明确不做什么
+
+- **不做重放（replay）、不锁频。** 耗时来自 nsys 时间戳，是真实时间；ncu 默认锁频并重放被测 kernel。
+- **不碰 NVIDIA 私有格式。** 不写 `.ncu-rep`，也不做 `--import-source` 的 SASS/源码逐行对照。
+- **不追求"覆盖更多 ncu 功能"。** 覆盖的是"拿不到计数器"这一类受限场景。
+- **不重放、不插桩去伪造计数器。** 缺哪个数据源就报告缺哪个，并给出替代口径。
+
 ---
 
 ## 安装
@@ -49,12 +56,13 @@ $ ncu --set basic -- python train.py
 uv tool install kernoscope
 
 # 或从源码
-git clone https://github.com/kernoscope/kernoscope && cd kernoscope
+git clone https://github.com/QingGo/Kernoscope && cd Kernoscope
 uv sync && uv run kernoscope --help
 ```
 
-依赖：Python ≥ 3.10。运行需要 `nsys`（随 CUDA ≥ 11.1 提供）与 `nvidia-smi`；
-`cuobjdump`（静态资源/SASS）与 `pynvml`（能耗）为可选。
+依赖：Python ≥ 3.10，**运行时零第三方依赖**。运行需要 `nsys`（随 CUDA ≥ 11.1 提供）与
+`nvidia-smi`；`cuobjdump`（静态资源/SASS）为可选；`pynvml`（能耗/显存忙碌优先走它）
+用 `pip install 'kernoscope[nvml]'` 安装。
 **工具的查找不只看 PATH**：`$CUDA_HOME/bin`、`/usr/local/cuda*/bin`、`/usr/bin` 都会找 ——
 在"CUDA 装了但没加 PATH"的实例上，只看 PATH 会误报"未安装"。
 
@@ -72,7 +80,7 @@ uv sync && uv run kernoscope --help
 
 ---
 
-## 快速开始
+## 快速开始（30 秒路径）
 
 ```bash
 # 第一步：看看这台机器上「能拿到什么、拿不到什么、为什么」
@@ -94,6 +102,10 @@ kernoscope --strict --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed -
 # 没有 GPU 也能跑通全流程（合成数据，明确标注 SYNTHETIC）
 kernoscope --ks-synthetic --set detailed
 ```
+
+机器可读的版本是 `kernoscope capabilities --json`：它列出**能回答哪些问题、哪些必然被拒、
+补救动作的代价多少**，给 agent 规划调用序列用（人读版本就是 `kernoscope capabilities`，
+静态总览见 [COVERAGE.md](COVERAGE.md)）。
 
 输出四件套：
 
@@ -374,7 +386,7 @@ kernoscope --set full --ks-instr-hist hist.txt --ks-sm-count 128 --ks-clock-mhz 
 真机两个负载的对照（RTX 4090，产物在 [`bench/artifacts/`](bench/artifacts/)）：
 
 | 负载 | 动态 warp 指令（每 launch） | 发射槽利用率（上界） | 显存忙碌 | 判词 |
-|---|---|---|---|---|---|
+|---|---|---|---|---|
 | 256 MB 拷贝（DRAM bound） | 18.4 M | **2.0 %** | 71 % | 偏显存受限 —— 指令在等数据 |
 | 2 MB 逐元素 norm（常驻 L2、循环开销占大头） | 0.91 M | **84.6 %** | 低 | 偏发射受限 —— 该减少指令数 |
 
@@ -417,6 +429,86 @@ kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o 
 
 所以：`-c <N>` 限流每个 kernel 只报 N 次、`--ks-json-no-launches` 让 JSON 不带逐 launch 数组、
 逐 launch 明细改用 `--launch-csv` 单独出表；报告写盘后 stderr 会打印实际体积与限流建议。
+
+---
+
+## 局限与已知失败
+
+这一节是**我们主动交代的失败面**。它不是免责声明，而是"你会遇到什么、我们会怎么说"的清单。
+
+### ① 计数器拿不到（根因，不是 bug）
+
+宿主 `RmProfilingAdminOnly=1` 且容器无 `CAP_SYS_ADMIN`/`CAP_PERFMON` 时，CUPTI 直接报
+`ERR_NVGPUCTRPERM`。计数器是 host-wide 的、会泄露同机租户行为，**容器内没有任何合法绕过**。
+所以 `dram__bytes.sum`、`lts__t_sector_hit_rate.pct`、`smsp__warp_issue_stalled_*` 这些名字下
+永远只有 `n/a` + 原因；`--strict` 请求它们时 exit 2。想要精确计数器，只能在有权限的机器上跑 ncu。
+
+### ② NVML 代理口径是**单边偏高**的
+
+DRAM 字节代理 = 显存忙碌时间 × 本机实测峰值带宽。`utilization.memory` 在高负载下
+**先于** DRAM 达到可达峰值而饱和（读数 95% 时实际吞吐约为可达峰值的 87%），
+所以误差不是对称的：本轮三个已知答案负载的实测是 **−4.1% / +9.1% / +12.5%**，
+另一次运行是 −4.3% ~ +9.0%，两次并集 **−4.3% ~ +12.7%**。
+**它不是上界，也不是对称误差**：真实负载的访存模式与微基准不同，误差可以更大；
+引用时必须写"落在代理误差带内"，而不是"两次方向一致所以可信"。
+
+### ③ 分辨率是 **1 个百分点**
+
+`utilization.memory` 是整数百分比，采样周期 200 ms。读数 0.0% 时，
+"真的没搬数据"与"0.3% 被截断成 0"**不可区分** —— 此时工具不给字节数，并写明这一点。
+别的量也有各自的分辨率（例如归因上偏估计的分辨率是 0.1 个百分点），
+报告里 `resolution` 列与数字同时出现。
+
+### ④ 跨运行噪声与 MDD
+
+同一负载、同一时长，不同运行的误差会变（20 秒那一点在两次运行里是 +6.2% 与 +4.3%
+对 +9.3%）：**运行间波动与时长的影响同量级**。所以：
+
+- `kernoscope selftest` 只依赖 torch，量出**本机**误差带与 **MDD**（最小可分辨差异）；
+- `kernoscope diff` 用该 MDD 做三态比较：真改进 / 真退化 / **分不出来（indistinguishable）/ 不可比**；
+- 没有误差带与 MDD 时，`diff` 拒绝给方向判词（`no_selftest_band`），而不是报"变了"；
+- 两次运行的协议（标定文件、窗口模式、工具版本、kernel 选择）不同时，判 `protocol_mismatch`。
+
+### ⑤ 哪些问题**必然被拒**
+
+| 被拒的问题 | 拒绝码 | 为什么必然 | 替代 |
+|---|---|---|---|
+| warp stall 周期细分 | `counters_denied` | 与 ncu 同源，需要计数器 | 发射槽上界 + 方向性判断（`issue_slot`） |
+| 精确 DRAM 字节 / L2 命中率 | `counters_denied` | 同上 | DRAM 代理（带误差带）或访存轨迹（模型） |
+| 各 pipe（FP32/INT/Tensor）动态利用率 | `counters_denied` | 同上 | 发射槽上界 + roofline 达成百分比 |
+| PC 采样 / SourceCounters | `sampling_unavailable` | 与计数器同源、同样被锁死 | 指令直方图的发射槽上界 |
+| NVLink 流量与利用率 | `no_nvlink` | 单卡/无 NVLink 实例上本来就不适用 | 不适用（忽略这一行） |
+| SASS/源码逐行对照 | `no_sass_source` | 本工具不实现 | `cuobjdump -sass` 自行对照 |
+
+（完整清单与每台机器的实际三态见 `kernoscope capabilities --json`，或用
+`kernoscope capabilities` 看一屏；本仓库的静态版本见 [COVERAGE.md](COVERAGE.md)。）
+
+### ⑥ 「我们拒绝给数」的清单
+
+按拒绝码（闭集，`kernoscope capabilities --json` 里可编程读取）：
+
+- **物理上拿不到** → 只报 `n/a`：`counters_denied`、`sampling_unavailable`、
+  `counters_not_installed`、`counters_unknown`、`no_nvlink`、`no_sass_source`。
+- **口径前提不成立** → 那一行照样出现，但值是 `n/a`：
+  `coverage_too_low`（窗口没被负载主导）、`share_too_low`（被选中的 kernel 不是主角）、
+  `multi_kernel_window`（窗口里有多个 kernel，不可归因）、
+  `below_resolution` / `mem_busy_zero`（读数落到分辨率下限以下）、
+  `no_calibration`（缺本机实测峰值，不用规格表顶替）、
+  `calibration_caliber_mismatch`（标定口径与本次测量不可比）、
+  `unknown_arch`（未知架构算不出 occupancy 上界，不猜）、
+  `trace_too_many_accesses`（访问数超上限时不给偏小的值）。
+- **比较不可比** → 不给方向判词：`protocol_mismatch`、`both_refused`、
+  `no_selftest_band`、`mdd_unknown`（没有 MDD 就说"分不出来"）。
+- **请求的东西不存在** → `metric_absent`（不等于被拒）、`legacy_report`
+  （旧报告没有结构化拒绝信息，标注 legacy 而不猜原因）。
+- **兜底** → `internal_unknown`：出现即视为本工具缺陷，请按 issue 模板报告。
+
+### ⑦ 其它已知的"做不到"
+
+- **不重放、不锁频**：所以绝对耗时与 ncu 的锁频读数不可直接对比。
+- **per-launch 归因依赖窗口构成**：混合强度的窗口只认轨迹口径（见上）。
+- **轨迹体积与流量成正比**：几十 MB 工作集可能产出上 GB 文本。
+- **fp32 roofline 拐点可能不可分辨**：标定的口径离散度大时，工具拒绝用它算拐点。
 
 ---
 
@@ -482,13 +574,21 @@ bash bench/run.sh --quick      # 快速版
   口径不成立必然出现 `n/a` + 原因），`--ks-window auto` 稳态窗口，轨迹口径回退。
 - ✅ **v1.7**：形状扫描（多组 launch 配置逐组读数）、`--launch-csv`、`--metrics` 真实筛选、
   标定口径与离散度、报告体积可预算、发射槽上界与瓶颈方向（`kernoscope issue`）。
+- ✅ **v1.8**：结构化拒绝（闭集 code + observed/threshold + 可执行 remedy + 代价）、
+  `capabilities --json` 与三态覆盖矩阵、`selftest`（本机误差带 + MDD）、
+  `diff`（真改进/真退化/分不出来/不可比）。
 - 🚧 v1 剩余：region/阶段视图（对接 IKP Trace）、访存轨迹的输入侧复用分析（locality/复用距离）、
   `cuobjdump -sass` 静态指令混合细化到 per-kernel。
 - 🚧 v2：因果链与 `explain`（借 ingero 思路，用 CUPTI activity + host 采样，不依赖 eBPF）、
   真 `.ncu-rep` 回读并与我们的报告对照。
 
-## 文档
+## 文档与声明
 
+- [COVERAGE.md](COVERAGE.md)：三态覆盖矩阵 + 四层能力分层 + 必然被拒的问题（由代码生成）。
+- [CONTRIBUTING.md](CONTRIBUTING.md)：适配器清单与扩展点（指标映射 / 后端 / 能力问题 / 拒绝类型 / 产物）。
 - [PROVENANCE.md](PROVENANCE.md)：五个出处等级、四条强制规则、命名纪律、拒绝给数的三种形态。
 - [CALIBRATION.md](CALIBRATION.md)：本机峰值标定的字段与口径纪律（roofline 依赖它）。
 - [NOTICE](NOTICE)：第三方与商标声明。许可见 [LICENSE](LICENSE)（Apache-2.0）。
+
+Kernoscope is **not affiliated with, endorsed by, or sponsored by NVIDIA Corporation.**
+"NVIDIA", "CUDA", "Nsight" and "ncu" are used descriptively only.

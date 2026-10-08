@@ -17,6 +17,7 @@ doctor 把这些检查收敛成一条命令，并且把结论直接映射到 pro
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import platform
@@ -488,15 +489,21 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
 
 
 def _find_nvbit() -> str | None:
-    for base in (".", os.path.expanduser("~"), "/opt", "/usr/local"):
-        try:
-            for entry in os.listdir(base):
-                if entry.startswith("nvbit_release"):
-                    p = os.path.abspath(os.path.join(base, entry))
-                    if os.path.exists(os.path.join(p, "core", "libnvbit.a")):
-                        return p
-        except OSError:
-            continue
+    """找 NVBit 解包目录（含 core/libnvbit.a）。
+
+    R-47：只在几个**顶层**目录里看一眼会漏掉真实布局。租用实例上常见的是
+    `~/<project-data>/lab/nvbit_release_x86_64` 这种"往下两层"的路径，于是能力分层会把
+    tier 3（指令级）误判成不可用 —— 而"我找过哪些目录"正是 doctor 要能证明的事。
+    这里按深度 1..3 找，且只在这几个基准目录下找（不做全盘遍历）。
+    """
+    bases = (".", os.path.expanduser("~"), "/root", "/opt", "/usr/local",
+             "/workspace", "/mnt")
+    patterns = ("nvbit_release*", "*/nvbit_release*", "*/*/nvbit_release*")
+    for base in bases:
+        for pat in patterns:
+            for p in sorted(glob.glob(os.path.join(base, pat))):
+                if os.path.exists(os.path.join(p, "core", "libnvbit.a")):
+                    return os.path.abspath(p)
     return None
 
 

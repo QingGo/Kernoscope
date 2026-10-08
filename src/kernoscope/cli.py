@@ -1,6 +1,6 @@
 """kernoscope CLI —— 与 ncu 用法兼容。
 
-选项按四类处理（见 docs/ncu-compat.md）：
+选项按四类处理（兼容面与自有扩展分开，见 README 的「与 ncu 的关系」）：
   ① 真实现：kernel 过滤 / launch 选择 / 输出与格式类
   ② 映射实现：--set / --section / --metrics → 我们的数据源，缺则标 unavailable
   ③ 接受但空转：--replay-mode / --cache-control / --clock-control / --pm-sampling-* 等

@@ -1,0 +1,81 @@
+name: 能力请求（我想要回答的问题）
+description: 你想用 Kernoscope 回答一个问题，但它现在被拒或口径太弱
+title: "[capability] "
+labels: ["enhancement", "capability"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        能力清单的单位是**问题**，不是指标名。请先跑一次自检并贴上来，
+        它会直接告诉你这个问题现在处于三态里的哪一态、被拒的 code 是什么、替代口径是什么：
+
+        ```bash
+        kernoscope capabilities --json
+        kernoscope doctor --json
+        ```
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 我想回答的问题
+      description: 用一句**用户的话**写（例如"这个 kernel 是不是被 L2 带宽限制住了"），不要写成指标名。
+      placeholder: 我想知道……
+    validations:
+      required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: 这个答案会改变你的什么决定
+      description: 我们只加能**改变决策**的能力。请写清拿到答案后你会怎么做（改什么、往哪个方向改）。
+    validations:
+      required: true
+
+  - type: textarea
+    id: capabilities_out
+    attributes:
+      label: capabilities --json 的输出
+      description: 重点是 `matrix`、你关心的那个问题的 `state`，以及 `next_actions`。
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor_out
+    attributes:
+      label: doctor --json 的输出
+      description: 让维护者知道你手上到底有哪些数据源（GPU / nsys / NVBit / 计数器四态）。
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: acceptable
+    attributes:
+      label: 可接受的口径
+      description: 诚实优先：如果只能给出"上界"或"模型估计"，你能接受吗？
+      options:
+        - 只接受与 ncu 同源的精确值（没有就请明说，不要替代品）
+        - 接受估计值，但必须带误差带与前提
+        - 接受上界/方向性判断（例如"偏显存受限"），不需要精确数字
+        - 不确定，请维护者判断
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 你现在怎么绕过这个问题
+      description: 例如"手工读 nsys 表"、"用 torch.profiler 估"——这能帮我们判断值不值得做。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我贴的输出去掉了主机名/绝对路径/实例名
+          required: true
+        - label: 我理解"给不出数字时返回 `n/a` + 原因"优于"给一个看起来合理的替代值"
+          required: true

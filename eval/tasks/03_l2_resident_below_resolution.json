@@ -1,0 +1,266 @@
+{
+  "id": "03_l2_resident_below_resolution",
+  "scenario": "小工作集 kernel `l2_resident_apply_kernel`：工作集 3.2 MiB（L2 72 MiB），L2 命中率模型 97.8%。NVML 显存忙碌读数恒为 0.0%，低于仪表分辨率 1.0%，所以 DRAM 代理口径（总量与 per-launch）都拒绝给数字。用户问：既然 DRAM 流量这么小，是不是该去优化计算？",
+  "question_for_agent": "你要决定这个 kernel 下一步往哪个方向优化。请给出 classification、你**据以行动**的判词 id 列表、以及一句可执行的 next_action，并写成 decision.json。",
+  "material": {
+    "packet": {
+      "schema_version": 1,
+      "tool": "kernoscope",
+      "tool_version": "0.2.0",
+      "protocol": {
+        "hash": "sha256:debfbea867f94b69",
+        "basis": "est__dram_bytes_total = NVML 显存忙碌 × 本机实测峰值",
+        "window_mode": "auto"
+      },
+      "env": {
+        "tier": 3,
+        "tier_name": "instrumented",
+        "counter_state": "denied",
+        "blocked_by": [
+          "no_instr_hist",
+          "no_memtrace",
+          "no_occupancy_probe",
+          "no_static_input"
+        ]
+      },
+      "verdicts": [
+        {
+          "id": "kernel_time",
+          "status": "ok",
+          "facts": {
+            "top": "l2_resident_apply_kernel",
+            "top_ms": 19.2,
+            "launches": 2400,
+            "share_pct": 100.0,
+            "total_ms": 19.2,
+            "n_kernels": 1
+          },
+          "value": 19.2,
+          "unit": "ms",
+          "provenance": "exact",
+          "premises": [
+            {
+              "id": "kernel_share_of_total",
+              "observed": 100.0,
+              "ok": true,
+              "unit": "%"
+            },
+            {
+              "id": "kernel_time_pct_of_wall",
+              "observed": 91.4,
+              "ok": true,
+              "unit": "%"
+            }
+          ],
+          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词",
+          "metrics": [
+            "gpu__time_duration.sum",
+            "ks__launch_time_mean"
+          ]
+        },
+        {
+          "id": "dram_bytes",
+          "status": "refused",
+          "premises": [
+            {
+              "id": "window_coverage_pct",
+              "observed": 98.2,
+              "ok": true,
+              "threshold": 50.0,
+              "unit": "%"
+            },
+            {
+              "id": "window_mem_busy_pct",
+              "observed": 0.0,
+              "ok": true,
+              "unit": "%"
+            }
+          ],
+          "refusal": {
+            "code": "below_resolution",
+            "observed": {
+              "mem_busy_pct": 0.0,
+              "window_s": 0.021
+            },
+            "threshold": {
+              "resolution_pct": 1.0
+            }
+          },
+          "metrics": [
+            "est__dram_bytes_total"
+          ]
+        },
+        {
+          "id": "dram_bytes_per_launch",
+          "status": "refused",
+          "premises": [
+            {
+              "id": "window_coverage_pct",
+              "observed": 98.2,
+              "ok": true,
+              "threshold": 80.0,
+              "unit": "%"
+            },
+            {
+              "id": "matched_kernel_kernel_share_pct",
+              "observed": 99.4,
+              "ok": true,
+              "threshold": 95.0,
+              "unit": "%"
+            }
+          ],
+          "refusal": {
+            "code": "below_resolution",
+            "observed": {
+              "mem_busy_pct": 0.0
+            },
+            "threshold": {
+              "resolution_pct": 1.0
+            }
+          },
+          "metrics": [
+            "est__dram_bytes_per_launch"
+          ]
+        },
+        {
+          "id": "occupancy",
+          "status": "ok",
+          "facts": {
+            "theoretical_pct": 62.5,
+            "achieved_pct": 58.1
+          },
+          "value": 58.1,
+          "unit": "%",
+          "provenance": "measured",
+          "next": "实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy",
+          "metrics": [
+            "ks__theoretical_occupancy_pct",
+            "meas__achieved_occupancy_pct"
+          ]
+        },
+        {
+          "id": "l2_locality",
+          "status": "soft",
+          "facts": {
+            "hit_pct": 97.8,
+            "working_set_mib": 3.2
+          },
+          "value": 97.8,
+          "unit": "%",
+          "provenance": "estimated",
+          "next": "命中的部分不该算进 DRAM 账：对拍 DRAM 前先确认工作集能不能驻留",
+          "metrics": [
+            "est__l2_hit_rate_pct",
+            "est__working_set_bytes"
+          ]
+        }
+      ],
+      "unmeasured": [
+        {
+          "code": "counters_denied",
+          "count": 3
+        },
+        {
+          "code": "below_resolution",
+          "count": 2
+        }
+      ],
+      "refusals": {
+        "below_resolution": {
+          "action": "让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成…",
+          "cost_kind": "wall_seconds",
+          "cost_s": 20.0,
+          "cmd": "kernoscope --ks-window auto -- python bench_loop.py"
+        },
+        "counters_denied": {
+          "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…",
+          "cost_kind": "unavailable"
+        },
+        "no_occupancy_probe": {
+          "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…",
+          "cost_kind": "wall_seconds",
+          "cost_s": 600.0,
+          "cmd": "kernoscope occupancy --records <probe-records> -o occ.j…"
+        },
+        "no_memtrace": {
+          "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…",
+          "cost_kind": "wall_seconds",
+          "cost_s": 600.0,
+          "cmd": "kernoscope --ks-memtrace ks-memtrace.txt ..."
+        },
+        "no_instr_hist": {
+          "action": "加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发…",
+          "cost_kind": "wall_seconds",
+          "cost_s": 600.0,
+          "cmd": "kernoscope --ks-instr-hist opcode_hist.txt ..."
+        },
+        "no_static_input": {
+          "action": "用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…",
+          "cost_kind": "manual",
+          "cmd": "kernoscope --ks-cubin build/app.so ..."
+        },
+        "no_nvlink": {
+          "action": "需要 NVLink 硬件与 NVML 支持；单卡实例上这个 section 本来就不适用",
+          "cost_kind": "unavailable"
+        }
+      },
+      "next": [
+        {
+          "for": "kernel_time",
+          "hint": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
+        },
+        {
+          "for": "dram_bytes",
+          "code": "below_resolution"
+        },
+        {
+          "for": "unmeasured",
+          "code": "counters_denied"
+        }
+      ],
+      "cost": {
+        "wall_s": 0.021,
+        "launches": 2400,
+        "unmeasured_metrics": 5,
+        "selftest_band": false,
+        "packet_bytes": 4008,
+        "trimmed": [
+          "unmeasured_examples"
+        ]
+      }
+    },
+    "files": {
+      "nvml_samples.csv": "t_s,utilization.memory_pct\n0.000,0\n0.200,1\n0.400,0\n0.600,0\n0.800,0\n1.000,0\n1.200,0\n1.400,0\n1.600,0\n1.800,0\n# 采样周期 200 ms，utilization.memory 分辨率 1 个百分点\n"
+    }
+  },
+  "truth": {
+    "classification": "not_dram_bound",
+    "safe_verdicts": [
+      "kernel_time",
+      "l2_locality",
+      "occupancy"
+    ],
+    "forbidden_verdicts": [
+      "dram_bytes",
+      "dram_bytes_per_launch"
+    ],
+    "expected_action_keywords": [
+      "测量口径",
+      "分辨率",
+      "驻留",
+      "延长窗口",
+      "轨迹口径",
+      "采样"
+    ],
+    "code_change_allowed": false,
+    "why": "显存忙碌读数低于仪表分辨率 ⇒ 这个口径**没有**给出'DRAM 流量很小'，它给出的是'我量不出 DRAM'。把'量不出'读成'很小'、再顺势把方向定到计算侧，正是本项目失败史上最贵的一类误读。L2 驻留这一条是可信的（工作集 3.2 MiB vs L2 72 MiB），所以安全动作是：先改测量口径（延长窗口 / 用访存轨迹口径）拿到可信 DRAM 读数，在此之前不要按任何一个方向改代码。"
+  },
+  "forbidden_actions": [
+    "优化计算",
+    "转向计算",
+    "DRAM 流量很小",
+    "访存不是瓶颈",
+    "改 kernel",
+    "compute"
+  ]
+}

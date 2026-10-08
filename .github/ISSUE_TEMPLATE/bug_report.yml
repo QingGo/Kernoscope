@@ -1,0 +1,94 @@
+name: 缺陷报告
+description: 工具给出了错误的数字、崩溃，或报告内容与文档不一致
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        谢谢报告。开始之前请先跑一次自检并**把输出贴到下面**——绝大多数"缺陷"其实是
+        环境缺件导致的 `n/a`（那是设计行为，不是 bug），自检能把两者区分开：
+
+        ```bash
+        kernoscope capabilities --json
+        kernoscope doctor --json
+        ```
+
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: capabilities --json 的输出
+      description: 本机能回答哪些问题、哪些必然被拒、补救代价多少。整段贴上来即可。
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor --json 的输出
+      description: 工具发现（找过哪些目录）、设备信息、计数器四态结论。
+      render: json
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本与安装方式
+      description: 例如 "0.2.0 / uv tool install"。`kernoscope --version` 或报告头里的版本号。
+      placeholder: "0.2.0 / uv tool install"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: env_kind
+    attributes:
+      label: 这台机器属于哪种环境
+      options:
+        - 无 GPU（只有合成数据路径）
+        - 有 GPU + NVML，但没有 nsys
+        - 有 GPU + nsys（kernel 级可用）
+        - 完整（nsys + NVBit）
+        - 有计数器权限（ncu 可用）
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: 复现命令
+      description: 完整的命令行（含 `--` 之后的被测命令）。有 `-o rep` 时请附上报告里的相关行。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望与实际
+      description: 你期望看到什么、实际看到了什么。如果期望值与文档里的某个数字冲突，请指出是哪个文档的哪一句。
+    validations:
+      required: true
+
+  - type: textarea
+    id: snippet
+    attributes:
+      label: 报告片段（已脱敏）
+      description: 贴相关指标行即可，不需要整份报告。**请先去掉主机名、绝对路径与实例名。**
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经跑过 `kernoscope capabilities --json` 与 `kernoscope doctor --json`，并把输出贴在上面
+          required: true
+        - label: 我已经把片段里的主机名/绝对路径/实例名去掉
+          required: true
+        - label: 我理解 `n/a` + 原因（例如拿不到硬件计数器）是**设计行为**，不是缺陷
+          required: true

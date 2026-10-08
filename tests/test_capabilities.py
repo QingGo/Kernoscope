@@ -30,6 +30,18 @@ def test_every_question_has_a_check():
     assert {q.id for q in QUESTIONS} == set(CHECKS)
 
 
+def test_nvbit_installed_is_tier_3_even_before_collecting_a_trace():
+    """层是"这台机器能做什么"：装了 NVBit 就该是 tier 3，"要先采一条轨迹"是代价问题。"""
+    r = evaluate(_env(has_memtrace=False, has_instr_hist=False))
+    assert r.tier == 3
+    a = [x for x in r.answers if x.question.id == "dram_bytes_trace"][0]
+    assert a.state == "refused"
+    assert a.refusal.code is RefusalCode.NO_MEMTRACE
+    assert a.refusal.remedy_or_default.cost_s > 0    # 代价必须写出来（采轨迹不免费）
+    nxt = [d for d in r.next_actions() if d["code"] == "no_memtrace"]
+    assert nxt and nxt[0]["cost_s"] > 0
+
+
 def test_full_environment_reaches_tier_3_and_answers_core_questions():
     r = evaluate(_env(has_memtrace=True, has_instr_hist=True, has_occupancy_probe=True))
     assert r.tier == 3

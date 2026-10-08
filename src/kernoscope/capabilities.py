@@ -74,10 +74,15 @@ class Env:
 
     @property
     def tier(self) -> int:
-        """最高可用层 —— 由实际探测结果决定，不由用户选择。"""
+        """最高可用层 —— 由实际探测结果决定，不由用户选择。
+
+        第 3 层的判据是**NVBit 装了**（工具链具备指令级能力），而不是"这次带了轨迹文件"：
+        层回答的是"这台机器能做什么、要花多少代价"，所以「能，但要先花 10 分钟采一条轨迹」
+        应该表现为 tier 3 + 对应问题 refused（带 NO_MEMTRACE 与代价），而不是 tier 2。
+        """
         if self.counter_state == "available":
             return 4
-        if self.has_gpu and self.has_nvbit and (self.has_memtrace or self.has_instr_hist):
+        if self.has_gpu and self.has_nvbit:
             return 3
         if self.has_gpu and self.has_nsys:
             return 2

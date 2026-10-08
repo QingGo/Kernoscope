@@ -1,0 +1,25 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: 提交前必读：先跑能力自检（capabilities --json 与 doctor --json）
+    url: https://github.com/QingGo/Kernoscope#readme
+    about: >-
+      请先在本机跑 `kernoscope capabilities --json` 与 `kernoscope doctor --json`，并把输出贴到
+      issue 正文里。前者回答"这台机器能回答哪些问题、哪些必然被拒、补救代价多少"，
+      后者回答"工具找到了什么、计数器处于哪一态"。没有这两段输出，维护者无法判断
+      你遇到的是环境缺件（设计行为）还是工具缺陷。
+  - name: 覆盖范围与已知局限（我能问什么、什么必然被拒）
+    url: https://github.com/QingGo/Kernoscope/blob/main/COVERAGE.md
+    about: >-
+      三态覆盖矩阵（能答 / 口径更弱 / 不答）、四层能力分层、以及"必然被拒的问题及替代口径"。
+      提问前先看这里，能省一轮往返。
+  - name: 出处与诚实性规则（为什么不给替代数字）
+    url: https://github.com/QingGo/Kernoscope/blob/main/PROVENANCE.md
+    about: >-
+      五个出处等级与四条强制规则。本工具拒绝在 ncu 的硬件计数器指标名下面填一个
+      模型算出来的数；拿不到就报 `n/a` + 结构化拒绝（code + 原因 + 替代口径）。
+  - name: 贡献与扩展（适配器清单）
+    url: https://github.com/QingGo/Kernoscope/blob/main/CONTRIBUTING.md
+    about: >-
+      指标映射、后端、已知答案负载、能力问题、拒绝类型、bench 产物各自怎么加，
+      以及提交规则（产物先脱敏、提交信息不带平台身份线索）。

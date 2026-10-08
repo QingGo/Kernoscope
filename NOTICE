@@ -2,7 +2,7 @@ Kernoscope
 Copyright 2026 Kernoscope contributors
 
 This product includes software developed as part of the Kernoscope project
-(https://github.com/kernoscope/kernoscope) and is licensed under the Apache
+(https://github.com/QingGo/Kernoscope) and is licensed under the Apache
 License, Version 2.0 (see LICENSE).
 
 --------------------------------------------------------------------------
@@ -42,4 +42,4 @@ NOTICE - third party and trademark statements
    Every number Kernoscope prints carries a provenance label
    (exact / derived / measured / estimated / unavailable). Metrics that would
    require GPU hardware performance counters are reported as "unavailable"
-   with a reason, never as substituted values. See docs/provenance.md.
+   with a reason, never as substituted values. See PROVENANCE.md.
