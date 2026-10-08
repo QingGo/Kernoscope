@@ -58,6 +58,9 @@ uv sync && uv run kernoscope --help
 ## 快速开始
 
 ```bash
+# 第一步：看看这台机器上「能拿到什么、拿不到什么、为什么」
+kernoscope doctor
+
 # 与 ncu 用法一致：-- 之后是要 profile 的命令
 kernoscope --set basic -k regex:gemm -c 3 -o rep -- python train.py
 
@@ -131,9 +134,10 @@ kernoscope --ks-cubin my_kernel.so \
 
 - ✅ **MVP**：ncu 兼容 CLI、LaunchStats/时长（exact）、理论与达到 occupancy、实测峰值 roofline、
   设备级计数器（能耗/显存忙碌）、四路输出、`--strict`、provenance 强制。
+- ✅ **v1.5 已完成**：`kernoscope doctor` 环境自检 —— 一条命令给出「能用/不可用清单 + 原因 +
+  已选后端 + 可交付的 provenance 分级」，并用 ncu 实测确认计数器门（1 秒）。
 - 🚧 v1：region/阶段视图（对接 IKP Trace）、NVBit 指令与访存轨迹分析（sectors/req、locality）、
   `cuobjdump -sass` 静态指令混合细化。
-- 🚧 v1.5：能力自检 + 自动降级（一条命令给出"能用/不可用清单 + 已选后端"）。
 - 🚧 v2：因果链与 `explain`（借 ingero 思路，用 CUPTI activity + host 采样，不依赖 eBPF）、
   真 `.ncu-rep` 回读并与我们的报告对照。
 

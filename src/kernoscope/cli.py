@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "(ncu-compatible CLI). Every number carries a provenance label; metrics that "
                     "need hardware performance counters are reported as n/a with a reason.",
         epilog="示例:\n"
+               "  kernoscope doctor                                   # 先看这台机器能拿到什么\n"
                "  kernoscope --set basic -k regex:gemm -c 3 -o rep -- python train.py\n"
                "  kernoscope -i rep.ksreport.json --csv\n"
                "  kernoscope --ks-synthetic --set detailed | head -50\n",
@@ -232,6 +233,13 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
 # --------------------------------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    # 子命令：kernoscope doctor —— 环境自检（不属于 ncu 兼容面）
+    if argv and argv[0] == "doctor":
+        from .doctor import doctor_main
+
+        return doctor_main(argv[1:])
+
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"
 
