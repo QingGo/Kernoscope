@@ -210,3 +210,119 @@ def test_report_integration_adds_section_with_right_provenance(monkeypatch, caps
     assert metrics["meas__sectors_per_request"]["provenance"] == "estimated"
     assert metrics["est__l2_hit_rate_l2only_pct"]["provenance"] == "estimated"
     assert "lts__t_sector_hit_rate" not in metrics      # 不占用 ncu 指标名
+
+
+# ---------------------------------------------------------------- 官方输出转换器
+OFFICIAL = """MEMTRACE: CTX 0x562f - LAUNCH - Kernel pc 0x7fb0 - Kernel name k_coalesced(float const*, float*) \
+- grid launch id 0 - grid size 1,1,1 - block size 32,1,1 - nregs 0 - shmem 0 - cuda stream id 0
+MEMTRACE: CTX 0x562f - grid_launch_id 0 - CTA 0,0,0 - warp 1 - LDG.E - {ldg}
+MEMTRACE: CTX 0x562f - grid_launch_id 0 - CTA 0,0,0 - warp 1 - STG.E - {stg}
+"""
+
+
+def _addr_list(base, lanes=32, size=4, stride=None):
+    st = size if stride is None else stride
+    return " ".join(hex(base + st * i) for i in range(lanes))
+
+
+def _official(tmp_path, ldg, stg=None, name="official.txt"):
+    p = tmp_path / name
+    p.write_text(OFFICIAL.format(ldg=ldg, stg=stg or ldg))
+    return p
+
+
+def test_official_converter_known_answers(tmp_path):
+    from kernoscope.backends.memtrace import load_official_memtrace
+
+    tr = load_official_memtrace(str(_official(tmp_path, _addr_list(0x1000))), sm_count=4)
+    assert tr.kernel.startswith("k_coalesced")
+    assert tr.grid_blocks == 1 and tr.block_threads == 32
+    assert tr.header["source"] == "official-nvbit-mem-trace"
+    assert [len(r.sectors) for r in tr.records] == [4, 4]      # 连续 32×4B = 128B = 4 sector
+    assert tr.records[0].size == 4 and tr.records[0].lanes == 32
+
+    # strided32：lane 间隔 32 个 float
+    tr2 = load_official_memtrace(str(_official(tmp_path, _addr_list(0x2000, stride=128))), sm_count=4)
+    assert len(tr2.records[0].sectors) == 32
+
+    # unaligned：首地址 +4
+    tr3 = load_official_memtrace(str(_official(tmp_path, _addr_list(0x3004))), sm_count=4)
+    assert len(tr3.records[0].sectors) == 5
+
+
+def test_official_converter_known_sector_counts_and_smid_approx(tmp_path):
+    from kernoscope.backends.memtrace import load_official_memtrace
+    from kernoscope.analyze.memtrace import analyze_memtrace
+
+    tr = load_official_memtrace(str(_official(tmp_path, _addr_list(0x1000))), sm_count=4)
+    st = analyze_memtrace(tr, l2_bytes=L2_72MB, l1_bytes=128 * 1024)
+    assert st.sectors_per_request == pytest.approx(4.0)
+    assert st.coalescing_pct == pytest.approx(100.0)
+    assert st.smid_approx, "官方输出没有 SM id，必须标注为近似"
+    assert tr.records[0].smid == 0                              # cta 0 % 4
+
+
+def test_official_converter_rejects_empty(tmp_path):
+    from kernoscope.backends.memtrace import MemTraceError, load_official_memtrace
+
+    p = tmp_path / "empty.txt"
+    p.write_text("MEMTRACE: CTX 0x1 - LAUNCH - Kernel name k() - grid size 1,1,1 - block size 32,1,1\n")
+    with pytest.raises(MemTraceError, match="NO_EAGER_LOAD"):
+        load_official_memtrace(str(p))
+
+
+def test_auto_detect_both_formats(tmp_path):
+    from kernoscope.backends.memtrace import load_memtrace_auto
+
+    off = _official(tmp_path, _addr_list(0x1000))
+    assert load_memtrace_auto(str(off), sm_count=4).header["source"] == "official-nvbit-mem-trace"
+
+    ours = _mk_trace(tmp_path / "ours.txt", [_coalesced(0x1000)])
+    tr = load_memtrace_auto(str(ours))
+    assert tr.header.get("source") != "official-nvbit-mem-trace"
+    assert len(tr.records) == 1
+
+
+def test_cli_accepts_official_format(tmp_path, capsys):
+    off = _official(tmp_path, _addr_list(0x1000))
+    assert cli.main(["memtrace", "--from", str(off), "--sm-count", "4",
+                     "--l2-bytes", str(L2_72MB), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["sectors_per_request"] == pytest.approx(4.0)
+    assert doc["coalescing_pct"] == pytest.approx(100.0)
+    assert doc["l2_bytes"] == L2_72MB
+
+
+MULTI = """MEMTRACE: CTX 0x1 - LAUNCH - Kernel pc 0x10 - Kernel name k_A(float*) \
+- grid launch id 0 - grid size 2,1,1 - block size 32,1,1
+MEMTRACE: CTX 0x1 - grid_launch_id 0 - CTA 0,0,0 - warp 1 - LDG.E - {a}
+MEMTRACE: CTX 0x1 - grid_launch_id 0 - CTA 1,0,0 - warp 1 - LDG.E - {a}
+MEMTRACE: CTX 0x1 - LAUNCH - Kernel pc 0x20 - Kernel name k_B(float*) \
+- grid launch id 1 - grid size 1,1,1 - block size 32,1,1
+MEMTRACE: CTX 0x1 - grid_launch_id 1 - CTA 0,0,0 - warp 1 - LDG.E - {b}
+"""
+
+
+def test_official_converter_attributes_and_filters_kernels(tmp_path):
+    from kernoscope.backends.memtrace import load_official_memtrace
+
+    p = tmp_path / "multi.txt"
+    p.write_text(MULTI.format(a=_addr_list(0x1000), b=_addr_list(0x2000, stride=128)))
+
+    # 无过滤：只取第一个 kernel（绝不把两个 kernel 的记录混算）
+    tr = load_official_memtrace(str(p), sm_count=4)
+    assert tr.kernel.startswith("k_A")
+    assert len(tr.records) == 2 and tr.launches_traced == 1
+    assert tr.grid_blocks == 2 and tr.blocks_traced == 2
+    assert "k_B" in tr.header["kernels_seen"]
+
+    # 过滤到第二个 kernel：拿到 strided 的 32 sectors
+    tr2 = load_official_memtrace(str(p), sm_count=4, kernel_filter="k_B")
+    assert tr2.kernel.startswith("k_B")
+    assert len(tr2.records) == 1
+    assert len(tr2.records[0].sectors) == 32
+    assert tr2.launches_traced == 1
+
+    # 过滤不中：报错并列出实际看到的 kernel（可操作）
+    with pytest.raises(MemTraceError, match="k_A"):
+        load_official_memtrace(str(p), sm_count=4, kernel_filter="k_ZZZ")

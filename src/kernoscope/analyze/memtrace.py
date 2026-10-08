@@ -98,6 +98,7 @@ class MemTraceStats:
     line_bytes: int = LINE_BYTES_DEFAULT
     l1_ways: int = L1_WAYS_DEFAULT
     l2_ways: int = L2_WAYS_DEFAULT
+    smid_approx: bool = False
     op_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -109,6 +110,7 @@ def analyze_memtrace(trace: MemTrace, l2_bytes: int | None = None,
                      max_accesses: int = MAX_ACCESSES_DEFAULT) -> MemTraceStats:
     st = MemTraceStats(
         kernel=trace.kernel, records=len(trace.records),
+        smid_approx=trace.header.get("smid_approx") == "1",
         sampling_ratio=trace.sampling_ratio, truncated=trace.truncated,
         l2_bytes=l2_bytes or trace.l2_bytes,
         l1_bytes=l1_bytes, line_bytes=line_bytes, l1_ways=l1_ways, l2_ways=l2_ways,
@@ -204,6 +206,8 @@ def to_metrics(st: MemTraceStats) -> list[tuple[str, float | None, str, str, str
         ("meas__trace_records", float(st.records), "",
          "warp 级访存指令执行记录数", sample_note),
     ]
+    smid_note = ("；SM id 由 CTA 近似分配（官方 mem_trace 不输出 SM id），"
+                 "故『先过 L1』口径仅供参考" if st.smid_approx else "")
     if st.l2_bytes:
         out.append((
             "est__l2_hit_rate_l2only_pct", round(st.l2_hit_rate_l2only_pct, 1), "%",
@@ -214,7 +218,7 @@ def to_metrics(st: MemTraceStats) -> list[tuple[str, float | None, str, str, str
             "est__l2_hit_rate_with_l1_pct", round(st.l2_hit_rate_with_l1_pct, 1), "%",
             f"先过 per-SM L1（{st.l1_bytes // 1024} KiB, {st.l1_ways}way, line={st.line_bytes}B）"
             f"再过 L2（{st.l2_bytes / 2**20:.0f} MiB, {st.l2_ways}way）",
-            "比上界口径更接近真实；两种口径之差就是 L1 吸收了多少"))
+            "比上界口径更接近真实；两种口径之差就是 L1 吸收了多少" + smid_note))
     if st.dram_bytes_per_launch is not None:
         out.append((
             "est__dram_bytes_per_launch_trace", round(st.dram_bytes_per_launch / 1e6, 3), "MB",

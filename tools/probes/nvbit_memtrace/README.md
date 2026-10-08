@@ -36,6 +36,9 @@ make NVBIT_PATH=... ARCH=sm_89
 ## 使用
 
 ```bash
+# 推荐路径（官方工具 + 转换器）：
+NVBIT_MEMTRACE_SO=/path/to/mem_trace.so KS_MEMTRACE_OUT=trace.txt ./collect.sh -- ./your_app
+# 备选路径（本目录工具，见下方「状态」）：
 CUDA_INJECTION64_PATH=$PWD/ks_memtrace.so LD_PRELOAD=$PWD/ks_memtrace.so \
   KS_MEMTRACE_KERNEL=my_kernel KS_MEMTRACE_OUT=trace.txt ./your_app
 
@@ -62,32 +65,50 @@ make selftest NVBIT_PATH=...
 期望：`coalesced` = **4**、`strided32` = **32**、`unaligned` = **5** 个 sector/request。
 三个数不对就说明插桩或地址收集有问题，不要继续用后面的模型量。
 
-## 状态：设备侧地址捕获在本环境**未打通**（有证据，不是"还没试"）
+## 产出轨迹的两条路径
 
-Python 侧（解析 / 分析 / 模型 / CLI / 报告集成）已完成并有单测覆盖；**设备侧**的工具能编译、
-能插桩、能写出格式正确的文件头，但记录数为 0。已定位到如下事实（A/B 对照）：
+### 推荐：官方 NVBit `mem_trace` + 本项目转换器（已端到端验证）
 
-| 实验 | 结果 |
+官方工具的输出正好是「一行 = 一条 warp 访存指令 + 全部 lane 地址 + CTA/warp/opcode」，
+粒度刚好够用。一键采集：
+
+```bash
+NVBIT_MEMTRACE_SO=/path/to/mem_trace.so KS_MEMTRACE_OUT=t.txt ./collect.sh -- ./your_app
+kernoscope memtrace --from t.txt --sm-count 128 --l2-bytes 75497472 --kernel <子串>
+```
+
+**必须 `NO_EAGER_LOAD=0`**：NVBit 1.8 默认懒加载模块，会让插桩错过时机 ——
+表现是"程序正常跑完、一条记录都没有"。这是本项目在本环境踩了很久的坑，
+`collect.sh` 已内置该变量。若你看到 0 条记录，先查这个。
+
+已知答案验证（`make selftest` 用的三个内核，1 个 warp）：
+
+| 负载 | 期望 sector/request | 实测 | 合并效率 |
+|---|---|---|---|
+| coalesced（连续 32×4B） | 4 | **4.000** | 100.0% |
+| strided32（lane 间隔 128B） | 32 | **32.000** | 12.5% |
+| unaligned（首地址 +4B） | 5 | **5.000** | 80.0% |
+
+官方输出有两处信息缺失，转换器用**显式假设**补上并标注出来：
+
+* 没有 SM id → 用 `cta % sm_count` 近似（头部 `# smid_approx 1`），
+  因此「先过 per-SM L1」那个命中率口径只能当参考；
+* 没有指令 PC → 用 opcode 建 id，legend 写在文件头部。
+
+官方工具会打印**所有** kernel 的记录：转换器按 `LAUNCH` 行归属，
+默认只取第一个 kernel（绝不把多个 kernel 混算），可用 `--kernel <子串>` 指定。
+
+### 备选：本目录的工具（可编译、可插桩，但注入调用在本环境不执行）
+
+| 实验（同一 app、同一构建树） | 结果 |
 |---|---|
-| 官方 `instr_count`（只传 `guard_pred_val` + `const_val32` + `const_val64`） | ✅ 正常统计（`kernel 0 - k_coalesced - 12 instructions`） |
-| 我们自己写的 `opcode_hist`（同上参数模式） | ✅ 正常统计 |
-| 官方 `mem_trace`（带 `nvbit_add_call_arg_mref_addr64`） | ❌ 0 条记录（同一 app、同一构建树） |
-| 我们的 `ks_memtrace`（带 `mref_addr64`） | ❌ 0 条记录；`KS_MEMTRACE_DEBUG_CALLS=1` 下计数器也是 **0** → 注入的调用根本没执行 |
-| 官方 `mem_trace` 用 CMake **重新构建** | 仍 0 条 |
+| 官方 `instr_count`（guard + const32 + const64） | ✅ 正常统计 |
+| 本项目的 `opcode_hist` 式工具（同参数模式） | ✅ 正常统计 |
+| 官方 `mem_trace`（带 `mref_addr64`）+ `NO_EAGER_LOAD=0` | ✅ 正常记录 |
+| 本目录的 `ks_memtrace`（带 `mref_addr64`）+ `NO_EAGER_LOAD=0` | ❌ 插桩调用已插入，但设备计数器为 0 → 调用未执行 |
 
-⇒ 本环境（NVBit 1.8.1 + 驱动 580 + CUDA 13 + sm_89）下，**带地址参数（MREF）的注入不生效**，
-而纯计数器注入正常。这不是本项目代码的逻辑问题（官方工具同样表现）。
-
-**继续排查的建议顺序**：
-
-1. 换 NVBit 版本（1.7.x / 更新的 1.8.x）重试 —— 最可能是版本与驱动的组合问题；
-2. 换 CUDA Toolkit 版本（12.x）的工具链重试；
-3. `NO_EAGER_LOAD=0` 重跑（NVBit 默认懒加载模块，可能与 MREF 插桩交互）；
-4. 到 NVBit 的 issue/论坛搜 `mref_addr64` 或 `mem_trace empty`。
-
-**在此之前可以怎么用**：轨迹格式（`ks-memtrace v1`）是明确契约，
-你可以用任何能产出该格式的手段（自己的插桩、能正常工作的 NVBit 版本、或官方 `mem_trace`
-若在你的环境可用），Python 侧照常分析。
+`NO_EAGER_LOAD` 这一项已经排除（本工具在 eager 下仍为 0），剩下的差异仍在排查。
+在此之前请用上面的官方工具路径 —— 它已验证可用，且转换器已覆盖其格式。
 
 ## 已知限制（都是设计取舍，不是 bug）
 
