@@ -17,6 +17,25 @@ import sys
 
 from .analyze.memtrace import analyze_memtrace, to_metrics
 from .backends.memtrace import MemTraceError, load_memtrace_auto
+from .provenance import provenance_for_name
+
+
+def _graded_metrics(metrics, sampling_ratio: float):
+    """按主报告的口径给指标前/后缀定级（R-12/R-42）。
+
+    全量轨迹才是「实测读数」（meas__）；**按采样比放大**的轨迹不是 —— 样本代表性
+    是假设，所以名字降级为 est__，出处随名字一起变成 estimated。这与
+    `sections.build_memtrace_section` 的处理完全一致，避免子命令 JSON 与主报告
+    对同一份轨迹给出两套名字。
+    """
+    sampled = sampling_ratio < 0.999
+    out = []
+    for name, value, unit, source, note in metrics:
+        if sampled and name.startswith("meas__"):
+            name = "est__" + name[len("meas__"):]
+            note = (f"{note}；按 {sampling_ratio * 100:.1f}% 采样放大 → estimated")
+        out.append((name, value, unit, source, note))
+    return out
 
 
 def memtrace_main(argv: list[str]) -> int:
@@ -64,6 +83,7 @@ def memtrace_main(argv: list[str]) -> int:
         line_bytes=args.line_bytes, l1_ways=args.l1_ways, l2_ways=args.l2_ways,
         max_accesses=args.max_accesses)
     metrics = to_metrics(st)
+    graded = _graded_metrics(metrics, st.sampling_ratio)
 
     if args.json:
         print(json.dumps({
@@ -78,22 +98,22 @@ def memtrace_main(argv: list[str]) -> int:
             "dram_bytes_per_launch": st.dram_bytes_per_launch,
             "dram_bytes_unavailable_reason": st.dram_bytes_unavailable_reason,
             "op_counts": st.op_counts,
-            "metrics": [{"name": m[0], "value": m[1], "unit": m[2], "source": m[3], "note": m[4]}
-                        for m in metrics],
+            "metrics": [{"name": name, "value": value, "unit": unit, "source": source,
+                         "note": note, "provenance": provenance_for_name(name, value)}
+                        for name, value, unit, source, note in graded],
         }, indent=2, ensure_ascii=False))
         return 0
 
     sampled = st.sampling_ratio < 0.999
-    tag = "[estimated]" if sampled else "[measured]"
     w = 26
     print("访存轨迹分析（NVBit 插桩，非硬件计数器）")
     print(f"  {'kernel':<{w}}: {st.kernel}")
     print(f"  {'warp 指令记录数':<{w}}: {st.records}  "
           f"({'全量' if not sampled else f'按 block 采样 {st.sampling_ratio * 100:.1f}%'}）")
-    for name, value, unit, source, note in metrics:
+    for name, value, unit, source, note in graded:
         if value is None:
             continue
-        prov = "[estimated]" if name.startswith("est__") or sampled else "[measured]"
+        prov = f"[{provenance_for_name(name, value)}]"
         print(f"  {name:<{w}}: {value}{' ' + unit if unit else ''}  {prov}")
         print(f"      └ {source}")
     if st.dram_bytes_unavailable_reason:

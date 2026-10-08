@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..provenance import Provenance
+
 # 架构上限（来源：CUDA C++ Programming Guide 的 Compute Capabilities 表）
 ARCH: dict[str, dict[str, int]] = {
     "sm_80": dict(blocks=32, threads=2048, warps=64, regs=65536, smem=163840),
@@ -246,7 +248,16 @@ def analyze_probe_records(rec: ProbeRecords, threads_per_block: int | None = Non
         n_sm = max((r[0] for r in rec.records), default=0) + 1
 
     achieved = achieved_occupancy_from_intervals(rec.records, n_sm, threads, arch_used)
+    # R-42：子命令 --json 必须与主报告同构 —— 结果 dict 自带出处。
+    # 判定为 measured（不是 derived）：占用率与并发块数是探针自己写下的
+    # (smid, 起止时间) 记录的**直接归约**（区间重叠的时间加权平均/峰值），
+    # 属于「我们真的读到的量」，与包文档里「探针实测的达到 occupancy → measured」
+    # 以及 sections.py 的 meas__achieved_occupancy_pct 完全同一口径；
+    # 它不是由别的指标再算出来的判词（那类才用 ks__ + derived，例如两条独立
+    # 路径的比值）。theoretical_occupancy_pct 是从探针头部透传的 CUDA API 答案
+    # （见模块开头：理论值 exact），但它不是本函数给出的主答案，故不单独标注。
     out: dict = {
+        "provenance": Provenance.MEASURED.value,
         "kernel": rec.kernel,
         "arch": arch_used,
         "threads_per_block": threads,

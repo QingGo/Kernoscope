@@ -78,10 +78,24 @@ def test_cli_json_mode_and_bad_input(tmp_path, capsys):
     assert main(["occupancy", "--from", str(src), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["kernel"] == "k_occ"
+    # R-42：结果 dict 自带出处（区间重叠法读的是我们自己的探针记录 → measured）
+    assert payload["provenance"] == "measured"
+    assert payload["occupancy_pct"] == pytest.approx(25.0)
 
     bad = _write(tmp_path, "garbage\n", name="bad.txt")
     assert main(["occupancy", "--from", str(bad)]) == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_injection_json_shape_is_unchanged(tmp_path):
+    """`--ks-write-json` 的输出是给别的程序吃的注入格式：加出处不能改它的结构。"""
+    rec = load_probe_records(str(_write(tmp_path)))
+    result = analyze_probe_records(rec, arch="sm_89", sm_count=1, threads_per_block=128)
+    payload = to_injection_json(result)
+    assert set(payload) == {"k_occ"}
+    assert set(payload["k_occ"]) == {"occupancy_pct", "avg_concurrent_blocks",
+                                     "peak_concurrent_blocks", "samples"}
+    assert result["provenance"] == "measured"
 
 
 def test_end_to_end_injection_into_report(tmp_path, capsys):

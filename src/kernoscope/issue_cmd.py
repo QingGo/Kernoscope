@@ -21,6 +21,7 @@ import sys
 
 from .analyze.issue import from_histogram, to_metrics
 from .backends.opcode_hist import OpcodeHistError, load
+from .provenance import provenance_for_name
 
 
 def issue_main(argv: list[str]) -> int:
@@ -71,7 +72,8 @@ def issue_main(argv: list[str]) -> int:
             "available": st.available,
             "unavailable_reason": "" if st.available else st.unavailable_reason(),
             "opcode_counts": st.opcode_counts,
-            "metrics": [{"name": m[0], "value": m[1], "unit": m[2], "source": m[3], "note": m[4]}
+            "metrics": [{"name": m[0], "value": m[1], "unit": m[2], "source": m[3], "note": m[4],
+                         "provenance": provenance_for_name(m[0], m[1])}
                         for m in metrics],
         }, indent=2, ensure_ascii=False))
         return 0 if st.available else 2

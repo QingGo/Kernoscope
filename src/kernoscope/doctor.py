@@ -220,10 +220,14 @@ def counter_gate_probe(ncu_path: str | None = None) -> tuple[bool | None, str]:
 
 
 def classify_counter_state(found: Discovery | None, allowed: bool | None,
-                           probe: bool | None) -> tuple[str, str]:
-    """计数器四态（R-17）：未安装 / 已安装但不在 PATH / 已安装实测被拒 / 实测可用。
+                           probe: bool | None, static: bool = False) -> tuple[str, str]:
+    """计数器四态（R-17）：未安装 / 已安装但不在 PATH / 被拒 / 实测可用 / 无法判定。
 
-    关键是**把"未安装"与"无法判定"分开**：前者可被一次 `ls` 推翻，后者才是诚实结论。
+    关键是**把「未安装」与「无法判定」分开**：前者可被一次 `ls` 推翻，后者才是诚实结论。
+
+    `static=True` 表示调用方一次实测都没做（`doctor --no-probe`）：结论只能来自驱动策略
+    与容器 capability。此时措辞必须写明「静态推断」，绝不能冒充实测；同时静态否定
+    （RmProfilingAdminOnly=1）与实测否定一样足以定论，因此同样归入 denied。
     """
     if found is None or not found.found:
         return "not-installed", (f"在 {len(found.searched) if found else 0} 个候选目录里都没找到 ncu "
@@ -235,10 +239,18 @@ def classify_counter_state(found: Discovery | None, allowed: bool | None,
         return "denied", (f"ncu 存在于 {where}{not_in_path}，实测被拒（ERR_NVGPUCTRPERM，{who}）")
     if probe is True:
         return "available", f"ncu 存在于 {where}{not_in_path}，实测可用"
+    if static and allowed is False:
+        # 静态否定：策略只允许 admin 用计数器，容器 capability 又不足以突破。
+        # 这已经足够定论，不需要（也不允许）说成实测。
+        return "denied", (f"ncu 存在于 {where}{not_in_path}，静态推断被拒：驱动策略 "
+                          f"RmProfilingAdminOnly=1（仅 admin 可用性能计数器），"
+                          f"容器 capability 也不足以突破；本次未做实测探测（--no-probe）")
     if found.found_but_not_in_path:
+        tail = "静态信息不足以定论（--no-probe，未做实测探测）" if static else "实测未完成判定"
         return "not-in-path", (f"ncu 存在于 {where}{not_in_path}；"
-                               f"若只看 PATH 会误报「未安装」。实测未完成判定")
-    return "unknown", f"ncu 存在于 {where}，但实测无法判定"
+                               f"若只看 PATH 会误报「未安装」。{tail}")
+    tail = "静态信息不足以定论（--no-probe，未做实测探测）" if static else "但实测无法判定"
+    return "unknown", f"ncu 存在于 {where}，{tail}"
 
 
 # --------------------------------------------------------------------------
@@ -359,9 +371,12 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
     if probe_counters:
         available, why = counter_gate_probe(ncu_disc.path)
     else:
-        available, why = counters_allowed, "静态推断（--no-probe）"
+        # --no-probe：一次实测都不做。probe 传 None 只表示「没有实测证据」，
+        # 不等于「没有证据」——驱动策略这条静态证据仍要交给分类器定夺（R-44）。
+        available, why = counters_allowed, "静态信息不足（--no-probe，未做实测探测）"
     state, state_note = classify_counter_state(ncu_disc, counters_allowed, available
-                                               if probe_counters else None)
+                                               if probe_counters else None,
+                                               static=not probe_counters)
     r.counter_state, r.counter_state_note = state, state_note
     mark = {"available": OK, "denied": FAIL, "not-installed": WARN,
             "not-in-path": WARN, "unknown": WARN}[state]
@@ -377,12 +392,19 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
     }
     details = {
         "available": f"实测可用 @ {ncu_disc.path}",
-        "denied": f"{ncu_disc.path} 实测被拒：ERR_NVGPUCTRPERM",
+        "denied": (f"{ncu_disc.path} 实测被拒：ERR_NVGPUCTRPERM" if probe_counters else
+                   f"{ncu_disc.path} 静态推断被拒：驱动策略 RmProfilingAdminOnly=1"
+                   f"（--no-probe，未做实测探测）"),
         "not-installed": f"未找到 ncu（已在 {len(ncu_disc.searched)} 个候选目录里确认）",
         "not-in-path": f"已安装但不在 PATH：{ncu_disc.path}",
         "unknown": f"ncu 在 {ncu_disc.path or '?'}，但无法判定：{why}",
     }
-    r.add("counters", "硬件计数器（ncu）", mark, details[state], impact=impacts[state])
+    impact = impacts[state]
+    if state == "denied" and not probe_counters:
+        # 原因文案与报告侧保持一致，但要显式标注这是静态推断，避免被当成实测结论
+        impact = (impact + "；本次结论来自静态推断（驱动策略 + 容器 capability），"
+                  "未做实测探测；要看实测证据请去掉 --no-probe")
+    r.add("counters", "硬件计数器（ncu）", mark, details[state], impact=impact)
     if state == "unknown" and not ncu_disc.found:
         # 没装就当"无法判定"，但把原因说清（不是"被权限限制"）
         available = None

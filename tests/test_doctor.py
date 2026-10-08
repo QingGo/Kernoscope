@@ -219,3 +219,71 @@ def test_available_counters_move_to_exact_not_unavailable(monkeypatch, tmp_path)
     conv = {c.provenance: c for c in rep.capabilities}
     assert "unavailable" not in conv, "计数器可用时不该出现 unavailable 能力"
     assert any("MemoryWorkloadAnalysis" in i for i in conv["exact"].items)
+
+
+def test_no_probe_static_denial_from_policy(monkeypatch, tmp_path, capsys):
+    """R-44：--no-probe 时驱动策略 RmProfilingAdminOnly=1 已足以定论 denied（静态）。
+
+    静态证据不能被丢掉而退化成 unknown / not-in-path；但也必须写明这是静态推断，
+    不能冒充实测探测的结论。
+    """
+    def _boom(ncu_path=None):
+        raise AssertionError("--no-probe 的语义就是不实测，不得调用 counter_gate_probe")
+
+    paths = {"nsys": "/usr/bin/nsys", "ncu": "/usr/local/cuda/bin/ncu"}
+    monkeypatch.setattr(D, "discover_tool",
+                        lambda name: _discovery(name, paths.get(name)))
+    monkeypatch.setattr(D, "gpu_info", lambda: {})
+    monkeypatch.setattr(D, "counter_gate_probe", _boom)
+    params = tmp_path / "params"
+    params.write_text("RmProfilingAdminOnly: 1\n")
+    status = tmp_path / "status"
+    status.write_text("CapEff:\t00000000a80425fb\nCapBnd:\t00000000a80425fb\n")
+    monkeypatch.setenv("KS_NV_PARAMS", str(params))
+    monkeypatch.setenv("KS_PROC_STATUS", str(status))
+
+    rep = D.run_doctor(probe_counters=False)
+    assert rep.counter_state == "denied"
+    assert "静态" in rep.counter_state_note
+    assert "实测被拒" not in rep.counter_state_note, "静态推断不得说成实测结论"
+    assert "/usr/local/cuda/bin/ncu" in rep.counter_state_note
+
+    chk = [c for c in rep.checks if c.name.startswith("硬件计数器")][0]
+    assert chk.status == D.FAIL
+    assert "静态推断" in chk.detail and "实测被拒" not in chk.detail
+    assert "静态推断" in chk.impact, "原因文案要保留与报告侧一致的措辞，同时标注静态来源"
+
+    rc = D.doctor_main(["--no-probe", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["schema_version"] == 2
+    assert payload["counter_state"] == "denied"
+    assert "静态" in payload["counter_state_note"]
+
+
+def test_no_probe_without_ncu_stays_not_installed(no_tools, monkeypatch, tmp_path):
+    """R-44 负样本：策略为 1 也不能把「没装 ncu」说成 denied —— 未安装与受限必须分开。"""
+    params = tmp_path / "params"
+    params.write_text("RmProfilingAdminOnly: 1\n")
+    monkeypatch.setenv("KS_NV_PARAMS", str(params))
+    rep = D.run_doctor(probe_counters=False)
+    assert rep.counter_state == "not-installed"
+    assert "静态" not in rep.counter_state_note
+
+
+def test_no_probe_policy_zero_is_not_reported_as_measured(monkeypatch, tmp_path):
+    """--no-probe + 策略为 0：静态肯定证据弱于实测（capability 仍可能挡住），
+
+    因此只能说 unknown，不得直接报成 available（那是实测才有的结论）。
+    """
+    paths = {"nsys": "/usr/bin/nsys", "ncu": "/usr/local/cuda/bin/ncu"}
+    monkeypatch.setattr(D, "discover_tool",
+                        lambda name: _discovery(name, paths.get(name)))
+    monkeypatch.setattr(D, "gpu_info", lambda: {})
+    params = tmp_path / "params"
+    params.write_text("RmProfilingAdminOnly: 0\n")
+    monkeypatch.setenv("KS_NV_PARAMS", str(params))
+    monkeypatch.setenv("KS_PROC_STATUS", str(tmp_path / "none"))
+    rep = D.run_doctor(probe_counters=False)
+    assert rep.counter_state == "unknown"
+    assert "未做实测探测" in rep.counter_state_note

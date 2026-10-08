@@ -124,6 +124,35 @@ def test_issue_subcommand_known_answer(capsys, tmp_path):
     assert doc["category_pct"]["memory"] == pytest.approx(50.0)
 
 
+def test_issue_json_metrics_are_isomorphic_with_report(capsys, tmp_path):
+    """R-42：--json 的指标对象必须与主报告同构 —— 带 provenance，且与前缀规则一致。"""
+    p = tmp_path / "hist.txt"
+    p.write_text(HIST)
+    rc, out, _ = run(capsys, "issue", "--from", str(p), "--kernel", "copy_k",
+                     "--sm-count", "128", "--clock-mhz", "2000", "--duration-ms", "2", "--json")
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["metrics"], "指标列表不能为空"
+    for m in doc["metrics"]:
+        assert "provenance" in m, m
+        if m["value"] is None:
+            assert m["provenance"] == "unavailable", m
+        elif m["name"].startswith("est__"):
+            assert m["provenance"] == "estimated", m
+    tags = {m["provenance"] for m in doc["metrics"]}
+    assert tags <= {"estimated", "unavailable"}
+    assert "exact" not in tags, "本子命令没有与 ncu 同源的来源，不允许出现 exact"
+
+    # 缺输入时指标是 n/a：出处必须跟着变成 unavailable（R1 口径）
+    rc2, out2, _ = run(capsys, "issue", "--from", str(p), "--kernel", "copy_k",
+                       "--sm-count", "0", "--clock-mhz", "0", "--duration-ms", "0", "--json")
+    assert rc2 == 2
+    doc2 = json.loads(out2)
+    unavailable = {m["name"]: m for m in doc2["metrics"] if m["value"] is None}
+    assert unavailable, "缺输入时必须有 value=None 的指标"
+    assert all(m["provenance"] == "unavailable" for m in unavailable.values())
+
+
 def test_issue_subcommand_readable_errors(capsys, tmp_path):
     bad = tmp_path / "bad.txt"
     bad.write_text("nothing useful here\n")

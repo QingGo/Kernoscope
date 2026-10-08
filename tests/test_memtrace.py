@@ -188,6 +188,38 @@ def test_cli_memtrace_text_and_json(tmp_path, capsys):
     assert set(doc["op_counts"]) == {"LDG.E"}
 
 
+def test_memtrace_json_metrics_carry_provenance(tmp_path, capsys):
+    """R-42：--json 的指标对象与主报告同构（名字前缀 ↔ provenance 一一对应）。"""
+    p = _mk_trace(tmp_path / "full.txt", [_coalesced(0x1000), _strided(0x2000, 32)])
+    assert cli.main(["memtrace", "--from", str(p), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    metrics = {m["name"]: m for m in doc["metrics"]}
+    assert metrics
+    assert metrics["meas__sectors_per_request"]["provenance"] == "measured"
+    assert metrics["meas__coalescing_efficiency_pct"]["provenance"] == "measured"
+    assert metrics["est__l2_hit_rate_l2only_pct"]["provenance"] == "estimated"
+    for m in metrics.values():
+        assert "provenance" in m, m
+        if m["value"] is None:
+            assert m["provenance"] == "unavailable", m
+        elif m["name"].startswith("meas__"):
+            assert m["provenance"] == "measured", m
+        else:
+            assert m["provenance"] == "estimated", m
+    assert "exact" not in {m["provenance"] for m in metrics.values()}
+
+    # 采样轨迹：按采样比放大不是「实测读数」，与主报告一致地降级为 est__ + estimated
+    q = _mk_trace(tmp_path / "sampled.txt", [_coalesced(0x1000)], grid=8, blocks_traced=1,
+                  ratio=0.125)
+    assert cli.main(["memtrace", "--from", str(q), "--json"]) == 0
+    sampled = {m["name"]: m for m in json.loads(capsys.readouterr().out)["metrics"]}
+    assert sampled
+    assert not [n for n in sampled if n.startswith("meas__")], \
+        "采样放大的量不得用 meas__ 前缀（R-12）"
+    assert sampled["est__sectors_per_request"]["provenance"] == "estimated"
+    assert all(m["provenance"] in {"estimated", "unavailable"} for m in sampled.values())
+
+
 def test_cli_memtrace_bad_file_returns_1(tmp_path, capsys):
     bad = tmp_path / "bad.txt"
     bad.write_text("garbage\n")

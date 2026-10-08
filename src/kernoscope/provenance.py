@@ -215,6 +215,42 @@ def _in_namespace(name: str, prefixes: Sequence[str]) -> bool:
     return any(name.startswith(p) for p in prefixes)
 
 
+# R-42：前缀 → 出处。子命令的 `--json` 输出必须与主报告**同构**（每个指标对象都带
+# provenance），否则下游要为每个子命令写一套解析。判定只依赖命名纪律（R-12/R-15），
+# 与调用点无关，所以放在这里由各子命令复用，而不是各抄一份。
+OUR_PREFIX_PROVENANCE: tuple[tuple[str, Provenance], ...] = (
+    ("meas__", Provenance.MEASURED),     # 我们的探针实测读数
+    ("est__", Provenance.ESTIMATED),     # 模型/采样推算
+    ("model__", Provenance.ESTIMATED),   # 模型推算（与 est__ 同义）
+    ("ks__", Provenance.DERIVED),        # 由实测样本再算出的统计量/判词
+)
+
+
+def provenance_for_name(name: str, value: object = None) -> str:
+    """按命名纪律给出一个指标的出处（小写字符串，即 `Provenance.value`）。
+
+    R-42 用：让 `issue` / `memtrace` 等子命令的 `--json` 指标对象与主报告同构。
+    规则（与 R-12/R-15 一致，看名字就知道出处）：
+        value is None        -> unavailable（没数据就是没数据，不是 0）
+        meas__*              -> measured（我们的探针实测读数）
+        est__* / model__*    -> estimated（模型/采样推算）
+        ks__*                -> derived（由实测样本再算出的统计量/判词）
+
+    名字不在自有前缀里时：计数器命名空间（sm__/lts__/...）下的量在这台机器上
+    拿不到，只能报 unavailable（R2）；其余未登记前缀一律按 estimated 处理 ——
+    保守方向，**绝不回 exact**（exact 要求与 ncu 同源，调用本函数的地方都给不出
+    这个保证）。返回字符串而不是枚举，是因为调用点只做 JSON 序列化。
+    """
+    if value is None:
+        return Provenance.UNAVAILABLE.value
+    for prefix, prov in OUR_PREFIX_PROVENANCE:
+        if name.startswith(prefix):
+            return prov.value
+    if _in_namespace(name, COUNTER_NAMESPACES):
+        return Provenance.UNAVAILABLE.value
+    return Provenance.ESTIMATED.value
+
+
 @dataclass
 class Section:
     """一组同源指标（对标 ncu 的 section）。"""
