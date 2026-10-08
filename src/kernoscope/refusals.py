@@ -31,6 +31,7 @@ class RefusalCode(str, Enum):
 
     # ---- 环境缺件：这台机器上没有这个数据源 ----
     NO_GPU = "no_gpu"                         # 没有任何 NVIDIA 设备
+    PYTORCH_MISSING = "pytorch_missing"       # 没有 PyTorch（selftest 的已知答案负载需要它）
     NO_NVML = "no_nvml"                       # nvidia-smi/pynvml 不可用
     NO_NVML_SAMPLES = "no_nvml_samples"       # 采样被关掉或一次都没采到
     NSYS_MISSING = "nsys_missing"             # 没有 nsys -> 没有 kernel 级数据
@@ -71,6 +72,7 @@ class RefusalCode(str, Enum):
     NO_SELFTEST_BAND = "no_selftest_band"      # 没跑 selftest，没有本机误差带/MDD
     MDD_UNKNOWN = "mdd_unknown"                # 误差带里没有这个指标的 MDD
     PROTOCOL_MISMATCH = "protocol_mismatch"    # 两次运行协议不同，不可比
+    BOTH_REFUSED = "both_refused"              # 两次运行都被同一个前提挡住：没有数字可比
     METRIC_ABSENT = "metric_absent"            # 请求的指标不在报告/包里
     LEGACY_REPORT = "legacy_report"            # 旧报告没有结构化拒绝信息
     INTERNAL_UNKNOWN = "internal_unknown"      # 兜底：未分类的拒绝（出现即为 bug 信号）
@@ -80,6 +82,7 @@ class RefusalCode(str, Enum):
 # 的东西上），但人视图要用它把「code」翻成人话 —— 所以它是 code 的一部分，不是文档。
 CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NO_GPU: "本机没有 NVIDIA GPU",
+    RefusalCode.PYTORCH_MISSING: "没有安装 PyTorch",
     RefusalCode.NO_NVML: "nvidia-smi / pynvml 不可用",
     RefusalCode.NO_NVML_SAMPLES: "没有 NVML 采样点（采样被关掉或不可用）",
     RefusalCode.NSYS_MISSING: "没有 nsys：kernel 级数据不可得",
@@ -118,6 +121,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NO_SELFTEST_BAND: "没有本机误差带与 MDD",
     RefusalCode.MDD_UNKNOWN: "误差带里没有这个指标的 MDD",
     RefusalCode.PROTOCOL_MISMATCH: "两次运行的协议不同，不可比",
+    RefusalCode.BOTH_REFUSED: "两侧都被同一个前提挡住，没有数字可比",
     RefusalCode.METRIC_ABSENT: "请求的指标不存在",
     RefusalCode.LEGACY_REPORT: "旧报告没有结构化拒绝信息",
     RefusalCode.INTERNAL_UNKNOWN: "未分类的拒绝（属于本工具缺陷）",
@@ -160,6 +164,10 @@ class Remedy:
 # 每个 code 的默认补救办法。具体场景可在构造 Refusal 时覆盖（例如把"延长到约 N 秒"
 # 里的 N 用实测覆盖率算出来）。
 DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
+    RefusalCode.PYTORCH_MISSING: Remedy(
+        "装 PyTorch（自检的已知答案负载只需要 torch）",
+        command="pip install torch", cost_kind="manual",
+        then_answers=("selftest_band", "mdd")),
     RefusalCode.NO_GPU: Remedy(
         "换一台有 NVIDIA GPU 的机器；或在没有 GPU 时用 --ks-synthetic 跑通流程看输出形状",
         command="kernoscope --ks-synthetic --set basic", cost_kind="manual"),
@@ -311,13 +319,18 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "误差带里没有这个指标（MDD 按指标族给）：用 --metric 指定有 MDD 的指标，"
         "或重跑 selftest 覆盖该负载族",
         command="kernoscope selftest --out machine-selfcheck.json", cost_s=120.0),
+    RefusalCode.BOTH_REFUSED: Remedy(
+        "两侧都被同一种原因拒绝（例如都没有标定）：先按该原因的补救办法解除前提，"
+        "这次比较才有意义 —— 没有数字时 diff 不下任何结论",
+        command="kernoscope capabilities --json", cost_kind="manual"),
     RefusalCode.PROTOCOL_MISMATCH: Remedy(
         "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；"
         "协议不同时我们拒绝给方向判词（宁可说不可比）",
         cost_s=0.0),
     RefusalCode.METRIC_ABSENT: Remedy(
-        "用 `kernoscope packet --list` 或 --json 查看本次报告里实际存在的指标名",
-        command="kernoscope -i rep.ksreport.json --csv", cost_s=0.0),
+        "用 --json 看本次报告里实际存在哪些指标，或用 `kernoscope capabilities --json` "
+        "看哪些问题能答（不存在 ≠ 被拒）",
+        command="kernoscope capabilities --json", cost_s=0.0),
     RefusalCode.LEGACY_REPORT: Remedy(
         "报告是结构化拒绝之前生成的（没有 code 字段）：重跑一次采集即可带上；"
         "本工具按 legacy 标注，不猜原因",

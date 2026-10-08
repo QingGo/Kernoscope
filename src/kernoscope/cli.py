@@ -368,6 +368,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .capabilities_cmd import capabilities_main
 
         return capabilities_main(argv[1:])
+    if argv and argv[0] == "selftest":
+        from .selftest import selftest_main
+
+        return selftest_main(argv[1:])
+    if argv and argv[0] == "diff":
+        from .diff_cmd import diff_main
+
+        return diff_main(argv[1:])
 
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"
