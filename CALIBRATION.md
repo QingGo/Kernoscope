@@ -107,7 +107,7 @@ kernoscope --set basic --ks-calibration machine-profile.json \
   字节数与显存忙碌代理不依赖累加口径。
 - 报告里的每个峰值都会带上**来源与标定时间**（例如
   `measured peak (machine-profile.json @ 2026-10-08 22:00:00, dtype=bf16, bw=907 GB/s,
-  compute=171.7 TFLOP/s, 累加口径=…, 口径离散=5.0%)`）。
+  compute=169.0 TFLOP/s, 累加口径=bf16 (fp32 accumulate), 口径离散=3.9%)`）。
 
 ⚠️ `--ks-peak-tflops` / `--ks-peak-gbps` 是**覆盖值**，不是标定：用它们时报告会明确标注来源
 为覆盖值，并且不用于拐点判定。
