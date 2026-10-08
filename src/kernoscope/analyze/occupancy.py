@@ -149,3 +149,124 @@ def achieved_occupancy_from_intervals(
         "occupancy_pct": occ * 100.0,
         "samples": float(used),
     }
+
+
+# ---------------------------------------------------------------------------
+# 探针记录（tools/probes/occupancy_probe.cu 的输出格式 ks-occupancy-records v1）
+# ---------------------------------------------------------------------------
+PROBE_FORMAT = "ks-occupancy-records v1"
+
+
+@dataclass
+class ProbeRecords:
+    """探针采集结果：头部元信息 + 每 block 的 (smid, t0, t1)。"""
+
+    header: dict[str, str]
+    records: list[tuple[int, int, int]]
+
+    @property
+    def kernel(self) -> str:
+        return self.header.get("kernel", "<unknown>")
+
+    @property
+    def threads_per_block(self) -> int | None:
+        try:
+            return int(self.header["threads_per_block"])
+        except (KeyError, ValueError):
+            return None
+
+    @property
+    def sm_count(self) -> int | None:
+        try:
+            return int(self.header["sm_count"])
+        except (KeyError, ValueError):
+            return None
+
+    @property
+    def arch(self) -> str | None:
+        return self.header.get("arch")
+
+
+def load_probe_records(path: str) -> ProbeRecords:
+    """解析 ks-occupancy-records v1。
+
+    容忍 `# key value` 头部与 `#` 注释、空行；数据行必须是 `smid,g0,g1`。
+    格式不符时抛 ValueError 并给出可操作的提示（而不是静默给 0）。
+    """
+    header: dict[str, str] = {}
+    records: list[tuple[int, int, int]] = []
+    saw_format = False
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                body = line[1:].strip()
+                if body == PROBE_FORMAT:
+                    saw_format = True
+                    continue
+                if " " in body:
+                    k, v = body.split(" ", 1)
+                    header[k.strip()] = v.strip()
+                continue
+            if line.lower().startswith("smid"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 3:
+                raise ValueError(f"{path}:{lineno}: 期望 'smid,g0,g1'，得到 {line!r}")
+            try:
+                records.append((int(parts[0]), int(parts[1]), int(parts[2])))
+            except ValueError as e:
+                raise ValueError(f"{path}:{lineno}: 数值解析失败: {line!r}") from e
+
+    if not saw_format:
+        raise ValueError(f"{path}: 缺少首行 '# {PROBE_FORMAT}'（这是探针输出格式标识）")
+    if not records:
+        raise ValueError(f"{path}: 没有任何 block 记录，探针可能没跑到 kernel")
+    return ProbeRecords(header, records)
+
+
+def analyze_probe_records(rec: ProbeRecords, threads_per_block: int | None = None,
+                          arch: str | None = None, sm_count: int | None = None) -> dict:
+    """把探针记录算成 occupancy（区间重叠法）。
+
+    头部里的元信息作为默认值；命令行可覆盖（例如探针文件是从别处拿来的）。
+    """
+    threads = threads_per_block or rec.threads_per_block or 128
+    arch_used = arch or rec.arch or "sm_89"
+    n_sm = sm_count or rec.sm_count or 0
+    if not n_sm:
+        n_sm = max((r[0] for r in rec.records), default=0) + 1
+
+    achieved = achieved_occupancy_from_intervals(rec.records, n_sm, threads, arch_used)
+    out: dict = {
+        "kernel": rec.kernel,
+        "arch": arch_used,
+        "threads_per_block": threads,
+        "sm_count": n_sm,
+        "grid_blocks": len(rec.records),
+        "n_records": len(rec.records),
+        **achieved,
+    }
+    # 探针会用 cudaOccupancyMaxActiveBlocksPerMultiprocessor 打印理论值并写进头部，
+    # 这里透传便于"实测 vs 理论"对照（理论值由 CUDA API 给出，权威）
+    theo = rec.header.get("theoretical_occupancy_pct")
+    if theo:
+        try:
+            out["theoretical_occupancy_pct"] = float(theo)
+        except ValueError:
+            pass
+    return out
+
+
+def to_injection_json(result: dict) -> dict:
+    """转成 `--ks-achieved-occupancy` 接受的 JSON：{kernel: {occupancy_pct, ...}}。"""
+    return {
+        result["kernel"]: {
+            "occupancy_pct": round(float(result["occupancy_pct"]), 2),
+            "avg_concurrent_blocks": round(float(result["avg_concurrent_blocks"]), 4),
+            "peak_concurrent_blocks": int(result["peak_concurrent_blocks"]),
+            "samples": int(result.get("samples", 0)),
+        }
+    }

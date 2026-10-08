@@ -115,6 +115,29 @@ kernoscope --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-d
 
 ---
 
+## 达到的 occupancy（无需硬件计数器）
+
+ncu 的 Achieved Occupancy 来自计数器；这里用**区间重叠法**重建 —— 让每个 block 记录
+`(smid, 起止 %globaltimer)`，时间平均的并发 block 数 × 每 block warps ÷ 每 SM 上限：
+
+```bash
+make -C tools/probes run                      # 编译并采集 occupancy-records.txt
+kernoscope occupancy --from occupancy-records.txt                      # 看结果
+kernoscope occupancy --from occupancy-records.txt --write-json occ.json  # 产出注入用 JSON
+kernoscope --ks-achieved-occupancy occ.json -k regex:<kernel> -- your_app
+```
+
+真机两点校验（RTX 4090，128 线程/块）：
+
+| 场景 | 理论（CUDA API） | 实测（区间重叠） |
+|---|---|---|
+| 无 smem | 12 blocks/SM = 100% | **11.27 → 93.9%**（差的是 ramp-up/tail） |
+| 32 KB 静态 smem | 3 blocks/SM = 25% | **2.99 → 24.9%** |
+
+要测**你自己的 kernel**，把 `tools/probes/occupancy_probe.cu` 里那几行搬进你的 kernel 即可
+（文件头注释列了三个必须保留的坑：时间戳要值依赖、跨 SM 只能用 `%globaltimer`、
+共享内存必须写后读否则被 ptxas 当死代码删掉）。
+
 ## 可选：SASS 级插桩（NVBit / IKP）
 
 需要指令级归因、访存轨迹、sectors/req、locality 时，装上 NVBit 后把探针结果喂回来：
@@ -136,8 +159,10 @@ kernoscope --ks-cubin my_kernel.so \
   设备级计数器（能耗/显存忙碌）、四路输出、`--strict`、provenance 强制。
 - ✅ **v1.5 已完成**：`kernoscope doctor` 环境自检 —— 一条命令给出「能用/不可用清单 + 原因 +
   已选后端 + 可交付的 provenance 分级」，并用 ncu 实测确认计数器门（1 秒）。
-- 🚧 v1：region/阶段视图（对接 IKP Trace）、NVBit 指令与访存轨迹分析（sectors/req、locality）、
-  `cuobjdump -sass` 静态指令混合细化。
+- ✅ **v1 进行中**：`tools/probes/occupancy_probe.cu` + `kernoscope occupancy` 打通
+  「探针 → 分析 → 注入报告」闭环（达到的 occupancy，出处 `measured`）。
+- 🚧 v1 剩余：region/阶段视图（对接 IKP Trace）、NVBit 指令与访存轨迹分析（sectors/req、locality）、
+  `cuobjdump -sass` 静态指令混合细化到 per-kernel。
 - 🚧 v2：因果链与 `explain`（借 ingero 思路，用 CUPTI activity + host 采样，不依赖 eBPF）、
   真 `.ncu-rep` 回读并与我们的报告对照。
 

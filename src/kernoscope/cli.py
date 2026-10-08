@@ -234,11 +234,15 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # 子命令：kernoscope doctor —— 环境自检（不属于 ncu 兼容面）
+    # 子命令（不属于 ncu 兼容面）
     if argv and argv[0] == "doctor":
         from .doctor import doctor_main
 
         return doctor_main(argv[1:])
+    if argv and argv[0] == "occupancy":
+        from .occupancy_cmd import occupancy_main
+
+        return occupancy_main(argv[1:])
 
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"

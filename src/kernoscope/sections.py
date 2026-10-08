@@ -311,9 +311,18 @@ def _lookup_in(d: dict, kr) -> object | None:
         if k and k in d:
             return d[k]
     kr_tokens = _tokens(kr.name) | _tokens(getattr(kr, "alias", ""))
+    kr_flat = f"{kr.name} {getattr(kr, 'alias', '')}".lower()
     best: object | None = None
     best_score = 0
     for k, v in d.items():
+        if not k:
+            continue
+        # 子串回退：简单名（如探针里的 "k_occ"）与 demangled 签名互相包含时可直接匹配
+        kl = str(k).lower()
+        if len(kl) >= 3 and (kl in kr_flat or kr_flat.strip() in kl):
+            if len(kl) > best_score:
+                best, best_score = v, len(kl)
+            continue
         inter = _tokens(k) & kr_tokens
         if not inter:
             continue
