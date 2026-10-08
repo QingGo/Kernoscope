@@ -38,6 +38,8 @@ Kernoscope 的硬规则：**任何数字都必须能回答"这是怎么来的"**
 
 还有一条**命名纪律**：`meas__` 前缀的指标，出处必须是 `measured`。
 名字承诺什么，出处就得是什么 —— 采样放大的轨迹量会改用 `est__` 前缀并在 note 里写明"按 N% 采样放大"。
+三处输出口（主报告、`--json`、子命令的 `--json`）共用同一套前缀→出处判定
+（`provenance_for_name()`），未登记的前缀绝不回落到 `exact`。
 
 ## 拒绝给数的三种形态
 
@@ -73,9 +75,15 @@ echo $?   # 0 = 请求的数据都拿到了；2 = 有请求的数据最终产不
 | `ks__theoretical_occupancy_pct` / `ks__occupancy_limiter` | `exact` | 静态属性 + 架构上限的解析算术 |
 | `meas__achieved_occupancy_pct` | `measured` | 需要在被测 kernel 内插桩（`tools/probes/occupancy_probe.cu`） |
 | `meas__nvml_mem_busy_mean_pct`、`meas__sm_clock_*`、`meas__power_max_w`、`meas__device_energy_j` | `measured` | NVML 管理计数器，免 admin |
-| `est__dram_bytes_total` / `_per_launch` / `_throughput_pct_of_peak` | `estimated` | NVML 显存忙碌时间 × **本机实测峰值带宽**；需要窗口覆盖率达标 |
-| `est__dram_bytes_per_launch_trace` | `estimated` | 访存轨迹 + 缓存模型给出的第二条口径 |
-| `ks__sampler_window_coverage_pct` | `derived` | "窗口是否被被测负载主导" |
+| `est__dram_bytes_total` / `_per_launch` / `_throughput_pct_of_peak` | `estimated` | NVML 显存忙碌时间 × **本机实测峰值带宽**；per-launch 需要**两个**前提同时成立 |
+| `est__dram_bytes_per_launch_trace` | `estimated` | 访存轨迹 + 缓存模型给出的第二条口径；只测被追踪的那个 kernel |
+| `ks__sampler_window_coverage_pct` | `derived` | 前提①：窗口是否被被测负载主导（GPU 在不在干活） |
+| `ks__matched_kernel_kernel_share_pct` | `derived` | 前提②：被 `-k` 选中的 kernel 占窗口**内核时间**的比例（判据） |
+| `ks__matched_kernel_window_share_pct` | `derived` | 同上的墙钟口径；与覆盖率同量纲的对照量 |
+| `ks__attribution_bias_estimate_pct` | `derived` | `100×(1/份额−1)`：归因本身引入的上偏估计（代理，不是严格上界） |
+| `ks__window_busy_segments` | `derived` | 窗口里有几段连续忙碌期（多段 ⇒ 可能是多个阶段/变体拼接） |
+| `ks__dram_window_mem_busy_mean_pct` | `derived` | **参与字节估算**的窗口显存忙碌均值（与整进程的 `meas__nvml_mem_busy_mean_pct` 区分开） |
+| `ks__over_peak_warning` | `derived` | 达成值超过标定峰值 = 物理上不可能，显式红灯 |
 | `est__dram_vs_ledger_err_pct`、`est__dram_range_position_pct`、`ks__ledger_range_verdict` | `estimated` / `derived` | 与你提供的账本对拍；区间判词 |
 | `ks__static_sass_*` | `exact` | `cuobjdump -sass` 静态指令混合 |
 | `sm__*`、`dram__*`、`l1tex__*`、`lts__*` 等计数器名 | `unavailable` | 只报 `n/a` + 原因，永不填数 |

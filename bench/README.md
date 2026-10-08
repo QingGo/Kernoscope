@@ -19,12 +19,13 @@ NVBIT_PATH=~/nvbit_release_x86_64 bash bench/issue_probe.sh bench/artifacts/<sta
 
 | 文件 | 内容 |
 |---|---|
-| `environment.txt` | 日期/内核/nvcc/nsys/驱动/GPU —— 实验条件 |
-| `manifest.json` | 每个步骤的名字与退出码（**非零不隐藏**，就是给人看的） |
+| `environment.txt` | 日期/内核/nvcc/nsys/驱动/GPU，以及**修订号 + 修订来源 + 是否脏树 + 工具版本** —— 实验条件 |
+| `manifest.json` | 修订号/工具版本 + 每个步骤的名字与退出码（**非零不隐藏**，就是给人看的） |
 | `doctor.json` / `doctor-path-stripped.json` | 工具多路径发现与 ncu 四态结论（只改 PATH 跑两次） |
 | `machine-profile.json` / `.log` | 本机峰值 + 累加口径 + 口径离散度 |
 | `probe-*.log` | 微基准的**解析真值**（`ANALYTIC` 行，不需要 GPU） |
 | `rep-*.txt` / `rep-*.csv` | 各负载的报告文本与 CSV（含 provenance / resolution 列） |
+| `proxy-duration-sweep.csv` | **精度 vs 稳态段长度**：同一个已知答案负载在 1.2/3/8/20 秒各测一遍；`err_pct` 为空 = 该时长下前提不成立、工具**拒绝**给 per-launch（不是精度变差） |
 | `rep-lowduty.*` | 覆盖率不足时的裁决行（必须是 `n/a` + 原因，且 `--strict` = 2） |
 | `shape-sweep.launches.csv` | 每个 launch 一行的形状扫描原始数据 |
 | `occupancy.json` / `occupancy-records.txt` | 达到 occupancy 的区间重叠重建 |
@@ -36,8 +37,19 @@ NVBIT_PATH=~/nvbit_release_x86_64 bash bench/issue_probe.sh bench/artifacts/<sta
 ## 被采纳为"文档数字"的产物
 
 README / PROVENANCE / CALIBRATION 里引用的数字都来自 `bench/artifacts/` 里保留的那一次运行；
-对照关系写在 README 的「数字从哪来」一节。改了工具就要重跑并把新产物一起提交 ——
-数字与产物不一致时，以产物为准。
+对照关系写在 README 的「数字从哪来」一节，每个产物目录的登记见 `bench/artifacts/README.md`。
+改了工具就要重跑并把新产物一起提交 —— 数字与产物不一致时，以产物为准，
+而且 `tests/test_doc_artifact_consistency.py` 会把不一致直接变成失败。
+
+**同步到远端时务必带上修订号。** 租用机器上的仓库常常没有 `.git`，那种情况下
+产物只能写 `revision: n/a`，事后没人能判断它由哪一版代码产生。做法是同步后写一个文件：
+
+```bash
+git rev-parse HEAD > REVISION      # 远端仓库根目录
+```
+
+`run.sh` 按 `KS_REVISION` → `.git` → `REVISION` 的顺序取修订号，并把**来源**与
+**是否脏树**一起记进产物；三者都没有时明确告警，绝不冒充"已钉住"。
 
 ## 两个必须知道的坑（都真机上踩过）
 
@@ -51,8 +63,8 @@ README / PROVENANCE / CALIBRATION 里引用的数字都来自 `bench/artifacts/`
    一条记录 = 一条 warp 访存指令（≤128 B 流量），而插桩**不区分预热**：
    一个 80 MB 工作集 + 默认 50 次预热能写出 **10 GB** 的文本（真事，把磁盘写满过一次）。
    采轨迹时用小负载 + `--warmup 2`，采完立刻分析、只留分析产物。
-   实测产物的体积对比（同一次运行）：默认 JSON 147 MB vs
-   `--ks-json-no-launches -c 50` 15.6 KB。
+   实测产物的体积对比（同一次运行）见 `size-comparison.csv`（默认 JSON 与
+   `--ks-json-no-launches -c 50` 各一行，单位是字节）。
 
 ## 入库前脱敏
 

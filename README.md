@@ -196,25 +196,43 @@ bytes ≈ Σ_i ( 显存忙碌_i / 100 × Δt_i ) × 本机实测峰值带宽
 **口径纪律**（不一起报出来就是过度声称）：
 
 - 报告里必然出现 `ks__sampler_window_coverage_pct`（窗口是否被被测负载主导，`derived`）
-  与 `meas__nvml_mem_busy_mean_pct`（NVML 显存忙碌读数，`measured`，分辨率 **1 个百分点**、
-  采样周期 **200 ms**）。这两个量以前共用一个名字，现在分开 —— 它们回答的是两件不同的事。
-- 覆盖率 < 80% → **不给 per-launch 归因**；< 50% → 连总量也不给。
+  与 `ks__dram_window_mem_busy_mean_pct`（**参与估算的**窗口显存忙碌均值，`derived`，
+  分辨率 **1 个百分点**、采样周期 **200 ms**）。整进程的 NVML 均值另见
+  `meas__nvml_mem_busy_mean_pct` —— 它是**另一个数**（含启动/空闲），两者不可互换。
+- **per-launch 归因有两个前提，不是一个**：
+  - 前提① `ks__sampler_window_coverage_pct ≥ 80%`：GPU 在不在干活；< 50% 连总量也不给；
+  - 前提② `ks__matched_kernel_kernel_share_pct ≥ 95%`：**被 `-k` 选中的那个 kernel 是不是主角**
+    （它占窗口内全部 kernel GPU 时间的比例）。空闲时段贡献 0 字节，所以分母用内核时间、
+    不是墙钟；`ks__matched_kernel_window_share_pct` 是与覆盖率同量纲的对照量。
+  - 只有前提①时，一个窗口里**顺序跑了多个 kernel/变体**的负载会被判成"可归因"，
+    把整窗口字节除到某个 kernel 的 launch 数上，误差可达 **+147%**（真机实测）。
+    `ks__attribution_bias_estimate_pct = 100×(1/份额−1)` 把这个上偏**算出来**并跟数字并列。
+    95% 这个门槛是从验收线反推的：份额 80% 仍自带 +25% 的偏差，守不住 `|误差|<10%`。
+  - 门槛是**代理**（假设各 kernel 字节强度可比）而不是严格上界，实测值可能更高。
+    混合强度的窗口（计算密集 + 访存密集混跑）只认**轨迹口径**：访存轨迹只测被追踪的
+    那个 kernel，天然不受窗口里还有谁影响。`ks__window_busy_segments` 会告诉你窗口里有
+    几段连续忙碌期 —— 多段通常意味着"先跑正确性再跑性能"或"依次跑 v1/v2/v3"这类拼接。
 - 显存忙碌读数低于分辨率下限（例如 0.0%）→ 不给字节数，并写明
   "无法区分『真的没搬』与『0.x% 被截断成 0』"。
+- 一次采样都没有时，前提行也是 `n/a`（报"0%"等于声称量过）。
 - 拒绝时那一行**照样出现**（`n/a` + 具体失败前提），不会从报告里消失；
   `--strict` 会因此 exit 2。
 - 默认 `--ks-window auto`：按首个/末个忙碌采样点裁掉 `import torch`/JIT 的启动开销
   （实测这类启动开销 9–10 秒，会把覆盖率稀释到 15%）。`--ks-window full` 可关闭，
   `--ks-warmup <秒>` / `--ks-window-s <秒>` 可显式限定。
+- `-c/--launch-count` 只限制**展示**：per-launch 的分母始终是该 kernel 在本次运行里的真实
+  launch 数（分母被截断会带来同样的倍数级误差）。
 - 账本对拍**同基比较**：`--ks-ledger-mb` 是"每次 launch"，`--ks-ledger-total-mb` 是整窗口；
   区间 `--ks-ledger-range-mb` **永远按 per-launch**（拿整窗口总量去比一个 per-launch 区间是荒谬的）。
-- `--ks-ledger-basis auto|nvml|trace`：NVML 代理口径不成立时（覆盖率不足、或显存忙碌读数为 0）
-  **自动改用访存轨迹口径**的 per-launch 字节完成对拍；显式指定 `nvml`/`trace` 时不做回退。
+- `--ks-ledger-basis auto|nvml|trace`：NVML 代理口径不成立时（覆盖率不足、主导性不足、
+  或显存忙碌读数为 0）**自动改用访存轨迹口径**的 per-launch 字节完成对拍；
+  显式指定 `nvml`/`trace` 时不做回退。
 
 ```bash
+# 引用 est__dram_* 之前先看三个数：覆盖率、窗口主导性、分辨率下限
 kernoscope --set basic --ks-calibration machine-profile.json \
            --ks-ledger-mb 234 -k regex:my_kernel -o rep -- ./my_bench
-kernoscope -i rep.ksreport.json --csv | grep -E 'ledger|window_coverage|mem_busy'
+kernoscope -i rep.ksreport.json --csv | grep -E 'ledger|window_coverage|share|mem_busy'
 ```
 
 ### 代理精度实测（字节数已知的微基准）
@@ -383,22 +401,29 @@ bash bench/run.sh              # 全量（约 10 分钟 GPU 时间）
 bash bench/run.sh --quick      # 快速版
 ```
 
-`bench/run.sh` 会做：环境快照 → `doctor` → 本机标定 → 编译已知答案微基准 →
-DRAM 代理精度 → 账本对拍 → **覆盖率不足时的裁决行** → 形状扫描 → occupancy 探针 →
-访存轨迹口径对拍；每步的退出码写进产物目录的 `manifest.json`，产物是机器可读文件
-（不是往 README 里手抄数字）。
+`bench/run.sh` 会做：环境快照（**修订号 + 来源 + 是否脏树 + 工具版本**）→ `doctor` →
+本机标定 → 编译已知答案微基准 → DRAM 代理精度 → **代理精度 vs 稳态段长度** →
+账本对拍 → **覆盖率不足时的裁决行** → 形状扫描 → occupancy 探针 →
+访存轨迹口径对拍 → 发射槽上界；每步的退出码写进产物目录的 `manifest.json`，
+产物是机器可读文件（不是往 README 里手抄数字），最后一步自动脱敏。
+
+`tests/test_doc_artifact_consistency.py` 把「文档数字 ↔ 产物」变成门禁：文档里公开的
+每个实测数字都要能在最新产物里找到同一写法，产物必须钉住修订号与工具版本，
+文档引用的每个产物目录都必须存在。数字一变、文档没跟着变，测试直接红。
 
 | 本文引用的数字 | 产物 |
 |---|---|
-| bf16 169.0 / fp32 57.3 TFLOP/s、copy 909.2 GB/s、口径离散度 | `bench/artifacts/*/machine-profile.json` |
-| 代理误差 +9.4% / −4.3% / +12.7%，覆盖率 95.2% | `bench/artifacts/*/rep-{copy,read,write}.txt` 与 `.csv` |
-| 覆盖率 25% ⇒ 裁决行 `n/a` 且 `--strict` = 2 | `bench/artifacts/*/rep-lowduty.txt`、`manifest.json` |
+| bf16 / fp32 TFLOP/s、copy 带宽、口径离散度与逐变体设置 | `bench/artifacts/*/machine-profile.json` |
+| 代理误差与覆盖率（三个已知答案微基准） | `bench/artifacts/*/rep-{copy,read,write}.txt` 与 `.csv` |
+| **精度 vs 稳态段长度**（1.2/3/8/20 秒四个点） | `bench/artifacts/*/proxy-duration-sweep.csv` |
+| 覆盖率不足 ⇒ 裁决行 `n/a` 且 `--strict` = 2 | `bench/artifacts/*/rep-lowduty.txt`、`manifest.json` |
 | 形状扫描三组配置的逐组时长 | `bench/artifacts/*/rep-shape.txt`、`shape-sweep.launches.csv` |
-| occupancy 11.27 → 93.9% / 2.99 → 24.9% | `bench/artifacts/*/occupancy.json`、`occupancy-smem32k.json` |
-| 报告体积 134 MB vs 15.5 KB | `bench/artifacts/*/size-comparison.csv` |
-| 发射槽 2.0% / 84.8% 与两个方向的判词 | `bench/artifacts/*/rep-issue-*.txt` |
-| 轨迹口径 −66.7%（L2 命中 66.7%） | `bench/artifacts/*/rep-tracebasis.txt`、`memtrace.json` |
+| occupancy 探针两组读数 | `bench/artifacts/*/occupancy.json`、`occupancy-smem32k.json` |
+| 报告体积对比 | `bench/artifacts/*/size-comparison.csv` |
+| 发射槽利用率与两个方向的判词 | `bench/artifacts/*/rep-issue-*.txt` |
+| 轨迹口径对拍与 L2 命中率 | `bench/artifacts/*/rep-tracebasis.txt`、`memtrace.json` |
 | doctor 的 ncu 四态结论 | `bench/artifacts/*/doctor.json`、`doctor-path-stripped.json` |
+| 每份产物是哪个修订产生的 | `bench/artifacts/*/environment.txt`、`manifest.json` |
 
 `bench/issue_probe.sh` 另采发射槽上界的产物（需要 NVBit）。
 
