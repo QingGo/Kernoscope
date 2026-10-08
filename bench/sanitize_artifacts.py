@@ -47,7 +47,12 @@ def path_rules(repo_path: Path | None) -> list[tuple[re.Pattern[str], str]]:
 
 
 def hostnames(root: Path) -> list[str]:
-    """从 environment.txt 的 `host:` 行取真实主机名（连同短名一起替换）。"""
+    """从 environment.txt 的 `host:` 行取真实主机名（连同短名一起替换）。
+
+    已经脱敏过的产物里这一行是占位符（`host: <host>`）。**不能把占位符当主机名** ——
+    否则脚本会不停地"用 <host> 替换 <host>"，`--check` 永远报"需要脱敏"，
+    这个门禁就再也不能用来判断"产物到底干净没有"。
+    """
     out: list[str] = []
     envs = [root / "environment.txt", *sorted(root.glob("*/environment.txt"))]
     for env in envs:
@@ -56,7 +61,9 @@ def hostnames(root: Path) -> list[str]:
         for line in env.read_text(errors="replace").splitlines():
             if line.startswith("host:"):
                 h = line.split(":", 1)[1].strip()
-                if h and h not in out:
+                if not h or h.startswith("<"):
+                    continue
+                if h not in out:
                     out.append(h)
                     if h.split(".")[0] not in out:
                         out.append(h.split(".")[0])
@@ -70,7 +77,8 @@ def sanitize_text(text: str, hosts: list[str], fake_host: str,
         text, k = pat.subn(repl, text)
         n += k
     for h in hosts:
-        if len(h) >= 6:
+        # 占位符自己不能被当成待替换的主机名（否则计数永远非零）
+        if len(h) >= 6 and h != fake_host:
             text, k = re.subn(re.escape(h), fake_host, text)
             n += k
     return text, n

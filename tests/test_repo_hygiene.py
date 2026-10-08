@@ -69,3 +69,41 @@ def test_tracked_files_have_no_platform_identity():
             if rx.search(text):
                 offenders.append(f"{f}: {rx.pattern}")
     assert not offenders, "以下入库文件里出现了平台身份信息：" + "; ".join(offenders)
+
+
+def test_sanitizer_check_is_green_on_already_sanitized_artifacts(tmp_path):
+    """脱敏门禁必须是**可绿的**。
+
+    从前的实现从 `environment.txt` 的 `host:` 行取"真实主机名"，而脱敏过的产物里
+    这一行就是占位符本身 —— 于是脚本永远在"用 <host> 替换 <host>"，
+    `--check` 每次都说"需要脱敏 2 个文件"。一个永远红的门禁等于没有门禁：
+    它既不能证明产物干净，也会让人习惯性忽略它。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ks_sanitize", Path(__file__).resolve().parents[1] / "bench" / "sanitize_artifacts.py")
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    art = tmp_path / "20260101-000000"
+    art.mkdir()
+    (art / "environment.txt").write_text(
+        "date: 2026-01-01T00:00:00+08:00\n"
+        "host: <host>\n"
+        "uname: Linux <host> 5.15.0 x86_64\n", encoding="utf-8")
+
+    assert mod.hostnames(art) == [], "占位符不能被当成真实主机名"
+    text, n = mod.sanitize_text(art.joinpath("environment.txt").read_text(),
+                               mod.hostnames(art), "<host>", [])
+    assert n == 0, "已经脱敏过的文本不应再有替换"
+
+    # 真名在的时候仍然要能替换（别把功能一起修没了）
+    art2 = tmp_path / "20260101-000001"
+    art2.mkdir()
+    (art2 / "environment.txt").write_text("host: gpu-box-7f3a21\n", encoding="utf-8")
+    hosts = mod.hostnames(art2)
+    assert hosts and hosts[0] == "gpu-box-7f3a21"
+    _new, k = mod.sanitize_text("host: gpu-box-7f3a21\n", hosts, "<host>", [])
+    assert k >= 1
