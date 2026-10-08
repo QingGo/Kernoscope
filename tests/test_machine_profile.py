@@ -186,3 +186,95 @@ def test_variants_restore_precision_settings(monkeypatch):
         restore()
     assert M.allow_fp16_reduced_precision_reduction is True
     assert M.fp32_precision == "none"
+
+
+def test_headline_tflops_is_reproducible_from_a_variant(monkeypatch):
+    """R-37 的负样本：产物必须内部自洽。
+
+    真机产物实测的不自洽：fp16 的 `tflops` 是 167.4，而同一尺寸下的三个口径变体是
+    145.5/163.2/163.3 —— headline **不等于任何一个变体**，且 `precision_settings` 记的是
+    `fp32_precision="ieee"`（对应 fp32_ieee 变体），读者无法复现这个头条数字。
+    """
+    class T:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def empty_cache():
+                pass
+
+        bfloat16s = "bf16"
+        bfloat16, float16, float32 = "bf16", "fp16", "fp32"
+        __version__ = "2.12.1"
+
+        class backends:
+            class cuda:
+                class matmul:
+                    allow_fp16_reduced_precision_reduction = True
+                    fp32_precision = "none"
+                    allow_tf32 = True
+
+        @staticmethod
+        def randn(*a, **k):
+            return _Arr()
+
+    mod = _load_module()
+    monkeypatch.setattr(mod, "torch", T)
+    # 每次调用返回不同的耗时 → 三个变体给出三个不同的读数（模拟真实离散）
+    seq = iter([(0.0200, 0.0), (0.0080, 0.0), (0.0180, 0.0), (0.0175, 0.0),
+                (0.0090, 0.0), (0.0069, 0.0)])
+    monkeypatch.setattr(mod, "timeit", lambda fn, reps=3, warmup=2: next(seq))
+
+    entry = mod.matmul_peak([4096], [mod.torch.bfloat16], caliber_probe=True, reps=3)["bf16"]
+    variants = entry["caliber_variants_tflops"]
+    assert len(variants) == 3
+    # ① 头条必须等于某个变体的读数（同尺寸、同方法、同 reps）
+    assert entry["tflops"] == pytest.approx(max(variants.values())), \
+        "headline 必须能对应到一次具体测量"
+    assert entry["tflops_protocol"] in variants
+    assert entry["tflops_is_variant_reading"] is True
+    # ② 每个变体带自己的 precision_settings（_settings 不允许被丢弃）
+    settings = entry["caliber_variant_settings"]
+    assert set(settings) == set(variants), "_settings 不能被丢弃"
+    assert settings["fp32_ieee"]["fp32_precision"] == "ieee"
+    assert settings["default"]["fp32_precision"] == "none"
+    assert settings["reduced_precision_reduction_off"][
+        "allow_fp16_reduced_precision_reduction"] is False
+    # ③ 头条的 precision_settings 就是胜出变体的设置，不是事后的快照
+    assert entry["precision_settings"] == settings[entry["tflops_protocol"]]
+    # ④ 离散度只在同一协议之间比较 → 探针尺寸必须被记录下来
+    assert entry["caliber_probe_size"] == 4096
+
+
+def test_headline_falls_back_to_sweep_without_caliber_probe(monkeypatch):
+    """跳过口径探针时也要说清头条来自哪儿（不能留下一个来历不明的 tflops）。"""
+    class T:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def empty_cache():
+                pass
+
+        bfloat16, float16, float32 = "bf16", "fp16", "fp32"
+        __version__ = "2.12.1"
+        backends = type("B", (), {"cuda": type("C", (), {"matmul": type(
+            "M", (), {"allow_fp16_reduced_precision_reduction": True,
+                      "fp32_precision": "none", "allow_tf32": True})})})
+
+        @staticmethod
+        def randn(*a, **k):
+            return _Arr()
+
+    mod = _load_module()
+    monkeypatch.setattr(mod, "torch", T)
+    monkeypatch.setattr(mod, "timeit", lambda fn, reps=3, warmup=2: (0.00664, 0.007))
+    entry = mod.matmul_peak([4096], [mod.torch.bfloat16], caliber_probe=False)["bf16"]
+    assert entry["caliber_variants_tflops"] == {}
+    assert entry["tflops_protocol"] == "sweep-default"
+    assert entry["tflops_is_variant_reading"] is False
+    assert entry["tflops"] > 0 and entry["size"] == 4096

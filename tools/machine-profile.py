@@ -285,17 +285,26 @@ def matmul_peak(sizes, dtypes, caliber_probe=True, reps=3):
             torch.cuda.empty_cache()
 
         # ---- 口径探针：同一尺寸、三种设置各测一遍 ----
+        # R-37：头条读数必须**能对应到一次具体的测量**。所以这里不只记离散度，
+        # 还记下每个变体自己的 precision_settings；头条则取「变体里最快的那一个」，
+        # 并明确写出它是哪个协议 —— 否则产物会出现「headline 不等于任何变体」
+        # （真机产物实测：fp16 headline 167.4，三个变体是 145.5/163.2/163.3）。
         spread = None
         distinguishable = None
+        variant_ms: dict[str, float] = {}
+        variant_settings: dict[str, dict] = {}
+        probe_size = None
         if caliber_probe and best_cfg:
-            size = best_cfg["size"]
-            a = torch.randn(size, size, device="cuda", dtype=dt)
-            b = torch.randn(size, size, device="cuda", dtype=dt)
+            probe_size = best_cfg["size"]
+            a = torch.randn(probe_size, probe_size, device="cuda", dtype=dt)
+            b = torch.randn(probe_size, probe_size, device="cuda", dtype=dt)
             try:
-                for name, restore, _settings in _variants():
+                for name, restore, settings in _variants():
+                    variant_settings[name] = dict(settings)
                     try:
                         t, _ = timeit(lambda: a @ b, reps=reps, warmup=2)
-                        variant_tflops[name] = round(2.0 * size ** 3 / t / 1e12, 1)
+                        variant_tflops[name] = round(2.0 * probe_size ** 3 / t / 1e12, 1)
+                        variant_ms[name] = round(t * 1e3, 4)
                     except Exception as e:
                         print(f"  {dt} 口径探针 {name} 失败: {e}")
                     finally:
@@ -305,24 +314,45 @@ def matmul_peak(sizes, dtypes, caliber_probe=True, reps=3):
                 torch.cuda.empty_cache()
             vals = [v for v in variant_tflops.values() if v]
             if len(vals) >= 2:
+                # 三个变体是**同一尺寸、同一方法、同一 reps** 下测的，所以离散度只在
+                # 同协议之间比较（R-37）。
                 spread = round(100.0 * (max(vals) - min(vals)) / max(vals), 1)
                 distinguishable = spread >= 2.0
                 print(f"  -> {dt} 口径探针: {variant_tflops}  最大相对差 {spread}% "
                       f"=> {'可分辨' if distinguishable else '不可分辨'}")
-            # 用探针中最好的一次作为该 dtype 的读数（与 default 一致时数值不变）
-            if vals:
-                best = max(best, max(vals))
 
-        entry = {"tflops": round(best, 1), **(best_cfg or {}),
+        # ---- 头条读数：口径探针可用时由变体里最快的那次给出（可复现），否则用扫频值 ----
+        if variant_tflops:
+            protocol = max(variant_tflops, key=lambda k: variant_tflops[k])
+            headline_tflops = variant_tflops[protocol]
+            headline_size = probe_size
+            headline_ms = variant_ms.get(protocol)
+            headline_settings = variant_settings.get(protocol, {})
+        else:
+            protocol = "sweep-default"
+            headline_tflops = round(best, 1)
+            headline_size = (best_cfg or {}).get("size")
+            headline_ms = (best_cfg or {}).get("ms")
+            headline_settings = _precision_settings_snapshot()
+
+        entry = {"tflops": headline_tflops,
+                 "size": headline_size,
+                 "ms": headline_ms,
                  "acc_caliber": _caliber_name(dt),
-                 "precision_settings": _precision_settings_snapshot(),
+                 "precision_settings": headline_settings,
+                 "tflops_protocol": protocol,
+                 "tflops_is_variant_reading": bool(variant_tflops),
                  "method": f"torch.matmul, {reps} iters best-of, size sweep {list(sizes)}",
                  "caliber_variants_tflops": variant_tflops,
+                 "caliber_variant_settings": variant_settings,
+                 "caliber_probe_size": probe_size,
+                 "caliber_probe_method": (f"torch.matmul, {reps} iters best-of, 同一尺寸 "
+                                          f"{probe_size}" if probe_size else ""),
                  "caliber_spread_pct": spread,
                  "caliber_distinguishable": distinguishable}
         out[str(dt)] = entry
-        print(f"  -> {dt} 最好: {best:.1f} TFLOP/s  @ {best_cfg}  "
-              f"(口径离散 {spread}% / 可分辨={distinguishable})")
+        print(f"  -> {dt} 最好: {headline_tflops:.1f} TFLOP/s  @ size={headline_size} "
+              f"协议={protocol} (口径离散 {spread}% / 可分辨={distinguishable})")
     return out
 
 
