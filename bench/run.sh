@@ -43,17 +43,56 @@ declare -a STEPS=()
 record() { STEPS+=("$1 rc=$2"); echo "[bench] $1 -> rc=$2"; }
 
 echo "== bench: 环境快照 =="
+# R-40：产物必须钉住「自己是哪个修订产生的」。仓库常常以不带 .git 的方式同步到租用
+# 机器上，那种情况下 `git rev-parse` 会失败、产物只能写 git: n/a，于是没人能判断它由
+# 哪一版代码产生。所以按下面的顺序找修订，并且**把来源一起记下来**：
+#   1) KS_REVISION 环境变量（CI 显式传入）
+#   2) 仓库里的 .git
+#   3) 仓库根的 REVISION 文件（同步脚本写进去的）
+#   4) 都找不到 → 明确写 n/a，来源记 none，绝不冒充「已钉住」
+REVISION="${KS_REVISION:-}"
+REVISION_SOURCE="env:KS_REVISION"
+if [[ -z "$REVISION" ]] && git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
+  REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+  REVISION_SOURCE="git"
+fi
+if [[ -z "$REVISION" ]] && [[ -f "$ROOT/REVISION" ]]; then
+  REVISION="$(head -1 "$ROOT/REVISION" | tr -d '[:space:]')"
+  REVISION_SOURCE="file:REVISION"
+fi
+if [[ -z "$REVISION" ]]; then
+  REVISION="n/a"
+  REVISION_SOURCE="none"
+fi
+# 修订号只说明"基于哪个提交"，不说明"有没有未提交改动" —— 后者同样致命，
+# 所以一起记下来（没有 .git 时无法判断，如实写 unknown）。
+REVISION_DIRTY="unknown"
+if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
+  if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+    REVISION_DIRTY="yes"
+  else
+    REVISION_DIRTY="no"
+  fi
+fi
+KS_VERSION="$(KSC --version 2>/dev/null || echo 'n/a')"
 {
   echo "date: $(date -Is)"
   echo "host: $(hostname)"
   echo "uname: $(uname -a)"
-  echo "git: $(git rev-parse HEAD 2>/dev/null || echo 'n/a')"
+  echo "revision: $REVISION"
+  echo "revision_source: $REVISION_SOURCE"
+  echo "revision_dirty: $REVISION_DIRTY"
+  echo "kernoscope: $KS_VERSION"
   echo "python: $($PY -V 2>&1)"
   echo "nvcc: $($NVCC --version 2>/dev/null | tail -1)"
   echo "nsys: $($NSYS --version 2>/dev/null | tail -1)"
   echo "nvidia-smi: $(nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null)"
 } > "$HOSTDIR/environment.txt" 2>&1
 cat "$HOSTDIR/environment.txt"
+if [[ "$REVISION_SOURCE" == "none" ]]; then
+  echo "[bench] warn: 找不到修订号（没有 .git 也没有 REVISION 文件）—— 产物无法钉住版本。" \
+       "同步仓库时请执行：git rev-parse HEAD > REVISION" | tee -a "$HOSTDIR/environment.txt"
+fi
 
 # ---------------------------------------------------------------- 0) doctor
 echo "== 0) doctor（工具多路径发现 + 计数器四态）=="
@@ -253,6 +292,10 @@ record sanitize $?
 {
   echo "{"
   echo "  \"stamp\": \"$STAMP\","
+  echo "  \"revision\": \"$REVISION\","
+  echo "  \"revision_source\": \"$REVISION_SOURCE\","
+  echo "  \"revision_dirty\": \"$REVISION_DIRTY\","
+  echo "  \"kernoscope\": \"$KS_VERSION\","
   echo "  \"quick\": $QUICK,"
   echo "  \"target_big_s\": \"$TARGET_BIG\", \"target_mid_s\": \"$TARGET_MID\", \"mb\": $MB,"
   echo "  \"steps\": ["
