@@ -145,8 +145,9 @@ def build_device_kernel(opt: BuildOptions) -> Section:
                                   note="ncu 不提供能耗指标", resolution="1 mJ"))
     if not s.metrics:
         s.add(Metric.unavailable("meas__nvml_mem_busy_mean_pct",
-                                 "没有 NVML 采样点：采样被关闭（--ks-no-nvml）或 nvidia-smi/pynvml "
-                                 "不可用；没有它就无法给出显存忙碌代理",
+                                 "没有 NVML 采样点：采样被关闭（--ks-no-nvml）、"
+                                 "nvidia-smi/pynvml 不可用，或稳态段短于一个采样周期（200 ms）；"
+                                 "没有它就无法给出显存忙碌代理",
                                  source="NVML", code=RefusalCode.NO_NVML_SAMPLES))
     return s
 

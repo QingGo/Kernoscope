@@ -242,8 +242,13 @@ class DramEstimate:
         if self.n_samples <= 0:
             out.append(Refusal(
                 RefusalCode.NO_NVML_SAMPLES,
-                "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）",
-                observed={"nvml_samples": self.n_samples}))
+                "没有 NVML 采样点：采样被 --ks-no-nvml 关掉、采样器不可用，"
+                "或这次运行的稳态段不足一个采样周期（200 ms）",
+                observed={"nvml_samples": self.n_samples},
+                remedy=Remedy("确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段"
+                              "跑长到至少几个采样周期（每个 200 ms）",
+                              command="kernoscope --ks-window auto -- python bench_loop.py",
+                              cost_s=20.0, then_answers=("dram_bytes", "device_busy"))))
         if self.peak_missing:
             out.append(Refusal(
                 RefusalCode.NO_CALIBRATION,
@@ -366,7 +371,8 @@ class DramEstimate:
         if name in ("ks__dram_window_mem_busy_mean_pct", "ks__window_busy_segments"):
             return Refusal(
                 RefusalCode.NO_NVML_SAMPLES,
-                "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：窗口内统计量无定义",
+                "没有 NVML 采样点（采样被关掉／不可用／稳态段短于一个 200 ms 采样周期）："
+                "窗口内统计量无定义",
                 observed={"nvml_samples": self.n_samples})
         return Refusal(RefusalCode.INTERNAL_UNKNOWN, "；".join(self.notes) or "无法估算")
 
