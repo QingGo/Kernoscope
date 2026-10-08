@@ -53,6 +53,18 @@ uv sync && uv run kernoscope --help
 依赖：Python ≥ 3.10。运行需要 `nsys`（随 CUDA ≥ 11.1 提供）与 `nvidia-smi`；
 `cuobjdump` 与 `pynvml` 为可选（分别用于静态资源与能耗）。
 
+> 网络提示：`uv` **不继承 `pip.conf`**，会直连 PyPI。若你的网络访问 PyPI 很慢，
+> 给 uv 单独配镜像，否则 `uv sync` 可能只是"看起来卡住"：
+> ```bash
+> mkdir -p ~/.config/uv && cat > ~/.config/uv/uv.toml <<'TOML'
+> [[index]]
+> url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+> default = true
+> TOML
+> ```
+> 实测（某国内 GPU 实例）：PyPI 直连 0.1 MB/s、某镜像 0.1 MB/s、TUNA 7.6 MB/s ——
+> 配好之后 `uv sync` 从"分钟级卡住"变成 4 秒。
+
 ---
 
 ## 快速开始
