@@ -409,6 +409,12 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                     "同上：compute roof 不可用，无法判定 compute/memory bound"))
             s.add(Metric.estimated("est__arithmetic_intensity", round(sol.arithmetic_intensity, 2),
                                    "FLOP/B", source="user-provided workload"))
+            # R-38：达成值 > 标定峰值是物理上不可能的，必须显式报红灯，
+            # 而不是让它安静地变成一个"看起来更漂亮"的百分比。
+            if sol.over_peak:
+                s.add(Metric.derived("ks__over_peak_warning", 1.0, "",
+                                     source="achieved > measured peak（roofline 一致性守卫）",
+                                     note=sol.over_peak_note()))
         else:
             s.add(Metric.unavailable(
                 "est__achieved_tflops",
@@ -499,9 +505,12 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                 out.append(sec)
 
     # ---------------- 明确不可得的 section ----------------
+    # 已经用别的数据源产出过的同名 section 不再补一个只有 n/a 的孪生体（R-43 的前置：
+    # 同一个 section 名出现两次，会让"这个 section 到底有没有数据"变得不可判定）。
+    already = {s.name for s in out}
     for name in requested_sections(opt):
         reason = COUNTER_SECTIONS.get(name)
-        if reason:
+        if reason and name not in already:
             sec = Section(name)
             sec.add(Metric.unavailable(f"ks__{name.lower()}_status", reason))
             out.append(sec)

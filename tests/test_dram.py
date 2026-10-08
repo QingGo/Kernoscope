@@ -24,6 +24,15 @@ def _samples(n=10, mem=100.0, sm=80.0, dt=0.2):
                          sm_clock_mhz=2500.0, power_w=300.0) for i in range(n)]
 
 
+def _dominant(window_s: float = 2.0) -> int:
+    """被匹配 kernel 独占窗口时它的 GPU 时间（ns）——R-46 的第二个前提。
+
+    这些用例本来就是「单一 kernel 独占窗口」的场景，所以要显式把这个前提喂进去：
+    R-46 之后，缺少它的估算**不再**给 per-launch 数字（这正是验收报告 D1 的修法）。
+    """
+    return int(round(window_s * 1e9))
+
+
 def _by_name(est, basis="auto"):
     sec = build_dram_section(BuildOptions(dram=est, ledger_basis=basis))
     return {m.name: m for m in sec.metrics}
@@ -42,7 +51,8 @@ def test_estimate_bytes_duty_throughput():
 def test_per_launch_requires_launch_count():
     est = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=0)
     assert est.bytes_per_launch is None
-    est2 = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100)
+    est2 = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
+                    matched_kernel_ns=_dominant())
     assert est2.bytes_per_launch == pytest.approx(est.bytes_total / 100)
     assert est2.attributable, "满覆盖 + 单一 kernel → 可归因"
 
@@ -145,7 +155,7 @@ def test_missing_peak_bandwidth_marks_unreliable():
 def test_ledger_error_and_range_verdict():
     # per-launch 账本：总量 1.8e12 B / 100 launches = 1.8e10；账本 1.5e10 → +20%
     est = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
-                   ledger_per_launch=1.5e10)
+                   ledger_per_launch=1.5e10, matched_kernel_ns=_dominant())
     assert est.ledger_basis == "per-launch"
     assert est.ledger_err_pct == pytest.approx(20.0)
     assert est.basis_label("auto") == "NVML 代理 per-launch"
@@ -159,17 +169,17 @@ def test_ledger_error_and_range_verdict():
     # 通用场景：账本给的是 per-launch 区间（下界=理想流量，上界=重读全回 HBM）
     low, high = 1.6e10, 2.0e10
     near_low = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
-                        ledger_range=(low, high))
+                        ledger_range=(low, high), matched_kernel_ns=_dominant())
     near_low.bytes_per_launch = low + 0.1 * (high - low)
     assert near_low.range_verdict == "落在区间靠下界侧"
 
     above = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
-                     ledger_range=(low, high))
+                     ledger_range=(low, high), matched_kernel_ns=_dominant())
     above.bytes_per_launch = high * 1.5
     assert "高于上界" in above.range_verdict
 
     below = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
-                     ledger_range=(low, high))
+                     ledger_range=(low, high), matched_kernel_ns=_dominant())
     below.bytes_per_launch = low * 0.5
     assert "低于下界" in below.range_verdict
 
@@ -177,7 +187,7 @@ def test_ledger_error_and_range_verdict():
 def test_range_verdict_is_also_a_metric():
     """R-05：判词必须出现在输出里（不只是 % 位置），且标注口径。"""
     est = estimate(_samples(), peak_gbs=900.0, window_s=2.0, launches=100,
-                   ledger_range=(1.0e10, 2.0e10))
+                   ledger_range=(1.0e10, 2.0e10), matched_kernel_ns=_dominant())
     est.bytes_per_launch = 1.05e10
     names = _by_name(est)
     verdict = names["ks__ledger_range_verdict"]
@@ -191,7 +201,7 @@ def test_per_launch_ledger_is_compared_against_per_launch_not_window_total():
     结果误差算成 +1.9e6%，看着像账本错，其实是口径错。对拍必须同基。
     """
     est = estimate(_samples(10), peak_gbs=907.0, window_s=2.0, launches=1000,
-                   ledger_per_launch=1073.7e6)
+                   ledger_per_launch=1073.7e6, matched_kernel_ns=_dominant())
     assert est.ledger_basis == "per-launch"
     assert est.ledger_err_pct is not None
     assert abs(est.ledger_err_pct) < 200, "同基比较下不可能是百万级百分比"
@@ -252,7 +262,8 @@ def test_window_auto_trim_removes_startup_overhead():
     samples += [DeviceSample(t=(40 + i) * 0.2, mem_util_pct=95.0, sm_util_pct=99.0,
                              sm_clock_mhz=2500.0, power_w=300.0) for i in range(4)]
     full = estimate(samples, peak_gbs=900.0, window_s=8.8, launches=100, window_mode="full")
-    auto = estimate(samples, peak_gbs=900.0, window_s=8.8, launches=100, window_mode="auto")
+    auto = estimate(samples, peak_gbs=900.0, window_s=8.8, launches=100, window_mode="auto",
+                    matched_kernel_ns=int(round(0.8e9)))
     assert full.window_coverage_pct < DUTY_UNUSABLE
     assert not full.reliable
     assert auto.window_coverage_pct >= DUTY_WEAK, "裁剪后应能给出 per-launch 归因"
@@ -312,7 +323,8 @@ class _FakeSampler:
 
     def __init__(self, interval_s: float = 0.2, enabled: bool = True):
         self.result = SamplerResult(source="fake")
-        self.result.samples = _samples(12, mem=96.8, sm=99.0)
+        # enabled 必须被尊重：--ks-no-nvml 时采样器就是要交白卷
+        self.result.samples = _samples(12, mem=96.8, sm=99.0) if enabled else []
         self.result.duration_s = 2.4
 
     def __enter__(self):
@@ -322,8 +334,48 @@ class _FakeSampler:
         return False
 
 
+def _coherent_launches(window_s: float = 2.4, n_gemm: int = 5, n_elem: int = 20,
+                       n_other: int = 0, other_ns: int = 400_000_000):
+    """与 _FakeSampler 的窗口自洽的合成 launch 表。
+
+    R-46 之后 per-launch 归因要看「被匹配 kernel 占窗口多少」，所以替身数据必须自洽：
+    被匹配的 kernel 要真的把窗口占满（否则估算本来就应该被拒绝）。n_other>0 时额外塞入
+    别的 kernel，用来构造 D1 那种「窗口里顺序跑了多个 kernel」的场景。
+    """
+    from kernoscope.report import KernelLaunch
+
+    launches = []
+    t = 1_000_000_000
+    per = int(window_s * 1e9 / max(1, n_gemm))
+    for i in range(n_gemm):
+        launches.append(KernelLaunch(
+            name="synthetic_gemm", demangled="synthetic_gemm(float const*, float const*, float*)",
+            start_ns=t, end_ns=t + per, grid=(1048576, 1, 1), block=(256, 1, 1),
+            registers_per_thread=96, static_smem_bytes=0, dynamic_smem_bytes=49152,
+            local_mem_per_thread=0, stream_id=7, device_id=0, grid_id=0, correlation_id=i))
+        t += per
+    for i in range(n_elem):
+        launches.append(KernelLaunch(
+            name="synthetic_elementwise", demangled="synthetic_elementwise(float*)",
+            start_ns=t, end_ns=t + 8_400, grid=(16384, 1, 1), block=(256, 1, 1),
+            registers_per_thread=16, static_smem_bytes=0, dynamic_smem_bytes=0,
+            local_mem_per_thread=0, stream_id=7, device_id=0, grid_id=0,
+            correlation_id=100 + i))
+        t += 20_000
+    for i in range(n_other):
+        launches.append(KernelLaunch(
+            name="synthetic_other", demangled="synthetic_other(float*)",
+            start_ns=t, end_ns=t + other_ns, grid=(4096, 1, 1), block=(256, 1, 1),
+            registers_per_thread=32, static_smem_bytes=0, dynamic_smem_bytes=0,
+            local_mem_per_thread=0, stream_id=7, device_id=0, grid_id=0,
+            correlation_id=200 + i))
+        t += other_ns
+    return launches
+
+
 def test_cli_reports_dram_summary_and_ledger(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "Sampler", _FakeSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
     base = tmp_path / "rep"
     # 账本按 per-launch 给：估算总量 ≈2112 GB，synthetic_gemm 有 5 次 launch → 每次 ≈422 GB
     rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
@@ -340,10 +392,82 @@ def test_cli_reports_dram_summary_and_ledger(monkeypatch, capsys, tmp_path):
     assert metrics["est__dram_bytes_per_launch"]["value"] > 0
     assert metrics["ks__sampler_window_coverage_pct"]["value"] == pytest.approx(100.0)
     assert metrics["ks__sampler_window_coverage_pct"]["unit"] == "%"
+    # R-46：主导性前提必须与数字同时出现
+    assert metrics["ks__matched_kernel_kernel_share_pct"]["value"] == pytest.approx(100.0, abs=1)
+    assert metrics["ks__matched_kernel_window_share_pct"]["value"] == pytest.approx(100.0, abs=1)
+    assert metrics["ks__window_busy_segments"]["value"] == 1
     assert metrics["meas__nvml_mem_busy_mean_pct"]["resolution"], \
         "R-31：代理量必须带分辨率"
     # 账本 440 GB/launch vs 估算 ~422 GB/launch → 轻微偏小（几个百分点）
     assert -10 < metrics["est__dram_vs_ledger_err_pct"]["value"] < 0
+
+
+def test_window_dominance_blocks_per_launch_attribution(monkeypatch, capsys, tmp_path):
+    """R-46 的负样本（验收报告 D1 那条命令的形态）。
+
+    窗口覆盖率接近 100%（GPU 一直在干活），但被 `-k` 选中的 kernel 只占窗口的一小部分 ——
+    其余时间在跑别的 kernel。此时把**整窗口字节**除以被匹配 kernel 的 launch 数会自带
+    1/s−1 的上偏（实测那次 s≈38.6%，误差 +146.9%）。必须拒绝给数、点明份额与补救路径。
+    """
+    from kernoscope.analyze.dram import SHARE_STRONG
+
+    class _MixedSampler(_FakeSampler):
+        def __init__(self, interval_s: float = 0.2, enabled: bool = True):
+            super().__init__(interval_s, enabled)
+            self.result.samples = _samples(13, mem=96.8, sm=99.0)   # 2.6 s 全忙
+
+    monkeypatch.setattr(cli, "Sampler", _MixedSampler)
+    monkeypatch.setattr(cli, "load_synthetic",
+                        lambda: _coherent_launches(window_s=0.4, n_gemm=5, n_elem=0,
+                                                   n_other=5, other_ns=400_000_000))
+    base = tmp_path / "rep"
+    rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
+                   "--ks-window", "full", "--ks-ledger-mb", "422000",
+                   "-o", str(base), "-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    doc = json.loads((tmp_path / "rep.ksreport.json").read_text())
+    metrics = {m["name"]: m for k in doc["kernels"] for s in k["sections"] for m in s["metrics"]}
+    # 覆盖率很高（GPU 一直在干活）—— 仅凭它不足以判定可归因
+    assert metrics["ks__sampler_window_coverage_pct"]["value"] > 90
+    share = metrics["ks__matched_kernel_kernel_share_pct"]["value"]
+    assert share is not None and share < SHARE_STRONG
+    for name in ("est__dram_bytes_per_launch", "est__dram_vs_ledger_err_pct"):
+        assert metrics[name]["provenance"] == "unavailable", name
+        assert metrics[name]["value"] is None
+    reason = metrics["est__dram_bytes_per_launch"]["reason"]
+    assert "窗口主导性不足" in reason and "窗口 kernel 时间" in reason
+    assert "轨迹口径" in reason, "必须给出可行的补救路径"
+    # 总量口径不受影响：它不需要主导性
+    assert metrics["est__dram_bytes_total"]["provenance"] == "estimated"
+    # 摘要里不能出现那个本该作废的 per-launch 值（D3）
+    assert "per-launch 不给" in out
+    # 归因上界是个可算的数：份额 15% 左右 → 上界 ≥ 100%
+    bias = metrics["ks__attribution_bias_estimate_pct"]["value"]
+    assert bias is not None and bias > 400
+
+
+def test_threshold_message_is_not_self_contradictory(monkeypatch, capsys, tmp_path):
+    """D2 的负样本：覆盖率 79.9% 不能印成「窗口覆盖率 80% < 80%」。"""
+    class _AlmostSampler(_FakeSampler):
+        def __init__(self, interval_s: float = 0.2, enabled: bool = True):
+            super().__init__(interval_s, enabled)
+            samples = _samples(1000, mem=95.0, sm=99.0)
+            for s in samples[799:]:
+                s.mem_util_pct, s.sm_util_pct = 0.0, 0.0
+            self.result.samples = samples
+            self.result.duration_s = 200.0
+
+    monkeypatch.setattr(cli, "Sampler", _AlmostSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
+                   "--ks-window", "full", "--ks-ledger-mb", "422000", "-o",
+                   str(tmp_path / "rep"), "-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "79.9% < 80.0%" in out, "要在文案里能区分 79.9% 与门槛 80%"
+    assert "80% < 80%" not in out, "门槛文案不能自相矛盾（D2）"
+    assert "延长到约 0 秒" not in out, "量化补救不能算出 0 秒（N6）"
 
 
 def test_cli_strict_fails_when_ledger_verdict_cannot_be_produced(monkeypatch, capsys, tmp_path):
@@ -386,3 +510,110 @@ def test_cli_rejects_bad_ledger_range(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "解析失败" in err or "error" in err
+
+
+def test_metrics_filter_never_silently_produces_an_empty_report(monkeypatch, capsys):
+    """R-39 的负样本：--metrics 一个都不匹配时不能给出"看起来成功"的空报告。"""
+    monkeypatch.setattr(cli, "Sampler", _FakeSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    rc = cli.main(["--ks-synthetic", "--metrics", "dram__bytes.sum", "-k", "regex:gemm"])
+    cap = capsys.readouterr()
+    assert rc == 0, "宽松模式仍应成功（要能继续跑），但必须给出解释"
+    assert "一个都不存在" in cap.err
+    assert "dram__bytes.sum" in cap.err
+    # --strict 下同一件事必须是失败（与 B7-c 一致）
+    rc2 = cli.main(["--ks-synthetic", "--strict", "--metrics", "dram__bytes.sum",
+                    "-k", "regex:gemm"])
+    assert rc2 == 2
+
+
+def test_coverage_premise_is_n_a_when_nothing_was_sampled(monkeypatch, capsys, tmp_path):
+    """N5 的负样本：一次采样都没有时，前提①不能报「0%」——那等于声称量过。
+
+    同一份报告里 est__dram_bytes_total 的原因写着「没有 NVML 采样点」，
+    前提行却说覆盖率 0%、分辨率「1 个采样点」，两者自相矛盾。
+    """
+    monkeypatch.setattr(cli, "Sampler", _FakeSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    rc = cli.main(["--ks-synthetic", "--ks-no-nvml", "--ks-peak-gbps", "909",
+                   "-k", "regex:gemm", "-o", str(tmp_path / "rep"), "-f"])
+    assert rc == 0
+    doc = json.loads((tmp_path / "rep.ksreport.json").read_text())
+    metrics = {m["name"]: m for k in doc["kernels"] for s in k["sections"] for m in s["metrics"]}
+    cov = metrics["ks__sampler_window_coverage_pct"]
+    assert cov["provenance"] == "unavailable" and cov["value"] is None, \
+        "没有采样点时覆盖率必须 n/a，而不是 0%"
+    assert "没有 NVML 采样点" in cov["reason"]
+    # 新的前提②同样不能凭空给数
+    assert metrics["ks__matched_kernel_kernel_share_pct"]["value"] is None
+    assert metrics["ks__dram_window_mem_busy_mean_pct"]["value"] is None
+
+
+def test_resolution_present_on_derived_dram_rows(monkeypatch, capsys, tmp_path):
+    """R-41：派生量也要带自己的分辨率/不确定度，不能只有总量那两行有。"""
+    monkeypatch.setattr(cli, "Sampler", _FakeSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
+                   "--ks-ledger-mb", "422000", "--ks-ledger-range-mb", "300000,500000",
+                   "-o", str(tmp_path / "rep"), "-f"])
+    assert rc == 0
+    doc = json.loads((tmp_path / "rep.ksreport.json").read_text())
+    metrics = {m["name"]: m for k in doc["kernels"] for s in k["sections"] for m in s["metrics"]}
+    for name in ("est__dram_bytes_per_launch", "est__dram_vs_ledger_err_pct",
+                 "est__dram_range_position_pct", "ks__ledger_range_verdict"):
+        m = metrics[name]
+        assert m["value"] is not None, name
+        assert m["resolution"], f"R-41：{name} 必须带分辨率/不确定度"
+    # per-launch 的分辨率应当就是归因上偏估计（它真正的精度地板）
+    assert "归因" in metrics["est__dram_bytes_per_launch"]["resolution"]
+
+
+def test_summary_names_the_mem_busy_value_used_by_the_estimate(monkeypatch, capsys, tmp_path):
+    """R-45：摘要里的「显存忙碌」必须能追到某个指标行，且与整进程均值区分开。"""
+    class _TwoTierSampler(_FakeSampler):
+        """前半段空闲（启动/JIT）、后半段饱和：窗口均值 96.8% ≠ 整进程均值 48.4%。"""
+
+        def __init__(self, interval_s: float = 0.2, enabled: bool = True):
+            super().__init__(interval_s, enabled)
+            samples = _samples(24, mem=0.0, sm=0.0)
+            for i, s in enumerate(samples):
+                if i >= 12:
+                    s.mem_util_pct, s.sm_util_pct = 96.8, 99.0
+            self.result.samples = samples
+            self.result.duration_s = 4.8
+
+    monkeypatch.setattr(cli, "Sampler", _TwoTierSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
+                   "--ks-window", "auto", "-o", str(tmp_path / "rep"), "-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    doc = json.loads((tmp_path / "rep.report.json".replace(".report", ".ksreport")).read_text()) \
+        if False else json.loads((tmp_path / "rep.ksreport.json").read_text())
+    metrics = {m["name"]: m for k in doc["kernels"] for s in k["sections"] for m in s["metrics"]}
+    win = metrics["ks__dram_window_mem_busy_mean_pct"]["value"]
+    proc = metrics["meas__nvml_mem_busy_mean_pct"]["value"]
+    assert win is not None and proc is not None
+    assert win > proc + 20, "两个量确实不同：窗口均值 vs 整进程均值"
+    assert "窗口显存忙碌" in out and "整进程" in out
+    assert "ks__dram_window_mem_busy_mean_pct" in out, "摘要里要给出参与估算那个量的名字"
+
+
+def test_launch_count_flag_does_not_change_the_per_launch_denominator(monkeypatch, capsys, tmp_path):
+    """R-46 同族：-c/--launch-count 只限制**展示**，不能当 per-launch 的分母。
+
+    分母若被 -c 截断，窗口总量会被除到一个偏小的 launch 数上 —— 误差同样是倍数级。
+    """
+    monkeypatch.setattr(cli, "Sampler", _FakeSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    values = {}
+    for tag, extra in (("all", []), ("capped", ["-c", "2"])):
+        base = tmp_path / tag
+        rc = cli.main(["--ks-synthetic", "--ks-peak-gbps", "909", "-k", "regex:gemm",
+                       *extra, "-o", str(base), "-f"])
+        assert rc == 0
+        doc = json.loads((base.with_suffix(".ksreport.json")).read_text())
+        m = {x["name"]: x for k in doc["kernels"] for s in k["sections"] for x in s["metrics"]}
+        values[tag] = m["est__dram_bytes_per_launch"]["value"]
+    assert values["all"] == pytest.approx(values["capped"]), \
+        "-c 只是展示上限，不该改变 per-launch 的分母"

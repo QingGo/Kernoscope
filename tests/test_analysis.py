@@ -91,3 +91,33 @@ def test_machine_peaks_prefers_copy_bandwidth():
     # 没有 copy 项时回退到 max，而不是 0
     fallback = MachinePeaks.from_profile({"measured_dram": {"read_gbs": 800.0, "write_gbs": 900.0}})
     assert fallback.bandwidth_gbs == pytest.approx(900.0)
+
+
+def test_over_peak_is_a_red_flag():
+    """R-38 的负样本：达成值 > 标定峰值必须报红灯，而不是变成一个漂亮的百分比。
+
+    教程第 6 章用「162.3 TFLOPS ≈ 98% fp16 峰值」做裁决；峰值若被取成 145.7，
+    同一份数据就变成 114% —— 一个物理上不可能的结论被当成裁决依据。
+    """
+    flops, bytes_ = gemm_workload(4096, 4096, 4096, "fp16")
+    # 峰值被人为取小（例如拿 fp32 档的读数当 fp16 用）：达成值必然"超过"它
+    peaks = MachinePeaks.from_profile({
+        "gpu": "X",
+        "measured_dram": {"copy_gbs": 909.0, "read_gbs": 900.0, "write_gbs": 934.0},
+        "measured_matmul_tflops": {"torch.float16": {"tflops": 145.7}},
+    }, "fp16")
+    sol = SpeedOfLight(duration_ns=900_000.0, flops=flops, bytes_=bytes_, peaks=peaks)
+    # 校验一下这个场景确实超过峰值（否则用例本身没意义）
+    assert sol.pct_compute > 100.0
+    assert sol.over_peak
+    note = sol.over_peak_note()
+    assert "物理上不可能" in note and "峰值取小" in note
+
+    # 正常情况（达成 84%）绝不能报红灯
+    ok = SpeedOfLight(duration_ns=951_000.0, flops=flops, bytes_=bytes_, peaks=peaks)
+    assert not ok.over_peak and ok.over_peak_note() == ""
+
+    # 容差内的轻微超出（标定口径本身有 3~4% 差异）只算提示边界，不报红灯
+    mild = SpeedOfLight(duration_ns=928_000.0, flops=flops, bytes_=bytes_, peaks=peaks)
+    assert 100.0 <= mild.pct_compute <= 102.0 + 1e-6
+    assert not mild.over_peak

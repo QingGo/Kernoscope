@@ -181,3 +181,37 @@ class SpeedOfLight:
     def machine_balance(self) -> float:
         return (self.peaks.compute_tflops * 1e12) / (self.peaks.bandwidth_gbs * 1e9) \
             if self.peaks.bandwidth_gbs else 0.0
+
+    # ---- R-38：达成值超过标定峰值必须是**红灯**，不能只印个除法结果 ----
+    # 达成值 > 峰值在物理上不可能。出现它只有三种成因，而且都会让结论反过来：
+    #   · 峰值取小了（标定口径/尺寸与本次负载不同，例如拿 fp32 峰值去比 fp16 的负载）
+    #   · 工作量口径算错（FLOPS/字节数的解析式与实际 kernel 不符，常见于漏乘或重复计数）
+    #   · 标定与本次运行不在同一状态（时钟/功耗受限、冷启动、MIG、别的进程抢卡）
+    # 教程用「162.3 TFLOPS ≈ 98% fp16 峰值」做裁决；若峰值被取成 145.7，同一份数据
+    # 就变成 114% —— 一个物理上不可能的结论被当成裁决依据，正是这里要拦住的东西。
+    PEAK_EXCEED_TOLERANCE_PCT = 2.0     # 容差：标定本身有 3~4% 口径差，2% 内只提示
+
+    @property
+    def over_peak(self) -> bool:
+        """达成值是否超过标定峰值（超出容差）。"""
+        if not self.peaks.compute_tflops and not self.peaks.bandwidth_gbs:
+            return False
+        return self.pct_compute > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT \
+            or self.pct_memory > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT
+
+    def over_peak_note(self) -> str:
+        """红灯说明：点明哪一个超了、超多少、以及最可能的三种成因。"""
+        if not self.over_peak:
+            return ""
+        which = []
+        if self.pct_compute > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT:
+            which.append(f"算力 {self.achieved_tflops:.1f} TFLOPS = 标定峰值的 "
+                         f"{self.pct_compute:.1f}%（峰值 {self.peaks.compute_tflops:.1f} TFLOPS）")
+        if self.pct_memory > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT:
+            which.append(f"带宽 {self.achieved_gbs:.1f} GB/s = 标定峰值的 "
+                         f"{self.pct_memory:.1f}%（峰值 {self.peaks.bandwidth_gbs:.1f} GB/s）")
+        return ("达成值超过本机标定峰值（物理上不可能）：" + "；".join(which)
+                + "。最可能的成因：① 峰值取小了/口径不一致（例如拿 fp32 峰值比 fp16 负载、"
+                  "标定尺寸与本次负载不同）；② 工作量口径算错（FLOPS/字节数的解析式与实际 "
+                  "kernel 不符）；③ 标定与本次运行状态不同（时钟/功耗受限、冷启动、抢卡）。"
+                  "先复核这三项，不要把它当成达标证据。")

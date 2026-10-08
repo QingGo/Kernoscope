@@ -295,3 +295,35 @@ def test_help_output_does_not_crash(argv, capsys):
     out = capsys.readouterr()
     assert rc in (0, None), f"{argv} 退出码异常: {rc}"
     assert (out.out + out.err).strip(), f"{argv} 没有输出"
+
+
+HIST_FOR_STRICT = """kernel 0 - synthetic_gemm - #thread-blocks 1048576,  \
+kernel instructions 2000000, total instructions 2000000
+  LDG.E.128 = 500000
+  STG.E.128 = 500000
+  IMAD = 1000000
+"""
+
+
+def test_strict_section_gate_is_data_driven(capsys, tmp_path: Path):
+    """R-43 的负样本：门禁要按「真的产出了数据」判定，而不是按 section 名字判定。
+
+    从前 `--section SchedulerStats` 一旦出现就报「needs hardware counters」，
+    即使 `--ks-instr-hist` 已经把 est__issue_slot_utilization_pct 算出来了 ——
+    `--strict` 在拦自己的成果，新增的 R-08 能力在严格模式下根本不可用。
+    """
+    hist = tmp_path / "hist.txt"
+    hist.write_text(HIST_FOR_STRICT, encoding="utf-8")
+    common = ["--ks-synthetic", "-k", "regex:gemm", "--section", "SchedulerStats"]
+
+    # 没有直方图：确实拿不到 → 必须红
+    rc_none, out_none, err_none = run(capsys, *common, "--strict")
+    assert rc_none == 2
+    assert "SchedulerStats" in err_none
+
+    # 有直方图：数据真的产出了 → 不能再红
+    rc_ok, out_ok, err_ok = run(capsys, *common, "--ks-instr-hist", str(hist),
+                                "--ks-clock-mhz", "2000", "--strict")
+    assert rc_ok == 0, err_ok
+    assert "est__issue_slot_utilization_pct" in out_ok
+    assert "needs hardware counters" not in err_ok

@@ -39,6 +39,17 @@ from typing import Sequence
 # 窗口覆盖率阈值：低于 UNUSABLE 直接判为不可用；低于 WEAK 不给 per-launch 归因
 DUTY_UNUSABLE = 50.0
 DUTY_WEAK = 80.0
+# R-46：per-launch 归因需要**窗口被被匹配的那个 kernel 主导**（与覆盖率是两个前提）。
+# 阈值由验收线反推，不是拍脑袋：把窗口总量除到某个 kernel 的 launch 数上，误差因子是
+# 1/s（s = 该 kernel 占窗口的份额），于是归因本身引入的上偏 = 1/s − 1。
+#   s=80% → +25%（远超 |误差|<10% 的验收线，所以 80 这个数守不住 10% 的线）
+#   s=90% → +11.1%
+#   s=95% →  +5.3%  ← 与本代理自身 −4%~+13% 的噪声同量级，取它作为门槛
+#   s=99% →  +1.0%
+SHARE_STRONG = 95.0
+# 数「窗口里有几段连续忙碌期」时，连续多少个空闲采样点才算分段（避免把采样的偶发丢点
+# 当成新阶段）：2 个 ≥ 400 ms。
+SEGMENT_MIN_GAP = 2
 # 判定"这一时刻 GPU 确实在干活"的阈值。
 # 两个轴分开取阈值：SM 5% 说明有 kernel 在跑；显存要 20% 才算真在搬运
 # （实测被宿主间隙稀释的拷贝只有 6.3% —— 那是空闲，不是"在干活"）。
@@ -72,6 +83,18 @@ class DramEstimate:
     mem_util_resolution_pct: float = MEM_UTIL_RESOLUTION_PCT
     n_samples: int = 0
     launches: int = 0
+    # ---- R-46：窗口主导性（per-launch 归因的第二个前提）----
+    # 被匹配 kernel 的 GPU 时间（ns，来自 CUPTI 的逐 launch 时长求和）。
+    # 分母是**参与积分的窗口长度** window_used_s。窗口被 --ks-window auto 裁短时，
+    # 分子仍含窗口外的同名 launch —— 所以这是个**上界**（share_upper_bound=True），
+    # 上界用在"放行"方向是不保守的，因此当窗口确实被裁剪时会额外提示。
+    matched_kernel_ns: int = 0
+    other_kernels_ns: int = 0
+    other_kernel_count: int = 0
+    window_busy_segments: int = 0
+    share_upper_bound: bool = False
+    # 轨迹口径自己的分辨率（采样比/全量），由调用方填
+    trace_resolution: str = ""
     # 账本对照（可选）：账本通常预测的是**每次 launch** 的字节数（如 2RH），
     # 所以默认按 per-launch 对拍；要与整窗口总量比时用 ledger_total。
     ledger_per_launch: float | None = None
@@ -103,6 +126,65 @@ class DramEstimate:
         return self.mem_util_pct_mean < self.mem_util_resolution_pct
 
     @property
+    def window_used_ns(self) -> int:
+        """参与积分的窗口长度（ns）。"""
+        return int(round(self.window_used_s * 1e9))
+
+    @property
+    def share_ready(self) -> bool:
+        """有没有判定窗口主导性所需的数据（被匹配 kernel 的 GPU 时间）。"""
+        return self.matched_kernel_ns > 0 and self.window_used_s > 0
+
+    @property
+    def matched_kernel_window_share_pct(self) -> float | None:
+        """被匹配 kernel 的 GPU 时间 ÷ 参与积分的窗口长度（R-46，与覆盖率同量纲）。
+
+        注意它**不是**判据：空闲时间不产生字节，所以把分母取成窗口长度会冤枉
+        「单 kernel + 窗口里有空闲采样」的正当场景。判据用的是下面那个内核时间份额。
+        """
+        if not self.share_ready:
+            return None
+        return min(100.0, 100.0 * self.matched_kernel_ns / self.window_used_ns)
+
+    @property
+    def matched_kernel_kernel_share_pct(self) -> float | None:
+        """被匹配 kernel 的 GPU 时间 ÷ 窗口内**所有 kernel** 的 GPU 时间（R-46 的判据）。
+
+        为什么用这个当判据：字节估算的积分里，空闲时段贡献 0 字节，真正会污染
+        「总量 ÷ 某 kernel 的 launch 数」的是**其他 kernel 干的活**。所以主导性问的是
+        「窗口里的 kernel 时间里，被匹配的那个占多少」，而不是「它占了多少墙钟」。
+        单 kernel 的窗口无论有多少空闲，这个值都是 100%。
+
+        它是**字节份额的代理**（假设各 kernel 的字节强度可比）：计算机密负载与访存密集
+        负载混在一个窗口里时，它可能高估或低估真实的字节份额 —— 这也是为什么
+        `--ks-memtrace` 的轨迹口径（只测被追踪的那个 kernel）才是混合窗口下唯一诚实的口径。
+        """
+        denom = self.matched_kernel_ns + self.other_kernels_ns
+        if denom <= 0:
+            return None
+        return 100.0 * self.matched_kernel_ns / denom
+
+    @property
+    def other_kernel_window_share_pct(self) -> float | None:
+        """窗口里其他 kernel 占的份额（原因文本要点名这个数）。"""
+        if not self.share_ready:
+            return None
+        return min(100.0, 100.0 * self.other_kernels_ns / self.window_used_ns)
+
+    @property
+    def attribution_bias_estimate_pct(self) -> float | None:
+        """归因本身带来的上偏估计 = 100×(1/s − 1)，s 取内核时间份额。
+
+        它把「为什么这个数字可能是错的」变成可算的一步：s=44.9% → +123%。
+        实测那次是 +146.9%：**略高于估计**，因为 k_fused 的字节密度低于窗口里其他
+        kernel。所以这是估计/代理，不是严格上界 —— 混合强度的窗口必须换轨迹口径。
+        """
+        s = self.matched_kernel_kernel_share_pct
+        if s is None or s <= 0:
+            return None
+        return 100.0 * (1.0 / (s / 100.0) - 1.0)
+
+    @property
     def reliable(self) -> bool:
         """总量是否可用。
 
@@ -119,8 +201,27 @@ class DramEstimate:
 
     @property
     def attributable(self) -> bool:
-        """能否把总量归因到单个 kernel（per-launch 口径需要窗口被该 kernel 主导）。"""
-        return self.reliable and self.window_coverage_pct >= DUTY_WEAK and self.launches > 0
+        """能否把总量归因到单个 kernel。
+
+        per-launch 口径要求窗口**同时**满足两个前提：
+          ① 窗口被被测负载主导（覆盖率 ≥ DUTY_WEAK）—— GPU 在不在干活；
+          ② 窗口被**被匹配的那个** kernel 主导（份额 ≥ SHARE_STRONG）—— 它是不是主角。
+        只有 ① 时，一个窗口里顺序跑了多个 kernel/变体的负载会被误判为可归因（R-46）。
+        """
+        share = self.matched_kernel_kernel_share_pct
+        return (self.reliable and self.window_coverage_pct >= DUTY_WEAK
+                and self.launches > 0
+                and share is not None and share >= SHARE_STRONG)
+
+    def per_launch_verdict(self) -> tuple[bool, str]:
+        """(能否给 per-launch 数字, 原因) —— section、摘要、--strict 三处共用同一个判定。
+
+        D3 的教训：判定被三处各自解释时，摘要会说「口径不成立」而同一行又打印出估算值。
+        所以「原因文本」也只在这里生成一次。
+        """
+        if self.attributable:
+            return True, ""
+        return False, self.reason_for("est__dram_bytes_per_launch")
 
     @property
     def trace_available(self) -> bool:
@@ -148,25 +249,50 @@ class DramEstimate:
                 f"无法区分『真的没搬』与『{self.mem_util_resolution_pct:.1f}% 被截断成 0』")
         if (self.n_samples > 0 and not self.peak_missing and not self.below_resolution
                 and self.window_coverage_pct < DUTY_UNUSABLE):
-            need = _window_seconds_for(self.window_coverage_pct, DUTY_UNUSABLE, self.window_s)
+            need = _window_seconds_for(self.window_coverage_pct, DUTY_UNUSABLE,
+                                       self.window_used_s or self.window_s)
             out.append(
-                f"窗口覆盖率 {self.window_coverage_pct:.0f}% < {DUTY_UNUSABLE:.0f}%：窗口没被被测负载"
-                f"主导，忙碌时段是否饱和无从确认"
+                f"窗口覆盖率 {_fmt_pct_cmp(self.window_coverage_pct, DUTY_UNUSABLE)}："
+                f"窗口没被被测负载主导，忙碌时段是否饱和无从确认"
                 + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto 只统计稳态段"
                    if need else ""))
         return out
+
+    def _share_failure(self) -> str:
+        """R-46：窗口主导性前提不成立时，点名份额与窗口里的其他 kernel。"""
+        share = self.matched_kernel_kernel_share_pct
+        if share is None:
+            return ("无法判定窗口主导性：报告里没有被匹配 kernel 的 GPU 时间"
+                    "（逐 launch 时长为空），per-launch 归因不可验证")
+        others = self.other_kernel_window_share_pct
+        detail = ""
+        if self.other_kernel_count:
+            detail = (f"；窗口里还有 {self.other_kernel_count} 个 kernel"
+                      + (f"，按墙钟占 {others:.0f}%" if others is not None else ""))
+        bias = self.attribution_bias_estimate_pct
+        bound = (f"归因本身的上偏估计 +{bias:.0f}%" if bias is not None else "归因偏差未知")
+        return (f"窗口主导性不足：被匹配的 kernel 只占窗口 kernel 时间的 "
+                f"{_fmt_pct_cmp(share, SHARE_STRONG, digits=1)}，{bound}{detail}；"
+                f"把窗口缩到只含该 kernel（--ks-warmup/--ks-window-s 只跑一段），"
+                f"或改用 --ks-ledger-total-mb 走整窗口口径，"
+                f"或加 --ks-memtrace 换用**轨迹口径**（只测被追踪 kernel，不受窗口构成影响）")
 
     def _attribution_failures(self) -> list[str]:
         out = self._total_failures()
         if self.launches <= 0:
             out.append("未锁定单一 kernel（匹配到多个 kernel）：per-launch 口径不适用，"
                        "请用 -k 只选一个 kernel")
-        elif (self.reliable and self.window_coverage_pct < DUTY_WEAK and not out):
-            need = _window_seconds_for(self.window_coverage_pct, DUTY_WEAK, self.window_s)
+            return out
+        if self.reliable and self.window_coverage_pct < DUTY_WEAK:
+            need = _window_seconds_for(self.window_coverage_pct, DUTY_WEAK,
+                                       self.window_used_s or self.window_s)
             out.append(
-                f"窗口覆盖率 {self.window_coverage_pct:.0f}% < {DUTY_WEAK:.0f}%：无法把 "
+                f"窗口覆盖率 {_fmt_pct_cmp(self.window_coverage_pct, DUTY_WEAK)}：无法把 "
                 f"{self.bytes_total / 1e6:.0f} MB 总量归因到每个 launch"
                 + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto" if need else ""))
+        share = self.matched_kernel_kernel_share_pct
+        if self.reliable and (share is None or share < SHARE_STRONG):
+            out.append(self._share_failure())
         return out
 
     def reason_for(self, name: str, basis: str = "auto") -> str:
@@ -185,6 +311,17 @@ class DramEstimate:
             return self._ledger_failure(basis, need="误差")
         if name == "est__dram_range_position_pct":
             return self._ledger_failure(basis, need="区间位置", want_total=False)
+        if name in ("ks__matched_kernel_window_share_pct",
+                    "ks__matched_kernel_kernel_share_pct"):
+            return self._share_failure()
+        if name == "ks__attribution_bias_estimate_pct":
+            return "无法给出归因上偏估计：" + self._share_failure()
+        if name == "ks__sampler_window_coverage_pct":
+            if self.n_samples <= 0:
+                return "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：覆盖率无定义"
+            return "；".join(self.notes) or "覆盖率不可得"
+        if name in ("ks__dram_window_mem_busy_mean_pct", "ks__window_busy_segments"):
+            return "没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：窗口内统计量无定义"
         return "；".join(self.notes) or "无法估算"
 
     def _ledger_failure(self, basis: str, need: str, want_total: bool | None = None) -> str:
@@ -377,6 +514,44 @@ def _trim_window(samples: Sequence, mode: str, sampler_period_s: float) -> tuple
     return list(samples[lo:hi + 1]), True
 
 
+def _busy_segments(samples: Sequence) -> int:
+    """窗口里有几段「连续忙碌期」（R-46 的辅助信号，不是硬门槛）。
+
+    段与段之间要有 ≥ SEGMENT_MIN_GAP 个连续空闲采样点才算分开 —— 否则会把采样的
+    偶发丢点当成新阶段。「依次跑 v1/v2/v3」这类 bench 在 --ks-window auto 下会表现
+    为多段；这时 per-launch 归因要格外谨慎，所以把它报出来而不是替用户判断。
+    """
+    segs = 0
+    gap = 0
+    in_seg = False
+    for s in samples:
+        busy = (float(getattr(s, "sm_util_pct", 0.0)) >= BUSY_SM_UTIL
+                or float(getattr(s, "mem_util_pct", 0.0)) >= BUSY_MEM_UTIL)
+        if busy:
+            if not in_seg:
+                segs += 1
+                in_seg = True
+            gap = 0
+        else:
+            gap += 1
+            if in_seg and gap >= SEGMENT_MIN_GAP:
+                in_seg = False
+    return segs
+
+
+def _fmt_pct_cmp(value: float, threshold: float, digits: int = 0) -> str:
+    """「X% < Y%」的文案（D2）。
+
+    曾经写死 `:.0f`：覆盖率 79.9% 会被印成「窗口覆盖率 80% < 80%」，读者会以为工具坏了。
+    四舍五入后两者相等就逐级加小数位，直到能区分开。
+    """
+    for d in (digits, digits + 1, digits + 2):
+        v, t = f"{value:.{d}f}", f"{threshold:.{d}f}"
+        if v != t:
+            return f"{v}% < {t}%"
+    return f"{value:.2f}% < {threshold:.2f}%"
+
+
 def estimate(samples: Sequence, peak_gbs: float, window_s: float,
              launches: int = 0, sampler_period_s: float = 0.0,
              ledger_per_launch: float | None = None,
@@ -388,11 +563,16 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
              window_limit_s: float | None = None,
              trace_bytes_per_launch: float | None = None,
              trace_kernel: str = "",
-             trace_unavailable_reason: str = "") -> DramEstimate:
+             trace_unavailable_reason: str = "",
+             matched_kernel_ns: int = 0,
+             other_kernels_ns: int = 0,
+             other_kernel_count: int = 0,
+             trace_resolution: str = "") -> DramEstimate:
     """从 NVML 采样序列估算 DRAM 流量。
 
     samples: 具 `.t`(秒) / `.mem_util_pct` / `.sm_util_pct` 属性的采样点列表。
     window_mode: 'full' 用整段采样窗；'auto' 先按首个/末个忙碌采样点裁到稳态段。
+    matched_kernel_ns: 被 `-k` 匹配的 kernel 的 GPU 时间（R-46 的分子）。
     """
     est = DramEstimate(peak_gbs=peak_gbs, peak_source=peak_source,
                        window_s=window_s, launches=launches,
@@ -427,6 +607,13 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     span_before_trim = float(samples[-1].t) - float(samples[0].t) if len(samples) > 1 else 0.0
     samples, trimmed = _trim_window(samples, window_mode, default_dt)
     est.trimmed = trimmed
+    est.matched_kernel_ns = int(matched_kernel_ns)
+    est.other_kernels_ns = int(other_kernels_ns)
+    est.other_kernel_count = int(other_kernel_count)
+    est.trace_resolution = trace_resolution
+    # 分子（被匹配 kernel 的 GPU 时间）是**整个运行**的；窗口被裁短时它含窗口外的同名
+    # launch，于是份额偏大 —— 这在「放行」方向上不保守，所以标出来。
+    est.share_upper_bound = bool(trimmed or warmup_s > 0 or (window_limit_s or 0) > 0)
 
     busy_time = 0.0          # 显存忙碌时间（秒）
     busy_pcts: list[float] = []
@@ -448,6 +635,7 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     est.window_dropped_s = max(0.0, (window_s or span_before_trim) - total_time)
     est.mem_util_pct_mean = sum(busy_pcts) / len(busy_pcts)
     est.window_coverage_pct = 100.0 * busy_samples / len(samples)
+    est.window_busy_segments = _busy_segments(samples)
     est.bytes_total = busy_time * peak_gbs * 1e9
     est.throughput_pct_of_peak = est.mem_util_pct_mean
     if launches > 0:
@@ -468,6 +656,10 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
             f"{BUSY_MEM_UTIL:.0f}% 的采样点占比）")
     if total_time and window_s and total_time < 0.5 * window_s:
         est.notes.append("采样覆盖时间不足窗口一半：采样器可能启动过晚或提前退出")
+    if est.window_busy_segments > 1:
+        est.notes.append(
+            f"窗口里有 {est.window_busy_segments} 段连续忙碌期（段间 ≥{SEGMENT_MIN_GAP} 个空闲"
+            f"采样点）：可能是多个阶段/变体拼接，per-launch 归因需谨慎（见 ks__window_busy_segments）")
     est.notes.append(
         "采样周期 %.0f ms、区间平均（utilization.memory 分辨率 %.0f 个百分点）；"
         "字节 = Σ(mem_util×Δt)×实测峰值带宽" % (est.sampler_period_s * 1000,
@@ -485,6 +677,13 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
     """
     out: list[tuple[str, float | None, str, str, str, str]] = []
     note = "；".join(est.notes)
+    share_w = est.matched_kernel_window_share_pct
+    share_k = est.matched_kernel_kernel_share_pct
+    bias = est.attribution_bias_estimate_pct
+    # R-41：派生量也要带自己的分辨率/不确定度。per-launch 与由它推出的误差、区间位置的
+    # 分辨率就是**归因上偏的上界**（这是它们真正的精度地板，不是 mem_util 的 1 个百分点）。
+    attribution_res = (f"归因上偏估计 +{bias:.0f} %" if bias is not None
+                       else "归因不确定度未知")
     out.append(("est__dram_bytes_total",
                 round(est.bytes_total / 1e6, 1) if est.reliable else None, "MB",
                 "NVML memory-busy time × measured peak bandwidth（对应 ncu dram__bytes.sum）",
@@ -494,21 +693,73 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
                 round(est.bytes_per_launch / 1e6, 2)
                 if (est.bytes_per_launch is not None and est.attributable) else None, "MB",
                 f"total / {est.launches} launches（对应 ncu dram__bytes.sum 的按 launch 口径）",
-                "仅在『单一 kernel 主导采样窗口 + 覆盖率 ≥80%』时成立", ""))
+                f"仅在『被匹配 kernel 占窗口 ≥{SHARE_STRONG:.0f}% + 窗口覆盖率 ≥{DUTY_WEAK:.0f}%』"
+                f"时成立（前提②见 ks__matched_kernel_window_share_pct）",
+                attribution_res))
     out.append(("est__dram_throughput_pct_of_peak",
                 round(est.throughput_pct_of_peak, 1) if est.reliable else None, "%",
                 "NVML memory-busy 占比（对应 ncu dram__throughput.avg.pct_of_peak_sustained_elapsed）",
                 "忙碌时间占比口径，与按字节/时间的口径略有差异", f"{est.mem_util_resolution_pct:.0f} %"))
-    # 前提指标：**永远出现**（R-15/B5：两个语义分开报）
-    out.append(("ks__sampler_window_coverage_pct", round(est.window_coverage_pct, 1), "%",
+    # ---- 前提指标：**永远出现**（R-15/B5：两个语义分开报）----
+    # 前提①：窗口被被测负载主导（GPU 在不在干活）
+    # N5：没有采样点时它必须是 n/a —— 报「0%」等于声称量过，而实际一次都没采到。
+    out.append(("ks__sampler_window_coverage_pct",
+                round(est.window_coverage_pct, 1) if est.n_samples > 0 else None, "%",
                 f"采样窗中 SM≥{BUSY_SM_UTIL:.0f}% 或显存≥{BUSY_MEM_UTIL:.0f}% 的采样点占比",
                 f"前提①「窗口被被测负载主导」：<{DUTY_WEAK:.0f}% 不给 per-launch 归因，"
                 f"<{DUTY_UNUSABLE:.0f}% 连总量也不给", "1 个采样点"))
+    # 前提②：窗口被**被匹配的那个** kernel 主导（R-46）。两个份额是两个量，分开报：
+    #   · 内核时间份额 = 判据（空闲时段不产生字节，所以不能拿墙钟当分母）
+    #   · 窗口份额     = 与覆盖率同量纲的对照量
+    out.append(("ks__matched_kernel_kernel_share_pct",
+                round(share_k, 1) if share_k is not None else None, "%",
+                f"被匹配 kernel 的 gpu__time_duration.sum ÷ 窗口内**所有** kernel 的 GPU 时间"
+                f"（{est.matched_kernel_ns / 1e9:.2f} s / "
+                f"{(est.matched_kernel_ns + est.other_kernels_ns) / 1e9:.2f} s）",
+                f"前提②「窗口被被匹配的 kernel 主导」：<{SHARE_STRONG:.0f}% 不给 per-launch 归因。"
+                f"空闲时段贡献 0 字节，所以判据用内核时间份额而不是墙钟份额："
+                f"单 kernel 的窗口无论有多少空闲都是 100%"
+                + (f"；窗口里还有 {est.other_kernel_count} 个 kernel"
+                   if est.other_kernel_count else ""),
+                "0.1 %"))
+    out.append(("ks__matched_kernel_window_share_pct",
+                round(share_w, 1) if share_w is not None else None, "%",
+                f"被匹配 kernel 的 GPU 时间 ÷ 参与积分的窗口长度"
+                f"（{est.matched_kernel_ns / 1e9:.2f} s / {est.window_used_s:.1f} s）",
+                f"与覆盖率同量纲的对照量（{SHARE_STRONG:.0f}% 门槛用的是内核时间份额）；"
+                f"它 ≤ 覆盖率，差值就是窗口里的空闲"
+                + ("；分子含窗口外的同名 launch，因此是上界" if est.share_upper_bound else ""),
+                "0.1 %"))
+    out.append(("ks__attribution_bias_estimate_pct",
+                round(bias, 1) if bias is not None else None, "%",
+                "100×(1/内核时间份额 − 1)：把窗口总量归因到单个 kernel 时**归因本身**"
+                "引入的上偏估计",
+                "实测校验：k_fused 内核时间份额 44.9% → 估计 +123%，而那次观测误差是 "
+                "+146.9% —— 观测值比估计更高，因为该 kernel 的字节密度低于窗口里其他 kernel。"
+                "所以这是**估计而非严格上界**：字节强度不一致的混合窗口必须换轨迹口径",
+                "0.1 %"))
+    out.append(("ks__window_busy_segments",
+                float(est.window_busy_segments) if est.n_samples > 0 else None, "段",
+                f"窗口里「连续忙碌期」的段数（段间 ≥{SEGMENT_MIN_GAP} 个空闲采样点才算分开）",
+                ("多段 ⇒ 窗口可能是多个阶段/变体拼接（例如先跑正确性再跑性能、依次跑 v1/v2/v3），"
+                 "此时 per-launch 归因需谨慎：这是启发式信号，不是判据"),
+                "1 段"))
+    # R-45：参与字节估算的那个「显存忙碌均值」必须有自己的名字。
+    # 它与 meas__nvml_mem_busy_mean_pct（**整进程**均值）同名不同物，是两份读数。
+    out.append(("ks__dram_window_mem_busy_mean_pct",
+                round(est.mem_util_pct_mean, 1) if est.n_samples > 0 else None, "%",
+                "参与积分窗口内 NVML utilization.memory 的区间平均（**被积函数的均值**）",
+                "这就是摘要里那个「窗口显存忙碌」，也是字节估算真正用到的那个数；"
+                "整进程均值另见 meas__nvml_mem_busy_mean_pct，两者不可互换",
+                f"{est.mem_util_resolution_pct:.0f} %"))
     out.append(("est__dram_bytes_per_launch_trace",
                 round(est.trace_bytes_per_launch / 1e6, 3) if est.trace_available else None, "MB",
                 "访存轨迹模型（L2 miss sector × 32B × grid/blocks_traced / launches）",
-                ("第二条口径：与 NVML 代理独立；NVML 口径不成立时用它做账本对拍"
-                 if est.trace_available else est.trace_unavailable_reason), ""))
+                ("第二条口径：与 NVML 代理独立；NVML 口径不成立时用它做账本对拍。"
+                 "它只测被追踪的那个 kernel，因此**不受窗口里还有别的 kernel 影响**——"
+                 "多 kernel 窗口下这是唯一诚实的 per-launch 口径"
+                 if est.trace_available else est.trace_unavailable_reason),
+                est.trace_resolution or "模型量"))
     if est.ledger_basis:
         ref = est.reference_bytes()
         b = "每次 launch" if est.ledger_basis == "per-launch" else "整窗口总量"
@@ -519,16 +770,19 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
                     f"{est.basis_label(basis)}",
                     f"账本 {ref / 1e6:.1f} MB；对拍常用 |误差| < 10% 作为验收线"
                     + ("；此次用**轨迹口径**，因为 NVML 代理口径不成立"
-                       if basis_used.startswith("trace") else ""), ""))
+                       if basis_used.startswith("trace") else ""),
+                    attribution_res if basis_used.startswith("nvml-per-launch") else
+                    (est.trace_resolution or "模型量")))
     if est.ledger_range:
         out.append(("est__dram_range_position_pct",
                     round(est.range_position_pct_for(basis), 1)
                     if est.range_position_pct_for(basis) is not None else None, "%",
                     f"在账本区间 [{est.ledger_range[0] / 1e6:.1f}, {est.ledger_range[1] / 1e6:.1f}] MB "
                     f"（per-launch）中的相对位置；实际口径：{est.basis_label(basis)}",
-                    est.range_verdict_for(basis), ""))
+                    est.range_verdict_for(basis), attribution_res))
         if est.range_verdict_for(basis):
             out.append(("ks__ledger_range_verdict", est.range_verdict_for(basis), "",
                         "由区间位置与两条口径推出",
-                        "靠下界 ⇒ 账本预测的流量偏大/O(S²) 口径成立；靠上界 ⇒ 账本可能漏项", ""))
+                        "靠下界 ⇒ 账本预测的流量偏大/O(S²) 口径成立；靠上界 ⇒ 账本可能漏项",
+                        attribution_res))
     return out

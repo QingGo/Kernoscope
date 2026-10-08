@@ -459,6 +459,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         log(f"error: no kernels matched {args.kernel_name!r}. Available examples: {names}")
         return 1
 
+    # ---------- R-46：窗口主导性所需的「谁在窗口里」----------
+    # 逐 launch 的 CUPTI 时长一直在报告里，只是从前没有参与判定：
+    # 于是一个窗口里顺序跑了四个 kernel 的负载被判成「可归因到单个 kernel」。
+    # 注意 -c/-s 只限制**展示**，不能改变 per-launch 的分母：分母若被截断，窗口总量
+    # 会被除到一个偏小的 launch 数上，误差同样是倍数级（与 D1 同一族）。
+    matched_all = select_launches(launches, args.kernel_name, 0, 0,
+                                  args.launch_skip_before_match)
+    matched_ns = sum(max(0, l.end_ns - l.start_ns) for l in matched_all)
+    total_kernel_ns = sum(max(0, l.end_ns - l.start_ns) for l in launches)
+    other_ns = max(0, total_kernel_ns - matched_ns)
+    matched_names = {l.display_name(args.kernel_name_base) for l in matched_all}
+    other_names = {l.display_name(args.kernel_name_base) for l in launches} - matched_names
+
     # ---------- 账本参数（MB -> bytes）----------
     ledger_per_launch = args.ks_ledger_mb * 1e6 if args.ks_ledger_mb else None
     ledger_total = args.ks_ledger_total_mb * 1e6 if args.ks_ledger_total_mb else None
@@ -474,6 +487,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
     # ---------- DRAM 流量估算（NVML 代理；失败时可用轨迹口径对拍）----------
+    from .analyze.dram import SHARE_STRONG
     from .analyze.dram import estimate as estimate_dram
 
     memtrace_stats = {}
@@ -523,7 +537,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         peak_source = "--ks-peak-gbps 覆盖值"
     elif peaks is not None:
         peak_source = peaks.source_label()
-    launches_for_dram = len(next(iter(grouped_dram.values()))) if len(grouped_dram) == 1 else 0
+    launches_for_dram = len(matched_all) if len(grouped_dram) == 1 else 0
+    trace_resolution = ""
+    st0 = memtrace_stats.get(trace_kernel)
+    if trace_bytes_per_launch is not None and st0 is not None:
+        trace_resolution = (f"抽样 {st0.sampling_ratio * 100:.1f} %"
+                            if st0.sampling_ratio < 0.999 else "全量轨迹")
     dram_est = estimate_dram(
         sampler.result.samples, peak_gbs=peak_gbs, window_s=wall_ns / 1e9,
         launches=launches_for_dram,
@@ -536,6 +555,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         trace_bytes_per_launch=(trace_bytes_per_launch if len(grouped_dram) == 1 else None),
         trace_kernel=trace_kernel,
         trace_unavailable_reason=trace_reason,
+        matched_kernel_ns=matched_ns,
+        other_kernels_ns=other_ns,
+        other_kernel_count=len(other_names),
+        trace_resolution=trace_resolution,
     )
     if len(grouped_dram) != 1:
         dram_est.notes.append(
@@ -626,11 +649,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         + (f" / --ks-warmup {args.ks_warmup:g}s" if args.ks_warmup else "")
         + (f" / --ks-window-s {args.ks_window_s:g}s" if args.ks_window_s else ""))
     if dram_est.reliable and dram_est.bytes_total > 0:
+        # R-45：摘要里的「显存忙碌」是**参与积分窗口**的均值，与 meas__nvml_mem_busy_mean_pct
+        # （整进程均值）是两个数。两个都印出来，并给出参与估算那个的名字，读者才能复核估算。
+        proc_busy = nvml_summary.get("mem_util_mean")
         summary = (f"DRAM 估算 {dram_est.bytes_total / 1e6:.1f} MB"
-                   f"（显存忙碌 {dram_est.mem_util_pct_mean:.1f}% × 峰值 {dram_est.peak_gbs:.0f} GB/s，"
-                   f"窗口覆盖率 {dram_est.window_coverage_pct:.0f}%）")
-        if dram_est.bytes_per_launch is not None:
+                   f"（窗口显存忙碌 {dram_est.mem_util_pct_mean:.1f}%"
+                   + (f"／整进程 {proc_busy:.1f}%" if proc_busy is not None else "")
+                   + f" × 峰值 {dram_est.peak_gbs:.0f} GB/s，"
+                   f"窗口覆盖率 {dram_est.window_coverage_pct:.1f}%"
+                   f"；参与估算的是 ks__dram_window_mem_busy_mean_pct）")
+        if dram_est.window_busy_segments > 1:
+            summary += f"；窗口有 {dram_est.window_busy_segments} 段连续忙碌期"
+        # D3：per-launch 能不能给、为什么不能给，只由 per_launch_verdict 一个地方决定。
+        # 从前这里是 `bytes_per_launch is not None`，于是摘要会一边说「口径不成立」一边
+        # 把那个本该作废的 per-launch 值打印出来。
+        ok_pl, why_pl = dram_est.per_launch_verdict()
+        share = dram_est.matched_kernel_kernel_share_pct
+        if share is not None:
+            summary += (f"；窗口主导性 {share:.1f}%"
+                        f"（内核时间份额，门槛 {SHARE_STRONG:.0f}%）")
+        if ok_pl:
             summary += f" → {dram_est.bytes_per_launch / 1e6:.2f} MB/launch"
+            if dram_est.attribution_bias_estimate_pct:
+                summary += f"（归因上偏估计 +{dram_est.attribution_bias_estimate_pct:.0f}%）"
+        else:
+            summary += f" → per-launch 不给：{why_pl}"
         if dram_est.ledger_requested:
             ref = dram_est.reference_bytes()
             basis = "per-launch" if dram_est.ledger_basis == "per-launch" else "总量"
@@ -663,6 +706,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     if used_noop:
         log(f"warn: these flags are accepted for ncu compatibility but have no effect here: "
             f"{', '.join(used_noop)} (our data source has no counter/replay passes)")
+
+    # ---------- R-38：达成值超过标定峰值 → 显式红灯 ----------
+    for _k in rep.kernels:
+        for _s in _k.sections:
+            for _m in _s.metrics:
+                if _m.name == "ks__over_peak_warning":
+                    log(f"warn: [{_k.name}] {_m.note}")
+
+    # ---------- R-39：--metrics 一个都没匹配上时不能静默成功 ----------
+    requested_metrics = [n for v in (args.metrics or []) for n in v.split(",") if n.strip()]
+    if requested_metrics:
+        produced = _collect_metric_names(rep)
+        missing = [n for n in requested_metrics if n not in produced]
+        if len(missing) == len(requested_metrics):
+            log(f"warn: --metrics 请求的 {len(missing)} 个指标在本报告里一个都不存在"
+                f"（{', '.join(missing)}）—— 因此报告里不会有任何指标行。"
+                f"这可能是名字写错，也可能是需要硬件计数器（本机拿不到）；"
+                f"用 --strict 可把它变成失败（exit 2），或换 --set basic 看有哪些指标可用")
+        elif missing:
+            log(f"warn: --metrics 里有 {len(missing)} 个指标不存在、已忽略：{', '.join(missing)}")
 
     # ---------- 输出 ----------
     rc = _emit(rep, args, compat_mode, logged)
@@ -705,15 +768,19 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
                             f"{KNOWN_COUNTER_METRICS[name]}")
         elif name not in _collect_metric_names(rep):
             problems.append(f"requested metric not found: {name}")
+    # 3) 数据驱动的门禁（R-43）：一个 section 只有在**真的没产出任何数据**时才算问题。
+    #    从前这里只看名字：即使 --ks-instr-hist 已经把 est__issue_slot_utilization_pct
+    #    算出来了，`--section SchedulerStats --strict` 仍然返回 2 —— 门禁在拦自己的成果。
     for s in args.section or []:
-        if s in COUNTER_SECTIONS:
-            problems.append(f"requested section needs hardware counters: {s}")
-    # 3) --set 也要覆盖：只把 section 名报出来，不把 10 个 section 全铺开
+        if s in COUNTER_SECTIONS and not _section_produced(rep, s):
+            problems.append(f"requested section produced no data: {s} - {COUNTER_SECTIONS[s]}")
+    # 4) --set 也要覆盖：只把 section 名报出来，不把 10 个 section 全铺开
     set_name = getattr(args, "set_name", "basic")
     if not (args.section or []):
         from .sections import SET_SECTIONS
 
-        gated = [s for s in SET_SECTIONS.get(set_name, []) if s in COUNTER_SECTIONS]
+        gated = [s for s in SET_SECTIONS.get(set_name, [])
+                 if s in COUNTER_SECTIONS and not _section_produced(rep, s)]
         if gated:
             problems.append(
                 f"--set {set_name} requests {len(gated)} section(s) that need hardware counters "
@@ -744,6 +811,21 @@ def _report_strict(problems: list[str]) -> None:
     print("error(strict): refusing to continue - some requested data cannot be produced "
           "honestly on this machine. Re-run without --strict to get 'n/a' rows instead.",
           file=sys.stderr)
+
+
+def _section_produced(rep: Report, name: str) -> bool:
+    """这个 section 是否**真的产出了数据**（有任一非 unavailable 指标）。
+
+    R-43：门禁要按产出判定，而不是按请求的名字判定。
+    """
+    from .provenance import Provenance
+
+    for k in rep.kernels:
+        for s in k.sections:
+            if s.name == name and any(m.provenance is not Provenance.UNAVAILABLE
+                                      for m in s.metrics):
+                return True
+    return False
 
 
 def _collect_metric_names(rep: Report) -> set[str]:
