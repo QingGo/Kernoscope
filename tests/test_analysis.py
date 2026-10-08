@@ -71,6 +71,23 @@ def test_peaks_from_machine_profile():
     }
     p = MachinePeaks.from_profile(prof, "bf16")
     assert p.compute_tflops == pytest.approx(171.7)
-    assert p.bandwidth_gbs == pytest.approx(934.0)  # 取三个带宽里最大的
+    # 取 copy 速率（读写混合的代表值）；取 max 会落在 write 峰值上、高估流量约 4%
+    assert p.bandwidth_gbs == pytest.approx(909.0)
     p32 = MachinePeaks.from_profile(prof, "fp32")
     assert p32.compute_tflops == pytest.approx(54.0)  # 实测值，而不是规格 82.6
+
+
+def test_machine_peaks_prefers_copy_bandwidth():
+    """取 max 会落在 write 峰值上、系统性高估 DRAM 流量；默认应取 copy 速率。"""
+    from kernoscope.analyze.roofline import MachinePeaks
+
+    peaks = MachinePeaks.from_profile({
+        "gpu": "X",
+        "measured_dram": {"copy_gbs": 906.7, "read_gbs": 897.1, "write_gbs": 935.8},
+        "measured_matmul_tflops": {"torch.bfloat16": {"tflops": 171.7}},
+    })
+    assert peaks.bandwidth_gbs == pytest.approx(906.7)
+
+    # 没有 copy 项时回退到 max，而不是 0
+    fallback = MachinePeaks.from_profile({"measured_dram": {"read_gbs": 800.0, "write_gbs": 900.0}})
+    assert fallback.bandwidth_gbs == pytest.approx(900.0)

@@ -13,6 +13,18 @@ from ..report import Report
 WIDTH = 46
 
 
+def _fmt_value(value, unit: str) -> tuple[str, str]:
+    """文本展示用的自适应单位：MB 超 1000 就换 GB/TB（JSON/CSV 仍保持原始单位）。"""
+    if not isinstance(value, (int, float)):
+        return str(value), unit
+    if unit == "MB":
+        if abs(value) >= 1e6:
+            return f"{value / 1e6:.3f}", "TB"
+        if abs(value) >= 1e3:
+            return f"{value / 1e3:.2f}", "GB"
+    return f"{value:.6g}" if isinstance(value, float) else str(value), unit
+
+
 def render_text(rep: Report, *, quiet: bool = False, summary: str = "none",
                 page: str = "details") -> str:
     out: list[str] = []
@@ -28,6 +40,10 @@ def render_text(rep: Report, *, quiet: bool = False, summary: str = "none",
                        + (f" (sm_{str(d.compute_capability).replace('.', '')})" if d.compute_capability else "")
                        + (f" driver {d.driver}" if d.driver else "")
                        + (f"  L2 {d.l2_mib:.0f} MiB" if d.l2_mib else ""))
+        if rep.meta.get("dram_summary"):
+            out.append(f"==PROF== {rep.meta['dram_summary']}")
+        elif rep.meta.get("dram_summary_unavailable"):
+            out.append(f"==PROF== DRAM 估算不可用：{rep.meta['dram_summary_unavailable'][:110]}")
         if rep.meta.get("kernel_time_pct") is not None:
             out.append(f"==PROF== Kernel time: {rep.total_kernel_ns / 1e6:.3f} ms of "
                        f"{rep.wall_time_ns / 1e6:.3f} ms wall ({rep.meta['kernel_time_pct']:.1f}%)")
@@ -63,8 +79,8 @@ def render_text(rep: Report, *, quiet: bool = False, summary: str = "none",
                     out.append(f"    {m.name:<{WIDTH}} {'n/a':>14} {'':<8} "
                                f"{m.provenance.tag}  {m.reason[:100]}")
                 else:
-                    unit = m.unit or ""
-                    line = f"    {m.name:<{WIDTH}} {m.render_value():>14} {unit:<8} {m.provenance.tag}"
+                    value_str, unit = _fmt_value(m.value, m.unit or "")
+                    line = f"    {m.name:<{WIDTH}} {value_str:>14} {unit:<8} {m.provenance.tag}"
                     if m.note:
                         line += f"  ({m.note})"
                     out.append(line)

@@ -18,10 +18,13 @@ from .provenance import Metric, Provenance, Section, UNAVAILABLE_REASONS
 
 # `--set` 的分级（对齐 ncu --list-sets）
 SET_SECTIONS: dict[str, list[str]] = {
-    "basic": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "WorkloadDistribution"],
-    "detailed": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "WorkloadDistribution",
+    "basic": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic",
+              "WorkloadDistribution"],
+    "detailed": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic",
+                 "WorkloadDistribution",
                  "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis", "SourceCounters"],
-    "full": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "WorkloadDistribution",
+    "full": ["Duration", "LaunchStats", "Occupancy", "SpeedOfLight", "DramTraffic",
+             "WorkloadDistribution",
              "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis", "MemoryWorkloadAnalysis_Tables",
              "InstructionStats", "SchedulerStats", "WarpStateStats", "SourceCounters",
              "PmSampling", "Nvlink_Tables", "NumaAffinity"],
@@ -66,6 +69,7 @@ class BuildOptions:
     cubin_res: dict[str, dict[str, int]] = field(default_factory=dict)
     cubin_sass: dict[str, Any] | None = None
     nvml_summary: dict[str, float] = field(default_factory=dict)
+    dram: Any = None      # analyze.dram.DramEstimate（避免循环 import）
     sm_count: int = 0
     device_name: str = ""
     arch: str = "sm_89"
@@ -109,6 +113,36 @@ def build_device_kernel(opt: BuildOptions) -> Section:
     if not s.metrics:
         s.add(Metric.unavailable("meas__dram_busy_proxy_pct",
                                  "NVML sampling disabled or unavailable (--ks-no-nvml?)"))
+    return s
+
+
+def build_dram_section(opt: BuildOptions) -> Section | None:
+    """DRAM 流量估算 section（对标 ncu 的 MemoryWorkloadAnalysis / dram__bytes）。
+
+    诚实性处理：占空比过低或缺少实测峰值带宽时，**不给数字**，改为 unavailable + 原因 ——
+    否则会给出一个被空闲稀释、系统性偏小的值（实测同一拷贝 96.8% vs 6.3%）。
+    """
+    est = opt.dram
+    if est is None:
+        return None
+    s = Section("DramTraffic")
+    if not est.reliable or est.bytes_total <= 0:
+        reason = "；".join(est.notes) or "无法估算（缺少采样或峰值带宽）"
+        s.add(Metric.unavailable("est__dram_bytes_total", reason))
+        return s
+    from .analyze.dram import to_metrics
+
+    for name, value, unit, source, note in to_metrics(est):
+        if value is None:
+            continue
+        # per-launch / 吞吐占比需要"窗口被该 kernel 主导"，否则只能给 n/a
+        if name == "est__dram_bytes_per_launch" and not est.attributable:
+            s.add(Metric.unavailable(
+                name,
+                f"占空比 {est.duty_pct:.0f}% 或未锁定单一 kernel：无法把 {est.bytes_total / 1e6:.0f} MB "
+                f"总量归因到每个 launch（请用 -k 选单个 kernel，并让它在紧循环里跑满）"))
+            continue
+        s.add(Metric.estimated(name, value, unit, source=source, note=note))
     return s
 
 

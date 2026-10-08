@@ -141,3 +141,28 @@ def test_list_sets(capsys):
     rc, out, _ = run(capsys, "--list-sets")
     assert rc == 0
     assert "basic" in out and "LaunchStats" in out
+
+
+# ---------------------------------------------------------------------------
+# 回归：argparse 会对 help 文本做 % 插值，help 里出现裸 % 会让 --help 直接崩。
+# 这类 bug 常规测试看不见（不会去调 --help），但用户第一条命令就是它。
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from kernoscope.cli import main  # noqa: E402
+
+
+@pytest.mark.parametrize("argv", [
+    ["--help"],
+    ["doctor", "--help"],
+    ["occupancy", "--help"],
+    ["--list-sets"],
+])
+def test_help_output_does_not_crash(argv, capsys):
+    try:
+        rc = main(argv)
+    except SystemExit as e:          # argparse 正常退出
+        rc = e.code or 0
+    out = capsys.readouterr()
+    assert rc in (0, None), f"{argv} 退出码异常: {rc}"
+    assert (out.out + out.err).strip(), f"{argv} 没有输出"

@@ -42,13 +42,18 @@ class MachinePeaks:
     def from_profile(profile: dict[str, Any], dtype: str = "bf16") -> "MachinePeaks":
         dt = DTYPE_KEY.get(dtype.lower(), "fp16")
         mm = profile.get("measured_matmul_tflops", {})
-        cands = [mm[PROFILE_KEY[dt]]] if PROFILE_KEY.get(dt) else []
+        # 用 .get()：标定文件里可能没有 matmul 数据（只标了带宽），不能直接下标
+        cands = [mm.get(PROFILE_KEY[dt])] if PROFILE_KEY.get(dt) else []
         if dt == "fp16":  # bf16/fp16 都测过，取更好的那个
             cands = [mm.get("torch.bfloat16"), mm.get("torch.float16")]
         tflops = max((c["tflops"] for c in cands if isinstance(c, dict) and c.get("tflops")),
                      default=0.0)
         dram = profile.get("measured_dram", {})
-        bw = max((v for v in dram.values() if isinstance(v, (int, float))), default=0.0)
+        vals = [v for v in dram.values() if isinstance(v, (int, float))]
+        # 默认用 copy 速率：DRAM bound 的 kernel 基本是读写混合，取 max（通常落在 write 峰值）
+        # 会系统性高估流量（实测约 +4%）。read 峰值与 copy 峰值一般只差 ~1%。
+        bw = dram.get("copy_gbs") if isinstance(dram.get("copy_gbs"), (int, float)) else (
+            max(vals) if vals else 0.0)
         return MachinePeaks(
             compute_tflops=float(tflops),
             bandwidth_gbs=float(bw),

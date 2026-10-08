@@ -34,7 +34,8 @@ from .provenance import Metric, Provenance, UNAVAILABLE_REASONS
 from .report import DeviceInfo, KernelLaunch, KernelReport, Report
 from .render import render_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
-                       build_device_kernel, build_kernel_sections, requested_sections)
+                       build_device_kernel, build_dram_section, build_kernel_sections,
+                       requested_sections)
 
 PROG = "kernoscope"
 
@@ -120,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-no-nvml", action="store_true", help="不做设备级采样")
     k.add_argument("--ks-perfetto", default=None, help="Perfetto trace 输出路径（.json）")
     k.add_argument("--ks-sm-count", type=int, default=0, help="覆盖 SM 数量")
+    k.add_argument("--ks-ledger-mb", type=float, default=None,
+                   help="账本预测的 DRAM 字节数（MB）：报告里给出估算与账本的相对误差")
+    k.add_argument("--ks-ledger-range-mb", default=None,
+                   help="账本给出的区间 LOW,HIGH（MB）：报告里给出估算落在区间的哪一侧")
     k.add_argument("--ks-keep-intermediate", action="store_true",
                    help="保留 nsys 中间产物（.nsys-rep/.sqlite）；给了 -o 时默认保留在其旁边")
     k.add_argument("--strict", action="store_true",
@@ -363,6 +368,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         log(f"error: no kernels matched {args.kernel_name!r}. Available examples: {names}")
         return 1
 
+    # ---------- 账本参数（MB -> bytes）----------
+    ledger_bytes = args.ks_ledger_mb * 1e6 if args.ks_ledger_mb else None
+    ledger_range = None
+    if args.ks_ledger_range_mb:
+        try:
+            parts = [float(x) for x in args.ks_ledger_range_mb.replace("..", ",").split(",")]
+            if len(parts) != 2:
+                raise ValueError("需要 LOW,HIGH 两个数")
+            ledger_range = (min(parts) * 1e6, max(parts) * 1e6)
+        except ValueError as e:
+            log(f"error: --ks-ledger-range-mb 解析失败（{e}）；应形如 LOW,HIGH")
+            return 1
+
+    # ---------- DRAM 流量估算（NVML 代理）----------
+    from .analyze.dram import estimate as estimate_dram
+
+    grouped_dram: dict[str, list[KernelLaunch]] = {}
+    for l in matched:
+        grouped_dram.setdefault(l.display_name(args.kernel_name_base), []).append(l)
+    peak_gbs = float(args.ks_peak_gbps or (peaks.bandwidth_gbs if peaks else 0.0) or 0.0)
+    launches_for_dram = len(next(iter(grouped_dram.values()))) if len(grouped_dram) == 1 else 0
+    dram_est = estimate_dram(
+        sampler.result.samples, peak_gbs=peak_gbs, window_s=wall_ns / 1e9,
+        launches=launches_for_dram,
+        ledger_bytes=ledger_bytes, ledger_range=ledger_range,
+    )
+    if len(grouped_dram) != 1:
+        dram_est.notes.append(
+            f"匹配到 {len(grouped_dram)} 个 kernel：per-launch 口径不适用，只给总量")
+
     # ---------- 组装报告 ----------
     from .analyze.occupancy import arch_for
 
@@ -380,7 +415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         sm_count=sm_count,
         device_name=device.name,
         arch=arch,
-        peak_gbs=peaks.bandwidth_gbs if peaks else 0.0,
+        peak_gbs=peak_gbs,
+        dram=dram_est,
     )
 
     rep = Report(device=device)
@@ -397,17 +433,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         rep.sources["WARNING"] = ("SYNTHETIC DATA - numbers are fabricated by --ks-synthetic and "
                                   "must not be interpreted as measurements")
 
-    grouped: dict[str, list[KernelLaunch]] = {}
-    for l in matched:
-        grouped.setdefault(l.display_name(args.kernel_name_base), []).append(l)
-    for name, ls in grouped.items():
+    for name, ls in grouped_dram.items():
         alias = ls[0].short_name if ls[0].short_name and ls[0].short_name != name else ""
         kr = KernelReport(name, launch_count=len(ls), alias=alias,
                           launches=sorted(ls, key=lambda x: x.start_ns))
         kr.sections = build_kernel_sections(kr, opt)
         rep.kernels.append(kr)
     dev_kr = KernelReport("(device)", launch_count=0)
-    dev_kr.sections = [build_device_kernel(opt)]
+    dev_sections = [build_device_kernel(opt)]
+    if "DramTraffic" in requested_sections(opt):
+        dram_sec = build_dram_section(opt)
+        if dram_sec is not None:
+            dev_sections.append(dram_sec)
+    dev_kr.sections = dev_sections
     rep.kernels.append(dev_kr)
 
     rep.sort_kernels("total")
@@ -424,6 +462,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if wall_ns:
             rep.meta["kernel_time_pct"] = 100.0 * rep.total_kernel_ns / wall_ns
     rep.generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    if dram_est.reliable and dram_est.bytes_total > 0:
+        summary = (f"DRAM 估算 {dram_est.bytes_total / 1e6:.1f} MB"
+                   f"（忙碌 {dram_est.busy_pct_mean:.1f}% × 峰值 {dram_est.peak_gbs:.0f} GB/s，"
+                   f"占空比 {dram_est.duty_pct:.0f}%）")
+        if dram_est.bytes_per_launch is not None:
+            summary += f" → {dram_est.bytes_per_launch / 1e6:.2f} MB/launch"
+        if dram_est.ledger_bytes:
+            summary += f"；vs 账本 {dram_est.ledger_bytes / 1e6:.1f} MB，误差 {dram_est.ledger_err_pct:+.1f}%"
+        if dram_est.ledger_range:
+            summary += f"；{dram_est.range_verdict}"
+        rep.meta["dram_summary"] = summary
+    else:
+        rep.meta["dram_summary_unavailable"] = "；".join(dram_est.notes)
 
     # ---------- 空转选项告警 ----------
     used_noop = [f for f in NOOP_FLAGS
