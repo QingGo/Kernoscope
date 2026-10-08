@@ -35,7 +35,9 @@ W1 的验收条件是"缺件时也要成功"。这一份是 `bench/degradation-c
 * `degraded.packet.json`：决策包（3759 B），里面 `environment_refusals=[nsys_missing]`、
   `env.blocked_by` 列出缺哪些依赖 —— 机器可读地说明"这台机器少了什么"；
 * `degraded.onepage.txt`：一屏，结论优先 + "怎么办"；
-* `degraded.err`：整个过程只有 note/warn，没有裸错误；**退出码 0**。
+* `degraded.err`：整个过程只有 note/warn，没有裸错误；**退出码 0**；
+* `first-run-timing.txt`：首跑时长（doctor 2.87 s / capabilities 2.11 s / 带实测探测 2.59 s /
+  合成首跑 2.32 s）—— 这是 G1「陌生人首跑 < 5 分钟」的直接度量。
 
 它不在 `manifest.json` 的步骤表里（那是 `run.sh` 的步骤），因为"把 nsys 移开"这一步
 不适合放进任何人都会跑的复现脚本里；产物本身（能力清单与包）与其它证据同样可复核。

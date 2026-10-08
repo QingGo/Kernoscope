@@ -1,0 +1,9 @@
+# 首跑时长（G1 的直接度量：陌生环境从零到第一个结论）
+# 同一台机器、同一修订（fc1cdba + 3b49053）、冷启动子进程、<host>
+# 命令形式：PYTHONPATH=src python -m kernoscope <args>
+doctor                                    2.87 s  rc=0
+capabilities                              2.11 s  rc=0
+capabilities --json --probe               2.59 s  rc=0
+--ks-synthetic --set basic --screen only  2.32 s  rc=0
+# 结论：首跑到第一个结论 ≈ 2–3 秒（远低于 5 分钟门槛）。
+# 注：--ks-synthetic 不需要 GPU；真机上不加 --ks-synthetic 时还要算上目标命令自身的时长。
