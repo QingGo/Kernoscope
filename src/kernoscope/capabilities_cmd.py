@@ -25,7 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="kernoscope capabilities",
         description="本机能力清单：能回答哪些问题、哪些必然被拒（含 code 与补救办法）、代价多少",
     )
-    p.add_argument("--json", action="store_true", help="输出结构化 JSON（给 agent 用）")
+    p.add_argument("--json", action="store_true",
+                   help="输出完整结构化 JSON（**参考层**：含解释、remedy、逐问 observed）")
+    p.add_argument("--brief", action="store_true",
+                   help="输出**入口层**摘要（<1.2 KB，只有 id/code/计数）："
+                        "能答什么、不能答什么、下一步做什么；细节用 --json")
     p.add_argument("--probe", action="store_true",
                    help="额外做一次计数器实测探测（默认只做静态推断，快）")
     p.add_argument("-o", "--out", default=None, help="把 JSON 写到文件")
@@ -36,6 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
 def capabilities_main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     report = probe(probe_counters=args.probe)
+    if args.brief:
+        # 机器优先：紧凑 JSON，不缩进（缩进只是把字节花在空白上）
+        print(json.dumps(report.brief(), ensure_ascii=False, separators=(",", ":")))
+        if args.out:
+            Path(args.out).write_text(
+                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n")
+            if not args.quiet:
+                print(f"wrote {args.out}", file=sys.stderr)
+        return 0
     if args.json or args.out:
         blob = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
         if args.out:

@@ -212,3 +212,80 @@ def test_tiers_are_contiguous_and_described():
     for i, t in enumerate(TIERS):
         assert t.level == i
         assert t.name and t.needs and t.gives
+
+
+# --------------------------------------------------------------------------
+# 渐进披露的入口层：--brief
+# --------------------------------------------------------------------------
+def test_brief_is_an_entry_layer_not_a_manual():
+    """入口层必须小：完整 --json 是参考手册（本机实测 ~19-26 KB），brief 要 < 1.2 KB。"""
+    import json
+
+    r = evaluate(_env(has_memtrace=True, has_instr_hist=True))
+    brief = json.dumps(r.brief(), ensure_ascii=False, separators=(",", ":"))
+    full = json.dumps(r.to_dict(), ensure_ascii=False, separators=(",", ":"))
+    assert len(brief.encode("utf-8")) <= 1200, len(brief.encode("utf-8"))
+    assert len(brief.encode("utf-8")) * 8 < len(full.encode("utf-8"))
+
+
+def test_brief_partitions_every_question_exactly_once():
+    """入口层不许漏问题，也不许一个问题上两个列表。"""
+    r = evaluate(_env())
+    b = r.brief()
+    listed = b["can_answer"] + b["weak"] + b["cannot_answer"]
+    assert sorted(listed) == sorted(q.id for q in QUESTIONS)
+    assert len(listed) == len(set(listed))
+
+
+def test_brief_agrees_with_full_json_states():
+    r = evaluate(_env(has_nvbit=False))
+    b = r.brief()
+    full = r.matrix()
+    for qid in b["can_answer"]:
+        assert full[qid] == "available"
+    for qid in b["weak"]:
+        assert full[qid] == "degraded"
+    for qid in b["cannot_answer"]:
+        assert full[qid] == "refused"
+
+
+def test_brief_has_no_prose_fields():
+    """入口层只有 id / code / 计数：解释与 remedy 全文属于参考层（--json）。"""
+    b = evaluate(Env(has_gpu=False)).brief()
+    blob = json.dumps(b, ensure_ascii=False)
+    for banned in ("message", "observed", "threshold", "action"):
+        assert banned not in blob, banned
+    assert b["next"], "缺件时必须给出下一步"
+    for item in b["next"]:
+        assert set(item) <= {"code", "unlocks", "cost_kind", "cost_s", "cmd"}
+
+
+def test_brief_next_is_ranked_and_capped():
+    r = evaluate(Env(has_gpu=True, has_nvml=True, has_nsys=False))
+    b = r.brief()
+    assert len(b["next"]) <= 4
+    unlocks = [i["unlocks"] for i in b["next"]]
+    assert unlocks == sorted(unlocks, reverse=True)
+
+
+def test_capabilities_brief_cli(capsys):
+    from kernoscope.cli import main
+
+    rc = main(["capabilities", "--brief"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    d = json.loads(out)                      # stdout 必须是纯 JSON（一行）
+    assert "can_answer" in d and "cannot_answer" in d
+    assert len(out.encode("utf-8")) <= 1300
+
+
+def test_capabilities_brief_can_still_write_the_full_json(capsys, tmp_path):
+    from kernoscope.cli import main
+
+    out_path = tmp_path / "cap.json"
+    rc = main(["capabilities", "--brief", "--out", str(out_path), "--quiet"])
+    assert rc == 0
+    full = json.loads(out_path.read_text())
+    assert "answers" in full and "refusals" in full     # 参考层照常落盘
+    captured = capsys.readouterr()
+    json.loads(captured.out)                            # stdout 仍是纯 JSON

@@ -252,6 +252,42 @@ class CapabilityReport:
             "probe_note": self.probe_note,
         }
 
+    # ---- 摘要（给 agent 的**入口层**：只有 id 与计数，没有散文）----
+    def brief(self, max_next: int = 4) -> dict[str, Any]:
+        """渐进披露的第一层：**能答什么、不能答什么、下一步做什么**，不含任何解释。
+
+        为什么需要它：完整的 `capabilities --json` 是一份**参考手册**（本机实测 25.8 KB，
+        约 8k token）。把它当"入口"发给 agent，等于每轮都付一次全量上下文的钱。
+        入口层只回答三个问题，且全部用 id / code / 计数表达：
+
+            can_answer / weak / cannot_answer   问题 id 列表
+            blocked_by                          缺哪些依赖（code）
+            next                                按"解锁数/代价"排序的动作（code + 命令）
+
+        要解释、要 remedy 全文、要 observed/threshold，都去 `--json`（参考层）取。
+        """
+        matrix = self.matrix()
+        summary: dict[str, Any] = {
+            "schema_version": CAPABILITIES_SCHEMA_VERSION,
+            "tool": "kernoscope",
+            "tool_version": __version__,
+            "tier": {"level": self.tier, "name": self.tier_obj.name},
+            "counter_state": self.env.counter_state,
+            "can_answer": [a.question.id for a in self.answers
+                           if a.state == STATE_AVAILABLE],
+            "weak": [a.question.id for a in self.answers if a.state == STATE_DEGRADED],
+            "cannot_answer": [a.question.id for a in self.answers
+                              if a.state == STATE_REFUSED],
+            "blocked_by": sorted({d["code"] for d in self.next_actions()}),
+            "next": [{"code": d["code"], "unlocks": len(d["unlocks"]),
+                      "cost_kind": d["cost_kind"], "cost_s": d["cost_s"],
+                      "cmd": d["command"]}
+                     for d in self.next_actions()[:max_next]],
+        }
+        if len(matrix) != len(self.answers):  # pragma: no cover - 防御性
+            raise ValueError("matrix 与 answers 不一致")
+        return summary
+
     # ---- 一屏（人视图；与 --json 同一模型）----
     def render(self) -> str:
         out: list[str] = []
