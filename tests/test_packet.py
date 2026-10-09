@@ -119,6 +119,24 @@ def test_verdicts_are_capped():
     assert len(p["verdicts"]) <= MAX_VERDICTS
 
 
+@pytest.mark.parametrize("limit", [1200, 1800, 2600, 3400, 4096])
+def test_budget_is_enforced_even_when_the_trim_log_itself_costs_bytes(limit):
+    """回归：`cost.trimmed` 自己占字节，量尺寸必须把它算进去。
+
+    （真事：给判词加 `actionable` 之后，包先被裁到刚好 4090 B，再写进裁剪步骤就变成
+    4119 B —— 超了预算却没人发现。现在每应用一步就先记账再量。）
+    """
+    p = build(_rich_report())
+    from kernoscope.packet import enforce_budget
+
+    trimmed = enforce_budget(p, limit=limit)
+    size = packet_bytes(p)
+    # 要么真的压进预算，要么如实标记压不进去（默认 4096 是能达到的，见另一个用例）
+    assert size <= limit or p["cost"].get("over_budget") is True, (limit, size, trimmed)
+    assert p["cost"]["trimmed"] == trimmed
+    assert size == p["cost"]["packet_bytes"]
+
+
 def test_unmeasured_is_grouped_not_exploded():
     p = build(_rich_report())
     assert len(p["unmeasured"]) <= 6
@@ -333,3 +351,53 @@ def test_no_packet_verdict_is_soft_with_a_failed_premise():
     for v in p["verdicts"]:
         if v["status"] != "refused":
             assert all(pr.get("ok") for pr in (v.get("premises") or [])), v["id"]
+
+
+# --------------------------------------------------------------------------
+# schema v1.1：actionable 是追加字段，v1.0 的包必须仍然能读
+# --------------------------------------------------------------------------
+def test_packet_carries_schema_revision_and_actionable():
+    from kernoscope.packet import PACKET_SCHEMA_REVISION, PACKET_SCHEMA_VERSION
+
+    p = build(_rich_report())
+    assert p["schema_version"] == PACKET_SCHEMA_VERSION == 1     # 主版本不动
+    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.1"
+    ids = {v["id"] for v in p["verdicts"]}
+    assert ids, "这个报告应当产出判词"
+    for v in p["verdicts"]:
+        assert isinstance(v["actionable"], bool)
+        if v["status"] == "refused":
+            assert v["actionable"] is False
+        else:
+            assert v["actionable"] is True
+            assert all(pr.get("ok") for pr in (v.get("premises") or []))
+
+
+def test_v10_packet_without_actionable_still_reads_and_renders():
+    """向后兼容：v1.0 的包没有 actionable/schema_revision，读包的人要能回退推导。"""
+    from kernoscope.packet import verdict_is_actionable
+
+    p = build(_rich_report())
+    p.pop("schema_revision", None)
+    for v in p["verdicts"]:
+        v.pop("actionable", None)
+    # 回退规则：不是 refused 且前提全部成立
+    for v in p["verdicts"]:
+        expect = v["status"] != "refused" and all(pr.get("ok")
+                                                  for pr in (v.get("premises") or []))
+        assert verdict_is_actionable(v) is expect, v["id"]
+    text = render_onepage(p)
+    assert "Kernoscope" in text
+
+
+def test_actionable_helper_rules_match_the_explicit_field():
+    """v1.0 回退规则必须与 v1.1 显式字段**完全一致**（否则新旧包判词含义不同）。"""
+    from kernoscope.packet import verdict_is_actionable
+
+    # 没列前提的判词（例如"最耗时的 kernel 是 X"这种一条实测事实）仍可依据
+    assert verdict_is_actionable({"id": "x", "status": "soft"}) is True
+    assert verdict_is_actionable({"id": "x", "status": "ok", "premises": []}) is True
+    assert verdict_is_actionable({"id": "x", "status": "ok",
+                                  "premises": [{"id": "p", "ok": False}]}) is False
+    # 显式字段优先于推导
+    assert verdict_is_actionable({"id": "x", "status": "soft", "actionable": False}) is False

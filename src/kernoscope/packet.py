@@ -40,6 +40,10 @@ from .provenance import Metric, Provenance
 from .refusals import Refusal, RefusalCode, Remedy, code_title, default_remedy
 
 PACKET_SCHEMA_VERSION = 1
+# v1.1（追加式，向后兼容）：加 `actionable` 与 `schema_revision`。主版本不动是因为
+# **读 v1.0 包的代码仍然能读 v1.1**：新字段是"多给一条已经能推出来的结论"，不是改语义。
+# 改了语义才升 PACKET_SCHEMA_VERSION（那时 `from_dict` 要按版本分支，并写进 CHANGELOG）。
+PACKET_SCHEMA_REVISION = "1.1"
 PACKET_SIZE_BUDGET_BYTES = 4096          # 默认包的尺寸预算（测试守着，防止再长成 150 MB）
 UNMEASURED_EXAMPLES_PER_CODE = 2
 MAX_UNMEASURED_GROUPS = 6                 # 归组之后仍然只默认给前 6 组
@@ -129,6 +133,11 @@ class Verdict:
     def failed_premises(self) -> list[Premise]:
         return [p for p in self.premises if p.ok is False]
 
+    @property
+    def is_actionable(self) -> bool:
+        """能不能把这条判词当作行动依据（v1.1 起的显式字段）。"""
+        return self.status != REFUSED and not self.failed_premises
+
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
             raise ValueError(f"bad verdict status {self.status!r}")
@@ -147,7 +156,11 @@ class Verdict:
                 f"verdict {self.id!r} is {self.status} but premise(s) "
                 f"{[p.id for p in self.failed_premises]} failed - build() must downgrade it "
                 f"to refused before serialization")
-        d: dict[str, Any] = {"id": self.id, "status": self.status}
+        d: dict[str, Any] = {"id": self.id, "status": self.status,
+                             # 「能不能拿它当行动依据」的**单字段**答案：三个条件
+                             # （不是 refused、前提全成立、还在包里）里前两个在这里合取，
+                             # 第三个由"它出现在包里"本身保证。agent 因此不必自己推。
+                             "actionable": self.is_actionable}
         if self.facts:
             d["facts"] = {k: (_clip(v, FACT_STR_LIMIT) if isinstance(v, str) else v)
                           for k, v in self.facts.items()}
@@ -635,6 +648,7 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
 
     packet: dict[str, Any] = {
         "schema_version": PACKET_SCHEMA_VERSION,
+        "schema_revision": PACKET_SCHEMA_REVISION,
         "tool": "kernoscope",
         "tool_version": getattr(rep, "tool_version", __version__),
         "protocol": {"hash": protocol_hash(rep), "basis": basis,
@@ -672,20 +686,16 @@ def enforce_budget(packet: dict[str, Any],
     读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。
     """
     trimmed: list[str] = []
+    # `cost.trimmed` 自己也是包的一部分，所以先放好空列表再量，之后每应用一步就把它
+    # 记进去再量 —— 否则会出现「刚量完 4090 B，写进裁剪步骤后变成 4119 B」这种
+    # 自我欺骗（真事：加 actionable 字段后正好卡在这个缝上）。
+    packet.setdefault("cost", {})["trimmed"] = []
 
     def _size() -> int:
-        # 必须按**最终**序列化量：`cost.packet_bytes` 自己也是包的一部分，
-        # 若不计入它，就会出现「包 4121 B 却认为自己没超 4096」这种自我欺骗。
         return len(dumps(packet).encode("utf-8"))
 
     if _size() <= limit:
-        packet.setdefault("cost", {})["trimmed"] = []
         return trimmed
-
-    def _step(name: str, fn) -> bool:
-        fn()
-        trimmed.append(name)
-        return _size() <= limit
 
     def _drop_passing_premises() -> None:
         """只保留**不成立**的前提（成立的前提值能从报告里再看）。"""
@@ -706,12 +716,15 @@ def enforce_budget(packet: dict[str, Any],
         ("facts", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),
     ]
     for name, fn in steps:
-        if _step(name, fn):
+        fn()
+        packet["cost"]["trimmed"].append(name)
+        if _size() <= limit:
             break
-    packet.setdefault("cost", {})["trimmed"] = trimmed
-    if _size() > limit:  # pragma: no cover - 走到这里说明上面的步骤不够，得再加一步
-        packet["cost"]["over_budget"] = _size()
-    return trimmed
+    if _size() > limit:
+        # 极限压缩后仍然超预算（只在把 limit 调到远小于默认值时发生）：如实标记，
+        # 不去改 `packet_bytes` 那个数 —— 它必须等于真实字节数（有测试守）。
+        packet["cost"]["over_budget"] = True
+    return list(packet["cost"]["trimmed"])
 
 
 def _cap_list(packet: dict[str, Any], key: str, n: int) -> None:
@@ -802,6 +815,20 @@ def _refusal_index(verdicts: Sequence[Verdict], unmeasured: Sequence[dict[str, A
                 index[code] = _refusal_entry(code, a.refusal.severity,
                                              a.refusal.remedy_or_default)
     return index
+
+
+def verdict_is_actionable(verdict: dict[str, Any]) -> bool:
+    """这条判词能不能当行动依据（读包者的统一入口）。
+
+    优先用显式字段 `actionable`（v1.1+）；v1.0 的包没有这个字段，就按同一套规则推：
+    不是 refused、且**列出来的**前提全部成立。没列前提的判词（例如只有一条实测事实的
+    结论）不因此变得不可依据 —— 但一旦列了前提，任何一条不成立就必须整条作废。
+    """
+    if "actionable" in verdict:
+        return bool(verdict["actionable"])
+    if verdict.get("status") == REFUSED:
+        return False
+    return all(p.get("ok") for p in (verdict.get("premises") or []))
 
 
 def refusal_index(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1068,7 +1095,8 @@ def _cost_text(rem: dict[str, Any]) -> str:
     return f"≈{s:.0f}s" if s < 90 else f"≈{s / 60:.0f}min"
 
 
-__all__ = ["MAX_VERDICTS", "OK", "PACKET_SCHEMA_VERSION", "PACKET_SIZE_BUDGET_BYTES",
+__all__ = ["MAX_VERDICTS", "OK", "PACKET_SCHEMA_REVISION", "PACKET_SCHEMA_VERSION",
+           "PACKET_SIZE_BUDGET_BYTES", "verdict_is_actionable",
            "PREMISE_LABELS", "REFUSED", "SOFT", "Premise", "Verdict", "build", "dumps",
            "find_metric", "group_unmeasured", "load_packet", "metric_value", "packet_bytes",
            "phrase_verdict", "premise_label", "protocol_hash", "refusal_index",
