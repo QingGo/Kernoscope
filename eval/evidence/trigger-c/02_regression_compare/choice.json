@@ -1,0 +1,1 @@
+{"use": ["kernoscope"], "why": "需求是判断同机两次运行是「真改进/真退化/分不出来」并说明误判风险，kernoscope 的 diff 判定正是做这件事；纯 Python 的 pytest-benchmark 不适用于 CUDA kernel。", "first_command": "kernoscope --help"}

@@ -1,0 +1,1 @@
+{"use": ["nsys", "kernoscope"], "why": "ncu 被 ERR_NVGPUCTRPERM 拒绝，精确 DRAM 计数器这条路已断；先用不需要性能计数器的 nsys 取到 kernel 时长排名，再用 kernoscope 从 nsys 数据判定最慢 kernel 是否 DRAM bound 并给出带误差带的 roofline/瓶颈方向（精确 DRAM 字节它会明确报 n/a）。", "first_command": "nsys profile --stats=true -o /tmp/tr2/01_ncu_perm_denied/prof_train --force-overwrite=true python train.py"}

@@ -1,0 +1,5 @@
+{
+  "use": ["ncu"],
+  "why": "要的是精确 dram__bytes.sum、lts__t_sector_hit_rate.pct 与 warp stall 周期细分，而 kernoscope 的目录描述明确写了「需要精确 L2/DRAM 字节、缓存命中率或 warp stall 周期细分时不要用它」；本机 root 且 RmProfilingAdminOnly=0，ncu 可用，只有它能给硬件计数器。",
+  "first_command": "ncu --kernel-name regex:gemm --metrics dram__bytes.sum,lts__t_sector_hit_rate.pct --section WarpStateStats -f -o gemm_prof python train.py"
+}

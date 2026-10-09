@@ -1,0 +1,13 @@
+{
+  "id": "05_loss_not_decreasing",
+  "task": "模型 loss 从第 2 个 epoch 开始就不下降了，训练代码没改过。帮我看看是为什么。",
+  "catalog": {
+    "ncu": "NVIDIA Nsight Compute：硬件性能计数器（精确 DRAM/L2 字节、命中率、warp stall 细分）。",
+    "nsys": "NVIDIA Nsight Systems：CUPTI 时间线（kernel 时长、launch 配置）。",
+    "torch.profiler": "PyTorch 内置 profiler：算子级耗时与显存。",
+    "nvidia-smi": "设备级读数：显存占用、SM 时钟、功耗、显存忙碌占比。"
+  },
+  "expect_any": [],
+  "forbid_use": ["kernoscope", "ncu", "nsys"],
+  "why": "这是训练收敛问题，不是性能问题：正确做法是先查数据/超参，而不是上 profiler。"
+}

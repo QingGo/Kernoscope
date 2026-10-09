@@ -1,0 +1,5 @@
+{
+  "use": ["py-spy"],
+  "why": "诉求是「哪个 Python 函数在花时间、最好不改代码、要调用栈」，与 py-spy 的目录描述（采样 profiler、找 CPU 侧耗时函数、不改代码、带调用栈）逐条对上；ncu/nsys 看的是 GPU 侧时间线与 kernel 时长，torch.profiler 需要改代码且只到算子级。",
+  "first_command": "py-spy record -o dataloader_profile.svg -f speedscope -- python train.py"
+}

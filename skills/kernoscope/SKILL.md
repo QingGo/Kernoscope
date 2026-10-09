@@ -6,6 +6,8 @@ description: >-
   运行做「真改进 / 真退化 / 分不出来」的判定。当 ncu 报 ERR_NVGPUCTRPERM、只有 nsys 的 kernel
   时长、或需要可复核的性能证据与回归对比时使用。需要精确 L2/DRAM 字节、缓存命中率或 warp stall
   周期细分时不要用它（这些会明确报 n/a + 原因 + 替代口径）。
+  入口命令：kernoscope capabilities --brief → kernoscope --packet - -- <你的命令> →
+  kernoscope selftest / kernoscope diff。不要凭印象拼子命令（先看 kernoscope --help）。
 ---
 
 # Kernoscope：取证式 kernel 性能分析

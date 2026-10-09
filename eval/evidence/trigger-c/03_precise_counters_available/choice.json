@@ -1,0 +1,1 @@
+{"use": ["ncu"], "why": "drv 策略已放开、ncu 实测可用，而论文表格要的精确 dram__bytes.sum / lts__t_sector_hit_rate.pct / warp stall 细分恰恰是 kernoscope 明确声明不给的（它对这些报 n/a），只能由 ncu 的硬件计数器提供。", "first_command": "ncu --set full -o gemm_report python bench.py"}

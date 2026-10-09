@@ -1,0 +1,13 @@
+{
+  "id": "04_cpu_dataloader_hotspot",
+  "task": "训练脚本每个 step 都很慢，我怀疑是 dataloader 在 CPU 侧卡住（GPU 利用率只有 20%）。我要找出**哪个 Python 函数**在花时间，最好不用改代码就能看到调用栈。",
+  "catalog": {
+    "ncu": "NVIDIA Nsight Compute：硬件性能计数器（精确 DRAM/L2 字节、命中率、warp stall 细分）。",
+    "nsys": "NVIDIA Nsight Systems：CUPTI 时间线（kernel 时长、launch 配置、CPU/GPU 交错）。",
+    "torch.profiler": "PyTorch 内置 profiler：算子级耗时与显存，Python/CUDA 混合视图。",
+    "py-spy": "Python 采样 profiler：找出 CPU 侧耗时函数（不改代码，带调用栈）。"
+  },
+  "expect_any": ["py-spy", "torch.profiler"],
+  "forbid_use": ["kernoscope"],
+  "why": "这是 CPU 侧热点问题：kernel 级证据帮不上忙，选了它就是误触发。"
+}

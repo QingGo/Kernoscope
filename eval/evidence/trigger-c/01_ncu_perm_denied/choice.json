@@ -1,0 +1,1 @@
+{"use": ["kernoscope"], "why": "ncu 因 ERR_NVGPUCTRPERM 拿不到计数器，kernoscope 正是为这种受限/多租户 GPU 设计，能在不用性能计数器的情况下给出哪个 kernel 最耗时以及是否 DRAM bound（并标注误差带）。", "first_command": "kernoscope capabilities --brief"}

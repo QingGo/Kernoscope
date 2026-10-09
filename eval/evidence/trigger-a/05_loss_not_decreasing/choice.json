@@ -1,0 +1,5 @@
+{
+  "use": [],
+  "why": "loss 从第 2 个 epoch 不再下降是训练/优化/数据层面的收敛问题（学习率、数据、标签、BN 等），目录里 ncu/nsys/kernoscope/torch.profiler/nvidia-smi 全是性能取证工具，测不出也不解释收敛失败，诚实给空列表。",
+  "first_command": ""
+}

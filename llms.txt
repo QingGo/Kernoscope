@@ -5,21 +5,21 @@
 ## 给 agent
 
 - [skills/kernoscope/SKILL.md](skills/kernoscope/SKILL.md): 触发条件、硬规则、闭环脚本（先读这个）
-- [AGENTS.md](AGENTS.md): 40 行以内的入口与硬规则
-- [COVERAGE.md](COVERAGE.md): 三态覆盖矩阵（能答 / 口径更弱 / 不答）与四层能力分层
-- [skills/kernoscope/references/verdicts.md](skills/kernoscope/references/verdicts.md): 判词目录、方向、前提与 MDD 口径
+- [AGENTS.md](AGENTS.md): 入口与硬规则（≤40 行）
+- [COVERAGE.md](COVERAGE.md): 三态覆盖矩阵与能力分层
+- [skills/kernoscope/references/verdicts.md](skills/kernoscope/references/verdicts.md): 判词、方向、前提、MDD
 - [skills/kernoscope/references/refusal-codes.md](skills/kernoscope/references/refusal-codes.md): 拒绝码 → 怎么办 → 代价
 
 ## 人读
 
-- [README.md](README.md): 首屏定位、为什么需要它、局限与已知失败
-- [PROVENANCE.md](PROVENANCE.md): 出处体系（exact / derived / measured / estimated / unavailable）
-- [CALIBRATION.md](CALIBRATION.md): 本机峰值标定与口径离散度
-- [CONTRIBUTING.md](CONTRIBUTING.md): 扩展点（指标映射 / 后端 / 已知答案负载 / 新能力问题 / 新拒绝码）
-- [CHANGELOG.md](CHANGELOG.md): 接口层变化（命令行、决策包 schema）
+- [README.md](README.md): 首屏定位与局限
+- [PROVENANCE.md](PROVENANCE.md): 出处体系（exact/measured/estimated/…）
+- [CALIBRATION.md](CALIBRATION.md): 本机峰值标定
+- [CONTRIBUTING.md](CONTRIBUTING.md): 扩展点
+- [CHANGELOG.md](CHANGELOG.md): 接口层变化
 
 ## Optional
 
-- [skills/kernoscope/references/provenance-rules.md](skills/kernoscope/references/provenance-rules.md): 给 agent 的短版出处纪律
-- [skills/kernoscope/references/recipes.md](skills/kernoscope/references/recipes.md): 四个闭环配方（取证 / 对拍 / 拒绝处置 / 回归对比）
-- [bench/artifacts/README.md](bench/artifacts/README.md): 真机产物登记表（每个公开数字的来源）
+- [skills/kernoscope/references/provenance-rules.md](skills/kernoscope/references/provenance-rules.md): 出处纪律短版
+- [skills/kernoscope/references/recipes.md](skills/kernoscope/references/recipes.md): 四个闭环配方
+- [bench/artifacts/README.md](bench/artifacts/README.md): 真机产物登记表

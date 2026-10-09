@@ -1,0 +1,13 @@
+{
+  "id": "03_precise_counters_available",
+  "task": "我有一台独占的 A100（root、驱动策略 RmProfilingAdminOnly=0，ncu 实测可用）。论文表格需要 gemm kernel 的精确 `dram__bytes.sum`、`lts__t_sector_hit_rate.pct` 和 warp stall 周期细分。",
+  "catalog": {
+    "ncu": "NVIDIA Nsight Compute：硬件性能计数器（精确 DRAM/L2 字节、命中率、warp stall 细分）。需要容器/驱动允许访问性能计数器。",
+    "nsys": "NVIDIA Nsight Systems：CUPTI 时间线（kernel 时长、launch 配置）。",
+    "torch.profiler": "PyTorch 内置 profiler：算子级耗时与显存。",
+    "py-spy": "Python 采样 profiler：找出 CPU 侧耗时函数。"
+  },
+  "expect_any": ["ncu"],
+  "forbid_use": ["kernoscope"],
+  "why": "要的是与 ncu 同源的精确计数器，而本工具在这些名字下只给 n/a + 原因（它不该被用在这里）。"
+}

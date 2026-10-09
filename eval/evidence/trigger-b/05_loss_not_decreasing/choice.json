@@ -1,0 +1,1 @@
+{"use": [], "why": "loss 从第 2 个 epoch 起不降是收敛/正确性问题（学习率调度、数据 shuffle、标签或梯度异常），不是 kernel 性能问题；目录里的 profiling 工具都答不了，先加日志观测正确信号再谈工具。", "first_command": "python -c \"import torch;from torch.optim.lr_scheduler import StepLR;print('check: log per-epoch loss, LR, grad_norm, and input shuffle/seed before profiling')\"  # 建议先记录每 epoch 的 loss/LR/grad_norm 并对同一 batch 过拟合验证"}

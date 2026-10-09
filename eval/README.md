@@ -238,3 +238,14 @@ eval/
      `expected_action_keywords` 层面的约束即可。
   4. 失败任务的准确率按"错"计（分母是全部任务）；误用率的分母只算已打分的 acted_on，
      失败任务不贡献误用次数。这样两个比率都不会因为 agent 整体崩掉而变得好看或难堪。
+
+
+---
+
+## 另一维：发现（agent 会不会在正确的时刻用我们）
+
+这个评测台量的是「给了材料会不会误用」。它前面还有一步：**agent 会不会想起来用它**。
+见 [`TRIGGER-EVAL.md`](TRIGGER-EVAL.md)（脚本 `trigger_eval.py`，用例 `discovery/`）：
+三轮外部 agent 的 `trigger_rate` 都是 1.00、`false_positive_rate` 0.00；
+前两轮暴露了一个真缺陷（只给触发词时 agent 会编子命令），改完描述后
+`made_up_command_rate` 从 1.00 降到 0.00。

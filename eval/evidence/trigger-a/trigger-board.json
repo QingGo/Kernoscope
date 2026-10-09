@@ -1,0 +1,114 @@
+{
+  "board": {
+    "cases": 5,
+    "positive_cases": 2,
+    "negative_cases": 3,
+    "trigger_rate": 1.0,
+    "expected_ok_rate": 1.0,
+    "false_positive_rate": 0.0,
+    "entry_layer_rate": 0.0,
+    "made_up_command_rate": 1.0,
+    "out_dir": "/tmp/tr"
+  },
+  "results": [
+    {
+      "case_id": "01_ncu_perm_denied",
+      "expect_any": [
+        "kernoscope"
+      ],
+      "forbid_use": [],
+      "status": "ok",
+      "use": [
+        "kernoscope"
+      ],
+      "why": "ncu 已被 ERR_NVGPUCTRPERM 挡死，而 kernoscope 的目录描述正是「当 ncu 报 ERR_NVGPUCTRPERM 时使用」，能在不用性能计数器的情况下判定哪个 kernel 最耗时、是否 DRAM bound 与离 roofline 多远；nsys 只能给 kernel 时长，答不了 DRAM bound。",
+      "first_command": "kernoscope profile -- python train.py",
+      "should_trigger": true,
+      "did_trigger": true,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": false,
+      "first_command_is_kernoscope": true,
+      "made_up_command": true
+    },
+    {
+      "case_id": "02_regression_compare",
+      "expect_any": [
+        "kernoscope"
+      ],
+      "forbid_use": [],
+      "status": "ok",
+      "use": [
+        "kernoscope"
+      ],
+      "why": "诉求是「两次运行到底是不是真改进、并说明误判风险」，kernoscope 唯一明确提供带误差带的「真改进 / 真退化 / 分不出来」判定；pytest-benchmark 只对纯 Python 函数做显著性，覆盖不了 CUDA kernel 的运行间噪声。",
+      "first_command": "kernoscope profile -o base_run -- python bench_scalar.py && kernoscope profile -o vec_run -- python bench_vector.py && kernoscope compare base_run vec_run",
+      "should_trigger": true,
+      "did_trigger": true,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": false,
+      "first_command_is_kernoscope": true,
+      "made_up_command": true
+    },
+    {
+      "case_id": "03_precise_counters_available",
+      "expect_any": [
+        "ncu"
+      ],
+      "forbid_use": [
+        "kernoscope"
+      ],
+      "status": "ok",
+      "use": [
+        "ncu"
+      ],
+      "why": "要的是精确 dram__bytes.sum、lts__t_sector_hit_rate.pct 与 warp stall 周期细分，而 kernoscope 的目录描述明确写了「需要精确 L2/DRAM 字节、缓存命中率或 warp stall 周期细分时不要用它」；本机 root 且 RmProfilingAdminOnly=0，ncu 可用，只有它能给硬件计数器。",
+      "first_command": "ncu --kernel-name regex:gemm --metrics dram__bytes.sum,lts__t_sector_hit_rate.pct --section WarpStateStats -f -o gemm_prof python train.py",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    },
+    {
+      "case_id": "04_cpu_dataloader_hotspot",
+      "expect_any": [
+        "py-spy",
+        "torch.profiler"
+      ],
+      "forbid_use": [
+        "kernoscope"
+      ],
+      "status": "ok",
+      "use": [
+        "py-spy"
+      ],
+      "why": "诉求是「哪个 Python 函数在花时间、最好不改代码、要调用栈」，与 py-spy 的目录描述（采样 profiler、找 CPU 侧耗时函数、不改代码、带调用栈）逐条对上；ncu/nsys 看的是 GPU 侧时间线与 kernel 时长，torch.profiler 需要改代码且只到算子级。",
+      "first_command": "py-spy record -o dataloader_profile.svg -f speedscope -- python train.py",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    },
+    {
+      "case_id": "05_loss_not_decreasing",
+      "expect_any": [],
+      "forbid_use": [
+        "kernoscope",
+        "ncu",
+        "nsys"
+      ],
+      "status": "ok",
+      "use": [],
+      "why": "loss 从第 2 个 epoch 不再下降是训练/优化/数据层面的收敛问题（学习率、数据、标签、BN 等），目录里 ncu/nsys/kernoscope/torch.profiler/nvidia-smi 全是性能取证工具，测不出也不解释收敛失败，诚实给空列表。",
+      "first_command": "",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    }
+  ]
+}

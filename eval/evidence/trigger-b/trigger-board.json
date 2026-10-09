@@ -1,0 +1,115 @@
+{
+  "board": {
+    "cases": 5,
+    "positive_cases": 2,
+    "negative_cases": 3,
+    "trigger_rate": 1.0,
+    "expected_ok_rate": 1.0,
+    "false_positive_rate": 0.0,
+    "entry_layer_rate": 0.0,
+    "made_up_command_rate": 0.5,
+    "out_dir": "/tmp/tr2"
+  },
+  "results": [
+    {
+      "case_id": "01_ncu_perm_denied",
+      "expect_any": [
+        "kernoscope"
+      ],
+      "forbid_use": [],
+      "status": "ok",
+      "use": [
+        "nsys",
+        "kernoscope"
+      ],
+      "why": "ncu 被 ERR_NVGPUCTRPERM 拒绝，精确 DRAM 计数器这条路已断；先用不需要性能计数器的 nsys 取到 kernel 时长排名，再用 kernoscope 从 nsys 数据判定最慢 kernel 是否 DRAM bound 并给出带误差带的 roofline/瓶颈方向（精确 DRAM 字节它会明确报 n/a）。",
+      "first_command": "nsys profile --stats=true -o /tmp/tr2/01_ncu_perm_denied/prof_train --force-overwrite=true python train.py",
+      "should_trigger": true,
+      "did_trigger": true,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": false,
+      "first_command_is_kernoscope": false,
+      "made_up_command": false
+    },
+    {
+      "case_id": "02_regression_compare",
+      "expect_any": [
+        "kernoscope"
+      ],
+      "forbid_use": [],
+      "status": "ok",
+      "use": [
+        "kernoscope"
+      ],
+      "why": "诉求不只是「谁快」，而是同机两次运行要判定真改进/真退化/分不出来并能写进 PR 说明误判风险，只有 kernoscope 对两次运行给出带误差带的显著性判定；scalar/vector 两个 elementwise kernel 都已在 nsys 的 kernel 时长口径内，无需 ncu 计数器。",
+      "first_command": "kernoscope compare --baseline runs/scalar.nsys-rep --candidate runs/vector.nsys-rep --report /tmp/tr2/02_regression_compare/compare.json",
+      "should_trigger": true,
+      "did_trigger": true,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": false,
+      "first_command_is_kernoscope": true,
+      "made_up_command": true
+    },
+    {
+      "case_id": "03_precise_counters_available",
+      "expect_any": [
+        "ncu"
+      ],
+      "forbid_use": [
+        "kernoscope"
+      ],
+      "status": "ok",
+      "use": [
+        "ncu"
+      ],
+      "why": "独占 A100、计数器权限已确认可用，论文表格要的正是 dram__bytes.sum、lts__t_sector_hit_rate.pct 和 warp stall 周期细分这类精确硬件计数器；kernoscope 对这些指标明确报 n/a，故不选。",
+      "first_command": "ncu -k regex:gemm --launch-skip 5 --launch-count 5 --metrics dram__bytes.sum,lts__t_sector_hit_rate.pct,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio -o /tmp/tr2/03_precise_counters_available/gemm_report python train.py",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    },
+    {
+      "case_id": "04_cpu_dataloader_hotspot",
+      "expect_any": [
+        "py-spy",
+        "torch.profiler"
+      ],
+      "forbid_use": [
+        "kernoscope"
+      ],
+      "status": "ok",
+      "use": [
+        "py-spy"
+      ],
+      "why": "要定位的是 GPU 利用率只有 20% 时 Python dataloader 里哪个函数吃 CPU，且要求不改代码就能看调用栈——py-spy 采样 profiler 正好满足；可以再叠加 torch.profiler 看算子在 CPU/CUDA 间的交错以确认 GPU 空等。",
+      "first_command": "py-spy record --pid <训练进程 PID> --rate 100 --format speedscope --duration 60 --output /tmp/tr2/04_cpu_dataloader_hotspot/cpu_profile.json",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    },
+    {
+      "case_id": "05_loss_not_decreasing",
+      "expect_any": [],
+      "forbid_use": [
+        "kernoscope",
+        "ncu",
+        "nsys"
+      ],
+      "status": "ok",
+      "use": [],
+      "why": "loss 从第 2 个 epoch 起不降是收敛/正确性问题（学习率调度、数据 shuffle、标签或梯度异常），不是 kernel 性能问题；目录里的 profiling 工具都答不了，先加日志观测正确信号再谈工具。",
+      "first_command": "python -c \"import torch;from torch.optim.lr_scheduler import StepLR;print('check: log per-epoch loss, LR, grad_norm, and input shuffle/seed before profiling')\"  # 建议先记录每 epoch 的 loss/LR/grad_norm 并对同一 batch 过拟合验证",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    }
+  ]
+}

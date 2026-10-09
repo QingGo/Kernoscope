@@ -1,0 +1,1 @@
+{"use": ["py-spy"], "why": "要定位的是 GPU 利用率只有 20% 时 Python dataloader 里哪个函数吃 CPU，且要求不改代码就能看调用栈——py-spy 采样 profiler 正好满足；可以再叠加 torch.profiler 看算子在 CPU/CUDA 间的交错以确认 GPU 空等。", "first_command": "py-spy record --pid <训练进程 PID> --rate 100 --format speedscope --duration 60 --output /tmp/tr2/04_cpu_dataloader_hotspot/cpu_profile.json"}

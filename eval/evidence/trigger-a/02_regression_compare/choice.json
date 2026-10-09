@@ -1,0 +1,5 @@
+{
+  "use": ["kernoscope"],
+  "why": "诉求是「两次运行到底是不是真改进、并说明误判风险」，kernoscope 唯一明确提供带误差带的「真改进 / 真退化 / 分不出来」判定；pytest-benchmark 只对纯 Python 函数做显著性，覆盖不了 CUDA kernel 的运行间噪声。",
+  "first_command": "kernoscope profile -o base_run -- python bench_scalar.py && kernoscope profile -o vec_run -- python bench_vector.py && kernoscope compare base_run vec_run"
+}

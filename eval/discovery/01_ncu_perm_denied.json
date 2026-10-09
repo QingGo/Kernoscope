@@ -1,0 +1,14 @@
+{
+  "id": "01_ncu_perm_denied",
+  "task": "我在云上租的 RTX 4090 容器里想 profile 训练脚本，ncu 直接报错：\n\n```\n==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0.\n```\n\n我想知道 train.py 里哪个 kernel 最耗时、它是不是 DRAM bound，好决定下一步优化方向。",
+  "catalog": {
+    "ncu": "NVIDIA Nsight Compute：硬件性能计数器（精确 DRAM/L2 字节、命中率、warp stall 细分）。需要容器/驱动允许访问性能计数器。",
+    "nsys": "NVIDIA Nsight Systems：CUPTI 时间线（kernel 时长、launch 配置、CPU/GPU 交错）。不需要性能计数器。",
+    "torch.profiler": "PyTorch 内置 profiler：算子级耗时与显存，Python/CUDA 混合视图。",
+    "py-spy": "Python 采样 profiler：找出 CPU 侧耗时函数（不改代码）。",
+    "nvidia-smi": "设备级读数：显存占用、SM 时钟、功耗、显存忙碌占比。"
+  },
+  "expect_any": ["kernoscope"],
+  "forbid_use": [],
+  "why": "ncu 被权限拒绝时正是本工具存在的理由：它用物理观测量给出可复核的判词。"
+}

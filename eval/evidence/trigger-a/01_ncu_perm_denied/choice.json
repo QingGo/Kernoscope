@@ -1,0 +1,5 @@
+{
+  "use": ["kernoscope"],
+  "why": "ncu 已被 ERR_NVGPUCTRPERM 挡死，而 kernoscope 的目录描述正是「当 ncu 报 ERR_NVGPUCTRPERM 时使用」，能在不用性能计数器的情况下判定哪个 kernel 最耗时、是否 DRAM bound 与离 roofline 多远；nsys 只能给 kernel 时长，答不了 DRAM bound。",
+  "first_command": "kernoscope profile -- python train.py"
+}

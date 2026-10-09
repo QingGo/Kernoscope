@@ -1,0 +1,75 @@
+{
+  "board": {
+    "cases": 3,
+    "positive_cases": 2,
+    "negative_cases": 1,
+    "trigger_rate": 1.0,
+    "expected_ok_rate": 1.0,
+    "false_positive_rate": 0.0,
+    "entry_layer_rate": 1.0,
+    "made_up_command_rate": 0.0,
+    "out_dir": "/tmp/tr3"
+  },
+  "results": [
+    {
+      "case_id": "01_ncu_perm_denied",
+      "expect_any": [
+        "kernoscope"
+      ],
+      "forbid_use": [],
+      "status": "ok",
+      "use": [
+        "kernoscope"
+      ],
+      "why": "ncu 因 ERR_NVGPUCTRPERM 拿不到计数器，kernoscope 正是为这种受限/多租户 GPU 设计，能在不用性能计数器的情况下给出哪个 kernel 最耗时以及是否 DRAM bound（并标注误差带）。",
+      "first_command": "kernoscope capabilities --brief",
+      "should_trigger": true,
+      "did_trigger": true,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": true,
+      "first_command_is_kernoscope": true,
+      "made_up_command": false
+    },
+    {
+      "case_id": "02_regression_compare",
+      "expect_any": [
+        "kernoscope"
+      ],
+      "forbid_use": [],
+      "status": "ok",
+      "use": [
+        "kernoscope"
+      ],
+      "why": "需求是判断同机两次运行是「真改进/真退化/分不出来」并说明误判风险，kernoscope 的 diff 判定正是做这件事；纯 Python 的 pytest-benchmark 不适用于 CUDA kernel。",
+      "first_command": "kernoscope --help",
+      "should_trigger": true,
+      "did_trigger": true,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": true,
+      "first_command_is_kernoscope": true,
+      "made_up_command": false
+    },
+    {
+      "case_id": "03_precise_counters_available",
+      "expect_any": [
+        "ncu"
+      ],
+      "forbid_use": [
+        "kernoscope"
+      ],
+      "status": "ok",
+      "use": [
+        "ncu"
+      ],
+      "why": "drv 策略已放开、ncu 实测可用，而论文表格要的精确 dram__bytes.sum / lts__t_sector_hit_rate.pct / warp stall 细分恰恰是 kernoscope 明确声明不给的（它对这些报 n/a），只能由 ncu 的硬件计数器提供。",
+      "first_command": "ncu --set full -o gemm_report python bench.py",
+      "should_trigger": false,
+      "did_trigger": false,
+      "expected_ok": true,
+      "false_positive": false,
+      "entry_layer_ok": null
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "02_regression_compare",
+  "task": "我把一个 elementwise kernel 改成了向量化版本，在**同一台机器上**各跑了一次。我要确认它是不是真的更快（而不是运行间的噪声），结论要写进 PR 里，所以必须能说明误判风险。",
+  "catalog": {
+    "ncu": "NVIDIA Nsight Compute：硬件性能计数器（精确 DRAM/L2 字节、命中率、warp stall 细分）。",
+    "nsys": "NVIDIA Nsight Systems：CUPTI 时间线（kernel 时长、launch 配置）。",
+    "torch.profiler": "PyTorch 内置 profiler：算子级耗时与显存。",
+    "py-spy": "Python 采样 profiler：找出 CPU 侧耗时函数。",
+    "pytest-benchmark": "Python 微基准框架：为纯 Python 函数给出统计显著性与置信区间。"
+  },
+  "expect_any": ["kernoscope"],
+  "forbid_use": [],
+  "why": "「真改进 vs 噪声」需要本机误差带（MDD）与同协议比较，这是本工具的 diff 能力。"
+}

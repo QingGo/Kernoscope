@@ -1,0 +1,1 @@
+{"use": ["kernoscope"], "why": "诉求不只是「谁快」，而是同机两次运行要判定真改进/真退化/分不出来并能写进 PR 说明误判风险，只有 kernoscope 对两次运行给出带误差带的显著性判定；scalar/vector 两个 elementwise kernel 都已在 nsys 的 kernel 时长口径内，无需 ncu 计数器。", "first_command": "kernoscope compare --baseline runs/scalar.nsys-rep --candidate runs/vector.nsys-rep --report /tmp/tr2/02_regression_compare/compare.json"}
