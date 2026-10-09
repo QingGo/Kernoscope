@@ -20,6 +20,10 @@ tools/probes/nvbit_memtrace/memtest
 tools/probes/nvbit_memtrace/ks-memtrace*.txt
 tools/probes/nvbit_memtrace/build/
 
+# skill 脚本的产物（本机自检文件与一次取证的报告）
+machine-selfcheck.json
+ks-evidence/
+
 # bench：编译产物与原始轨迹（体积大、按需重采；分析产物会入库）
 bench/artifacts/.build/
 bench/artifacts/*/memtrace-official.txt

@@ -493,6 +493,23 @@ def _verdict_static_mix(rep: Any) -> Verdict | None:
               + ("；" + "，".join(f"{k} {v}%" for k, v in mix.items()) if mix else ""))
 
 
+# 判词目录（catalog）：**决策包里可能出现哪些判词 id** 的单一来源。
+# 生成类文档（给 agent 的参考层）与测试都读它，避免"文档漏了一个判词"这种事。
+# 有测试守它与 BUILDERS 实际能产出的 id 完全一致。
+VERDICT_IDS: tuple[str, ...] = (
+    "kernel_time",
+    "dram_bytes",
+    "dram_bytes_per_launch",
+    "dram_bytes_trace",
+    "ledger_verdict",
+    "occupancy",
+    "roofline",
+    "issue_slot",
+    "l2_locality",
+    "over_peak",
+    "static_mix",
+)
+
 BUILDERS = (_verdict_kernel_time, _verdict_dram_total, _verdict_per_launch, _verdict_trace,
             _verdict_ledger, _verdict_occupancy, _verdict_roofline, _verdict_issue_slot,
             _verdict_l2, _verdict_over_peak, _verdict_static_mix)
@@ -1096,6 +1113,7 @@ def _cost_text(rem: dict[str, Any]) -> str:
 
 
 __all__ = ["MAX_VERDICTS", "OK", "PACKET_SCHEMA_REVISION", "PACKET_SCHEMA_VERSION",
+           "VERDICT_IDS",
            "PACKET_SIZE_BUDGET_BYTES", "verdict_is_actionable",
            "PREMISE_LABELS", "REFUSED", "SOFT", "Premise", "Verdict", "build", "dumps",
            "find_metric", "group_unmeasured", "load_packet", "metric_value", "packet_bytes",

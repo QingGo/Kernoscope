@@ -85,7 +85,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NO_GPU: "本机没有 NVIDIA GPU",
     RefusalCode.PYTORCH_MISSING: "没有安装 PyTorch",
     RefusalCode.NO_NVML: "nvidia-smi / pynvml 不可用",
-    RefusalCode.NO_NVML_SAMPLES: "没有 NVML 采样点（采样被关掉或不可用）",
+    RefusalCode.NO_NVML_SAMPLES: "没有 NVML 采样点（关掉采样／不可用／稳态段短于 200 ms）",
     RefusalCode.NSYS_MISSING: "没有 nsys：kernel 级数据不可得",
     RefusalCode.CUOBJDUMP_MISSING: "没有 cuobjdump：静态资源/SASS 不可得",
     RefusalCode.NO_STATIC_INPUT: "没有提供 cubin/.so",
