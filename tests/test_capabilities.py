@@ -260,6 +260,21 @@ def test_brief_has_no_prose_fields():
         assert set(item) <= {"code", "unlocks", "cost_kind", "cost_s", "cmd"}
 
 
+def test_brief_labels_the_price_of_the_next_layer():
+    """渐进披露带价格标签：入口层必须说清下一层多大、里面有什么。"""
+    import json
+
+    r = evaluate(_env(has_memtrace=True))
+    b = r.brief()
+    nl = b["next_layer"]
+    real = len(json.dumps(r.to_dict(), ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8"))
+    assert nl["bytes"] == real
+    assert nl["bytes"] > len(json.dumps(b, ensure_ascii=False,
+                                       separators=(",", ":")).encode("utf-8")) * 5
+    assert "remedies" in nl["contains"]
+
+
 def test_brief_next_is_ranked_and_capped():
     r = evaluate(Env(has_gpu=True, has_nvml=True, has_nsys=False))
     b = r.brief()

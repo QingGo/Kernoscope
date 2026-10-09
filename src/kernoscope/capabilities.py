@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -283,6 +284,14 @@ class CapabilityReport:
                       "cost_kind": d["cost_kind"], "cost_s": d["cost_s"],
                       "cmd": d["command"]}
                      for d in self.next_actions()[:max_next]],
+            # 渐进披露要带**价格标签**：读到这里的人（agent）应该知道下一层要花多少上下文，
+            # 而不是靠猜。这个数是它自己算出来的，不是文档里抄的。
+            "next_layer": {
+                "command": "kernoscope capabilities --json",
+                "bytes": len(json.dumps(self.to_dict(), ensure_ascii=False,
+                                        separators=(",", ":")).encode("utf-8")),
+                "contains": ["refusal_reasons", "remedies", "premises", "per_question_state"],
+            },
         }
         if len(matrix) != len(self.answers):  # pragma: no cover - 防御性
             raise ValueError("matrix 与 answers 不一致")
