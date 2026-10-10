@@ -5,6 +5,7 @@
   "material": {
     "packet": {
       "schema_version": 1,
+      "schema_revision": "1.1",
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {
@@ -25,6 +26,7 @@
         {
           "id": "kernel_time",
           "status": "ok",
+          "actionable": true,
           "facts": {
             "top": "fused_attention_fwd",
             "top_ms": 1200.0,
@@ -59,6 +61,7 @@
         {
           "id": "dram_bytes",
           "status": "refused",
+          "actionable": false,
           "premises": [
             {
               "id": "window_coverage_pct",
@@ -85,6 +88,7 @@
         {
           "id": "dram_bytes_per_launch",
           "status": "refused",
+          "actionable": false,
           "premises": [
             {
               "id": "window_coverage_pct",
@@ -117,6 +121,7 @@
         {
           "id": "occupancy",
           "status": "ok",
+          "actionable": true,
           "facts": {
             "theoretical_pct": 50.0,
             "achieved_pct": 41.0
@@ -202,8 +207,8 @@
         "launches": 300,
         "unmeasured_metrics": 6,
         "selftest_band": false,
-        "packet_bytes": 3180,
-        "trimmed": []
+        "trimmed": [],
+        "packet_bytes": 3291
       }
     },
     "capabilities": {

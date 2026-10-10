@@ -5,6 +5,7 @@
   "material": {
     "packet": {
       "schema_version": 1,
+      "schema_revision": "1.1",
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {
@@ -27,6 +28,7 @@
         {
           "id": "kernel_time",
           "status": "ok",
+          "actionable": true,
           "facts": {
             "top": "l2_resident_apply_kernel",
             "top_ms": 19.2,
@@ -52,15 +54,12 @@
               "unit": "%"
             }
           ],
-          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词",
-          "metrics": [
-            "gpu__time_duration.sum",
-            "ks__launch_time_mean"
-          ]
+          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
         },
         {
           "id": "dram_bytes",
           "status": "refused",
+          "actionable": false,
           "premises": [
             {
               "id": "window_coverage_pct",
@@ -85,14 +84,12 @@
             "threshold": {
               "resolution_pct": 1.0
             }
-          },
-          "metrics": [
-            "est__dram_bytes_total"
-          ]
+          }
         },
         {
           "id": "dram_bytes_per_launch",
           "status": "refused",
+          "actionable": false,
           "premises": [
             {
               "id": "window_coverage_pct",
@@ -117,14 +114,12 @@
             "threshold": {
               "resolution_pct": 1.0
             }
-          },
-          "metrics": [
-            "est__dram_bytes_per_launch"
-          ]
+          }
         },
         {
           "id": "occupancy",
           "status": "ok",
+          "actionable": true,
           "facts": {
             "theoretical_pct": 62.5,
             "achieved_pct": 58.1
@@ -132,15 +127,12 @@
           "value": 58.1,
           "unit": "%",
           "provenance": "measured",
-          "next": "实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy",
-          "metrics": [
-            "ks__theoretical_occupancy_pct",
-            "meas__achieved_occupancy_pct"
-          ]
+          "next": "实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy"
         },
         {
           "id": "l2_locality",
           "status": "soft",
+          "actionable": true,
           "facts": {
             "hit_pct": 97.8,
             "working_set_mib": 3.2
@@ -148,11 +140,7 @@
           "value": 97.8,
           "unit": "%",
           "provenance": "estimated",
-          "next": "命中的部分不该算进 DRAM 账：对拍 DRAM 前先确认工作集能不能驻留",
-          "metrics": [
-            "est__l2_hit_rate_pct",
-            "est__working_set_bytes"
-          ]
+          "next": "命中的部分不该算进 DRAM 账：对拍 DRAM 前先确认工作集能不能驻留"
         }
       ],
       "unmeasured": [
@@ -223,10 +211,11 @@
         "launches": 2400,
         "unmeasured_metrics": 5,
         "selftest_band": false,
-        "packet_bytes": 4008,
         "trimmed": [
-          "unmeasured_examples"
-        ]
+          "unmeasured_examples",
+          "verdict_metrics"
+        ],
+        "packet_bytes": 3870
       }
     },
     "files": {

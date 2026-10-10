@@ -9,8 +9,11 @@ agent 会照着一份过期的 remedy 去执行。
 所以：单一来源是代码，本脚本只负责渲染；`--check` 进测试（与 COVERAGE.md 同一套纪律）。
 
 用法：
-    python tools/gen_agent_refs.py            # 写出两份文档
+    python tools/gen_agent_refs.py            # 写出两份文档 + 刷新 SKILL.md 的参考层表格
     python tools/gen_agent_refs.py --check    # 只校验（不一致则 exit 1）
+
+`SKILL.md` 里那张"参考层"表格的字节数也是这里**现算**的：手抄的价格一定会漂
+（加一个拒绝码会让 `refusal-codes.md` 变大，而价格标签不会自己跟上）。
 """
 
 from __future__ import annotations
@@ -29,8 +32,20 @@ from kernoscope.refusals import (CODE_TITLES, DEFAULT_REMEDIES, RefusalCode,  # 
                                  code_title, default_remedy)
 
 REFS = ROOT / "skills" / "kernoscope" / "references"
+SKILL = ROOT / "skills" / "kernoscope" / "SKILL.md"
 
 HEADER = ("<!-- 由 tools/gen_agent_refs.py 生成；改动请改代码后重跑，不要手改本文件 -->\n")
+
+REFS_BEGIN = "<!-- refs-index:begin -->"
+REFS_END = "<!-- refs-index:end -->"
+
+# 参考层清单：文件名、一句话说明、是否由本脚本生成。字节数现算。
+REF_DOCS = [
+    ("refusal-codes.md", "每个拒绝码什么意思、怎么办、代价", True),
+    ("verdicts.md", "判词目录、方向、前提、MDD 键", True),
+    ("provenance-rules.md", "出处纪律的短版", False),
+    ("recipes.md", "四个闭环配方", False),
+]
 
 # 判词的中文问法（与各 builder 里的 question 保持一致；这里只用于文档）
 VERDICT_QUESTION = {
@@ -140,6 +155,44 @@ def render_verdicts() -> str:
 FILES = {"refusal-codes.md": render_refusal_codes, "verdicts.md": render_verdicts}
 
 
+def _size_text(n: int) -> str:
+    return f"{n / 1024:.0f} KB" if n >= 1024 else f"{n} B"
+
+
+def render_skill_refs_index() -> str:
+    """SKILL.md 里的参考层表格（字节数现算，不手抄）。"""
+    out = [REFS_BEGIN,
+           "<!-- 由 tools/gen_agent_refs.py 生成（字节数是现算的）；改动请改那里的 REF_DOCS -->",
+           "",
+           "| 文件 | 字节 | 里面有什么 |",
+           "|---|---|---|"]
+    for name, what, generated in REF_DOCS:
+        p = REFS / name
+        size = _size_text(p.stat().st_size) if p.exists() else "?"
+        tag = "（生成）" if generated else ""
+        out.append(f"| `references/{name}` | ~{size}{tag} | {what} |")
+    out += ["", REFS_END]
+    return "\n".join(out)
+
+
+def sync_skill_index(check: bool) -> int:
+    text = SKILL.read_text(encoding="utf-8")
+    if REFS_BEGIN not in text or REFS_END not in text:
+        print(f"{SKILL.relative_to(ROOT)}: 缺少参考层标记块（{REFS_BEGIN}）")
+        return 1
+    new = (text[:text.index(REFS_BEGIN)] + render_skill_refs_index()
+           + text[text.index(REFS_END) + len(REFS_END):])
+    if check:
+        if new != text:
+            print(f"{SKILL.relative_to(ROOT)}: 参考层表格与文件实际大小不一致（重跑生成器）")
+            return 1
+        print("ok  SKILL.md 参考层表格")
+        return 0
+    SKILL.write_text(new, encoding="utf-8")
+    print(f"wrote {SKILL.relative_to(ROOT)} 的参考层表格")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="生成/校验给 agent 的参考层文档")
     ap.add_argument("--check", action="store_true", help="只校验，不写文件")
@@ -159,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         path.write_text(text, encoding="utf-8")
         print(f"wrote {path.relative_to(ROOT)}  {len(text.encode('utf-8'))} B")
+    bad += sync_skill_index(args.check)
     return 1 if bad else 0
 
 

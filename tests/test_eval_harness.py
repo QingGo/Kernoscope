@@ -411,3 +411,16 @@ def test_forbidden_action_matching_ignores_negation():
     assert _mentions("下一步：优化计算侧的指令混合", "优化计算") is True
     assert _mentions("avoid compute-bound tuning", "compute") is False
     assert _mentions("go compute side now", "compute") is True
+
+
+def test_task_material_is_in_sync_with_packet_builder():
+    """`eval/tasks/*.json` 的 material 必须与 `packet.build()` 同源。
+
+    这条门禁曾经**不存在**：决策包升到 schema v1.1 之后没有人重跑生成器，
+    `make_tasks.py --check` 就这样红在仓库里，而全量测试一直是绿的 ——
+    一个带 `--check` 的生成器，没有任何门禁在跑它。现在它挂在
+    `tools/dev_index.py` 的 `GATES` 上（`--check` 还会逆向校验这件事）。
+    """
+    r = subprocess.run([sys.executable, str(EVAL / "make_tasks.py"), "--check"],
+                       capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 0, r.stdout + r.stderr

@@ -29,7 +29,7 @@ import kernoscope.cli as cli
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "README.md", ROOT / "PROVENANCE.md", ROOT / "CALIBRATION.md",
-        ROOT / "bench" / "README.md"]
+        ROOT / "CONTRIBUTING.md", ROOT / "bench" / "README.md"]
 
 # 文档里合法出现、但不属于 kernoscope 自己的命令
 FOREIGN = ("python", "python3", "bash", "sh", "uv", "pip", "git", "rsync", "scp", "ssh",

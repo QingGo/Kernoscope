@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""开发侧索引的**单一真源**：改哪类东西 → 改哪个文件 → 要重跑什么 → 跑哪条门禁。
+
+## 为什么这份索引是生成物
+
+它第一次是手写的（6 类适配器）。之后仓库多出三类单一真源（判词/决策包、评测材料、
+agent 入口层），索引没跟上；"提交前跑"里也漏了 `gen_agent_refs.py --check` 与
+`sanitize_artifacts.py --check`。后果是可复现的：决策包升到 schema v1.1 之后，
+`eval/tasks/*.json` 这份生成物没人重跑，`make_tasks.py --check` **红在仓库里**，
+而没有任何测试会发现它 —— 因为新加的那类改动不在索引里，也就没人知道要跑那条门禁。
+
+手抄的索引会漂。所以这里的每一条都是数据，表格由数据渲染：
+
+* 列出的每个路径、测试、生成器、章节都会被 `--check` 校验**真的存在**；
+* 章节的字节数**现算**（手抄的价格和文档里的实测数字一样，一定会漂）；
+* 逆向校验：凡是支持 `--check` 的脚本，必须出现在某类改动的「重跑」里或 `GATES` 里 ——
+  这条正是上面那次漂移的对应门禁（没有它，"有生成器但没人跑"会再次发生）。
+
+用法：
+    python tools/dev_index.py             # 把索引表写进 CONTRIBUTING.md 的标记块
+    python tools/dev_index.py --check     # 只校验（不一致则 exit 1）
+    python tools/dev_index.py --brief     # 给 agent 的入口层（≤1.5 KB，带价格）
+    python tools/dev_index.py --gates     # 提交前：全部门禁一把跑完
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
+
+BEGIN = "<!-- dev-index:begin -->"
+END = "<!-- dev-index:end -->"
+
+
+# --------------------------------------------------------------------------
+# 门禁：闭集。cost_s 是在开发机上实测的墙钟秒数（和 remedies 里的 cost_s 一个性质：
+# 声明的实测值，用来让 agent 能规划，不是精确基准）。
+# --------------------------------------------------------------------------
+class Gate:
+    def __init__(self, key: str, cmd: str, cost_s: float, what: str):
+        self.key, self.cmd, self.cost_s, self.what = key, cmd, cost_s, what
+
+
+GATES = [
+    Gate("pytest", "uv run pytest", 12.7, "全量测试"),
+    Gate("coverage", "uv run python tools/gen_coverage.py --check", 0.2,
+         "COVERAGE.md 与 capabilities 同源"),
+    Gate("agentrefs", "uv run python tools/gen_agent_refs.py --check", 0.2,
+         "references/*.md 与拒绝码/判词同源"),
+    Gate("index", "uv run python tools/dev_index.py --check", 0.1,
+         "本索引与仓库现状同源"),
+    Gate("tasks", "uv run python eval/make_tasks.py --check", 0.1,
+         "评测任务材料与 packet.build() 同源"),
+    Gate("sanitize", "uv run python bench/sanitize_artifacts.py bench/artifacts --check", 0.2,
+         "入库产物已脱敏"),
+    Gate("build", "uv build", 1.1, "sdist + wheel 能生成"),
+]
+GATE_BY_KEY = {g.key: g for g in GATES}
+
+
+# --------------------------------------------------------------------------
+# 索引：数据。字段含义见表格表头。
+#   truth  单一真源（先改这里；改别处会绕过校验）
+#   touch  连带要动的文件
+#   regen  生成物 → 跑这个脚本重跑
+#   gates  除 pytest 外还要跑的门禁（key）
+#   tests  守它的测试
+#   sec    CONTRIBUTING 里的章节号（"" = 无专章，按真源与测试来）
+# --------------------------------------------------------------------------
+class Change:
+    def __init__(self, key, ask, truth, touch=(), regen=(), gates=(), tests=(), sec=""):
+        self.key, self.ask, self.truth = key, ask, list(truth)
+        self.touch, self.regen, self.gates, self.tests = list(touch), list(regen), list(gates), list(tests)
+        self.sec = sec
+
+
+CHANGES = [
+    Change("metric", "加/改一个指标（数字 + 出处）",
+           truth=["src/kernoscope/provenance.py"],
+           touch=["src/kernoscope/sections.py"],
+           tests=["tests/test_provenance.py", "tests/test_output_consistency.py"], sec="①"),
+    Change("backend", "加一族数据源（nsys / NVML / cuobjdump / NVBit）",
+           truth=["src/kernoscope/backends"],
+           touch=["src/kernoscope/doctor.py", "src/kernoscope/capabilities.py"],
+           tests=["tests/test_doctor.py", "tests/test_toolchain.py"], sec="②"),
+    Change("workload", "加一个已知答案负载（selftest 那一族）",
+           truth=["src/kernoscope/selftest.py"],
+           tests=["tests/test_diff_selftest.py"], sec="③"),
+    Change("question", "加/改一个能力问题",
+           truth=["src/kernoscope/capabilities.py"],
+           regen=["tools/gen_coverage.py"],
+           tests=["tests/test_capabilities.py", "tests/test_opening_package.py"], sec="④"),
+    Change("refusal", "加一种拒绝理由（我们不给数）",
+           truth=["src/kernoscope/refusals.py"],
+           regen=["tools/gen_agent_refs.py"],
+           touch=["CHANGELOG.md", "skills/kernoscope/scripts/remedy.sh"],
+           tests=["tests/test_refusals.py", "tests/test_agent_surface.py"], sec="⑤"),
+    Change("artifact", "加一次 bench 产物 / 改公开数字",
+           truth=["bench/run.sh"],
+           touch=["bench/artifacts/README.md"],
+           gates=["sanitize"],
+           tests=["tests/test_doc_artifact_consistency.py", "tests/test_repo_hygiene.py"], sec="⑥"),
+    Change("verdict", "加/改一个判词或决策包字段",
+           truth=["src/kernoscope/packet.py"],
+           regen=["tools/gen_agent_refs.py", "eval/make_tasks.py"],
+           touch=["CHANGELOG.md"],
+           tests=["tests/test_packet.py", "tests/test_agent_surface.py",
+                  "tests/test_eval_harness.py"], sec="⑧"),
+    Change("entry", "改 agent 入口层（常驻那部分）",
+           truth=["AGENTS.md"],
+           touch=["llms.txt", "skills/kernoscope/SKILL.md"],
+           tests=["tests/test_agent_surface.py"], sec="⑧"),
+    Change("cli", "加/改一个子命令或开关",
+           truth=["src/kernoscope/cli.py"],
+           touch=["README.md", "CHANGELOG.md"],
+           tests=["tests/test_cli.py", "tests/test_flag_suggestions.py",
+                  "tests/test_documented_commands.py"], sec="⑧"),
+    Change("index", "加一条门禁 / 改这份索引本身",
+           truth=["tools/dev_index.py"],
+           touch=["tests/test_dev_index.py"],
+           tests=["tests/test_dev_index.py"], sec="⑧"),
+]
+
+
+# --------------------------------------------------------------------------
+# 章节字节数：现算，不手抄
+# --------------------------------------------------------------------------
+def _sections() -> dict[str, int]:
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    heads = [(i, m.group(1)) for i, l in enumerate(lines)
+             if (m := re.match(r"^##\s+(.)", l))]
+    out: dict[str, int] = {}
+    for n, (i, mark) in enumerate(heads):
+        end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
+        out[mark] = len("\n".join(lines[i:end]).encode("utf-8"))
+    return out
+
+
+def _fmt_bytes(n: int) -> str:
+    return f"{n / 1024:.1f} KB" if n >= 1024 else f"{n} B"
+
+
+def render_block() -> str:
+    secs = _sections()
+    out = [BEGIN,
+           "<!-- 由 tools/dev_index.py 生成；改动请改那里的 CHANGES 后重跑，不要手改本表 -->",
+           "",
+           "| 你要改什么 | 单一真源（先改这里） | 连带 | 生成物（重跑） | 守它的测试 | 先读 |",
+           "|---|---|---|---|---|---|"]
+    for c in CHANGES:
+        truth = " / ".join(f"`{p}`" for p in c.truth)
+        touch = " / ".join(f"`{p}`" for p in c.touch) or "—"
+        regen = " / ".join(f"`{p}`" for p in c.regen) or "—"
+        tests = " / ".join(f"`{p}`" for p in c.tests)
+        if c.sec and c.sec in secs:
+            read = f"§{c.sec}（{_fmt_bytes(secs[c.sec])}）"
+        else:
+            read = "—"
+        out.append(f"| {c.ask} | {truth} | {touch} | {regen} | {tests} | {read} |")
+    out += ["", "提交前跑一条命令即可（下面的表就是它依次执行的东西）：", "",
+            "```bash", "uv run python tools/dev_index.py --gates", "```", "",
+            "| 门禁 | 命令 | 代价 | 守什么 |", "|---|---|---|---|"]
+    for g in GATES:
+        out.append(f"| `{g.key}` | `{g.cmd}` | ≈{g.cost_s:g} s | {g.what} |")
+    out += ["", END]
+    return "\n".join(out)
+
+
+def render_brief() -> str:
+    secs = _sections()
+    total = sum(g.cost_s for g in GATES)
+    out = [f"Kernoscope 开发索引：{len(CHANGES)} 类改动 · 全文见 CONTRIBUTING.md（首屏是同一张表）",
+           "改什么 → 单一真源 [→ 重跑] [→ 门禁] | 章节"]
+    for c in CHANGES:
+        regen = " →" + ",".join(Path(p).name for p in c.regen) if c.regen else ""
+        gate = " !" + ",".join(c.gates) if c.gates else ""
+        sec = f" | §{c.sec} {_fmt_bytes(secs[c.sec])}" if c.sec in secs else ""
+        out.append(f"- {c.ask} → {', '.join(c.truth)}{regen}{gate}{sec}")
+    out.append(f"提交前：uv run python tools/dev_index.py --gates"
+               f"（{len(GATES)} 条门禁一把跑，≈{total:g} s，全绿才算完）")
+    out.append("生成物不许手改；测试比文档权威，冲突以测试为准。")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# 校验
+# --------------------------------------------------------------------------
+def check() -> list[str]:
+    problems: list[str] = []
+    secs = _sections()
+
+    for c in CHANGES:
+        for p in dict.fromkeys(c.truth + c.touch + c.regen + c.tests):
+            if not (ROOT / p).exists():
+                problems.append(f"{c.key}: 索引里的路径不存在：{p}")
+        if c.sec and c.sec not in secs:
+            problems.append(f"{c.key}: CONTRIBUTING 里没有章节 §{c.sec}")
+        if not c.tests:
+            problems.append(f"{c.key}: 没有任何测试守它（那它就只靠自觉）")
+        for k in c.gates:
+            if k not in GATE_BY_KEY:
+                problems.append(f"{c.key}: 引用了未登记的门禁 {k}")
+    if not any("pytest" == g.key for g in GATES):
+        problems.append("门禁表里必须有全量测试")
+
+    # 逆向：支持 --check 的脚本必须被某个门禁或某类改动用到 —— 否则它就会像
+    # eval/make_tasks.py 那样"带 --check 但从来没人在 CI/提交前跑"，静默漂移。
+    referenced = {p for c in CHANGES for p in c.regen}
+    referenced |= {re.sub(r"^uv run python ", "", g.cmd).split()[0] for g in GATES}
+    for pat in ("tools/*.py", "eval/*.py", "bench/*.py"):
+        for p in sorted(ROOT.glob(pat)):
+            if p.name == "__init__.py" or "--check" not in p.read_text(encoding="utf-8"):
+                continue
+            if str(p.relative_to(ROOT)) not in referenced:
+                problems.append(f"{p.relative_to(ROOT)}: 支持 --check 但没有任何门禁或改动类会跑它")
+
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    if BEGIN not in text or END not in text:
+        problems.append("CONTRIBUTING.md 里没有 dev-index 标记块（跑 tools/dev_index.py 写入）")
+    else:
+        have = text[text.index(BEGIN):text.index(END) + len(END)]
+        if have != render_block():
+            problems.append("CONTRIBUTING.md 的索引块与生成器不一致（重跑 tools/dev_index.py）")
+    return problems
+
+
+def write_block() -> None:
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    new = text[:text.index(BEGIN)] + render_block() + text[text.index(END) + len(END):]
+    CONTRIBUTING.write_text(new, encoding="utf-8")
+    print(f"已写入 {CONTRIBUTING.relative_to(ROOT)} 的索引块（{len(render_block().encode())} B）")
+
+
+def run_gates() -> int:
+    failed: list[str] = []
+    total = 0.0
+    for g in GATES:
+        import time
+        t0 = time.monotonic()
+        r = subprocess.run(g.cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
+        dt = time.monotonic() - t0
+        total += dt
+        mark = "ok  " if r.returncode == 0 else "FAIL"
+        print(f"[{mark}] {g.key:<10} {dt:5.1f}s  {g.what}")
+        if r.returncode != 0:
+            failed.append(g.key)
+            print((r.stdout + r.stderr).strip()[-1200:])
+    print(f"\n{len(GATES) - len(failed)}/{len(GATES)} 通过，合计 {total:.1f} s")
+    if failed:
+        print("失败：" + ", ".join(failed))
+    return 1 if failed else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="开发侧索引的单一真源（改哪类东西 → 改哪 → 跑什么）")
+    ap.add_argument("--check", action="store_true", help="只校验索引与仓库现状是否一致")
+    ap.add_argument("--brief", action="store_true", help="打印给 agent 的入口层（≤1.5 KB）")
+    ap.add_argument("--gates", action="store_true", help="提交前：全部门禁一把跑完")
+    args = ap.parse_args()
+
+    if args.brief:
+        text = render_brief()
+        sys.stdout.write(text + "\n")
+        if len(text.encode("utf-8")) > 1500:
+            print(f"[dev_index] 入口层已 {len(text.encode('utf-8'))} B，超过 1500 B 预算",
+                  file=sys.stderr)
+            return 1
+        return 0
+    if args.gates:
+        return run_gates()
+    if args.check:
+        problems = check()
+        for p in problems:
+            print(p, file=sys.stderr)
+        if problems:
+            print(f"索引与仓库现状不一致（{len(problems)} 处）", file=sys.stderr)
+            return 1
+        print(f"索引与仓库现状一致 ✓（{len(CHANGES)} 类改动、{len(GATES)} 条门禁）")
+        return 0
+    write_block()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

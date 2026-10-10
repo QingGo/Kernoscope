@@ -57,4 +57,5 @@ packages = ["src/kernoscope"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# 不设 addopts：曾经写的是 "-q"，于是 `uv run pytest -q` 变成 `-qq`，汇总行被吞掉 ——
+# 对只靠命令行自证的 agent 来说这是个纯损失，它会把"没看到 passed"当成"测试没跑"。

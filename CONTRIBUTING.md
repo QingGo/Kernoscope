@@ -1,25 +1,55 @@
 # 贡献指南（适配器清单与扩展点）
 
 Kernoscope 的形态是「**探测 → 选最高可用层 → 采集 → 每个数字带出处**」。
-所以"扩展"几乎总是落在下面六类适配器之一。每类都只有一个单一真源，
+所以"扩展"几乎总是落在下面这些适配器之一。每类都只有一个单一真源，
 **改代码就不会漏**；漏了会有测试直接红。
 
-| 适配器 | 单一真源 | 你会动到的文件 | 守它的测试 |
+这张表是**生成物**（单一真源是 `tools/dev_index.py` 的 `CHANGES`）：它回答
+"改哪类东西 → 改哪个文件 → 要重跑什么 → 跑哪条门禁 → 先读哪一节（多少字节）"。
+`--check` 会校验里面每个路径、测试、生成器都真的存在，并**逆向校验**：
+凡支持 `--check` 的脚本都必须挂在某条门禁上 —— 没有这条，"有生成器但没人跑"
+会让生成物静默漂移（`eval/tasks/*.json` 就这样红过一次）。
+
+<!-- dev-index:begin -->
+<!-- 由 tools/dev_index.py 生成；改动请改那里的 CHANGES 后重跑，不要手改本表 -->
+
+| 你要改什么 | 单一真源（先改这里） | 连带 | 生成物（重跑） | 守它的测试 | 先读 |
+|---|---|---|---|---|---|
+| 加/改一个指标（数字 + 出处） | `src/kernoscope/provenance.py` | `src/kernoscope/sections.py` | — | `tests/test_provenance.py` / `tests/test_output_consistency.py` | §①（2.9 KB） |
+| 加一族数据源（nsys / NVML / cuobjdump / NVBit） | `src/kernoscope/backends` | `src/kernoscope/doctor.py` / `src/kernoscope/capabilities.py` | — | `tests/test_doctor.py` / `tests/test_toolchain.py` | §②（2.3 KB） |
+| 加一个已知答案负载（selftest 那一族） | `src/kernoscope/selftest.py` | — | — | `tests/test_diff_selftest.py` | §③（1.4 KB） |
+| 加/改一个能力问题 | `src/kernoscope/capabilities.py` | — | `tools/gen_coverage.py` | `tests/test_capabilities.py` / `tests/test_opening_package.py` | §④（1.3 KB） |
+| 加一种拒绝理由（我们不给数） | `src/kernoscope/refusals.py` | `CHANGELOG.md` / `skills/kernoscope/scripts/remedy.sh` | `tools/gen_agent_refs.py` | `tests/test_refusals.py` / `tests/test_agent_surface.py` | §⑤（1.4 KB） |
+| 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | — | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
+| 加/改一个判词或决策包字段 | `src/kernoscope/packet.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` / `eval/make_tasks.py` | `tests/test_packet.py` / `tests/test_agent_surface.py` / `tests/test_eval_harness.py` | §⑧（2.3 KB） |
+| 改 agent 入口层（常驻那部分） | `AGENTS.md` | `llms.txt` / `skills/kernoscope/SKILL.md` | — | `tests/test_agent_surface.py` | §⑧（2.3 KB） |
+| 加/改一个子命令或开关 | `src/kernoscope/cli.py` | `README.md` / `CHANGELOG.md` | — | `tests/test_cli.py` / `tests/test_flag_suggestions.py` / `tests/test_documented_commands.py` | §⑧（2.3 KB） |
+| 加一条门禁 / 改这份索引本身 | `tools/dev_index.py` | `tests/test_dev_index.py` | — | `tests/test_dev_index.py` | §⑧（2.3 KB） |
+
+提交前跑一条命令即可（下面的表就是它依次执行的东西）：
+
+```bash
+uv run python tools/dev_index.py --gates
+```
+
+| 门禁 | 命令 | 代价 | 守什么 |
 |---|---|---|---|
-| ① 指标映射（ncu 名 → 我们的名字 + 出处） | `src/kernoscope/provenance.py` | `provenance.py`、`sections.py` | `tests/test_provenance.py`、`tests/test_output_consistency.py` |
-| ② 后端（nsys / NVML / cuobjdump / NVBit） | `src/kernoscope/backends/` | 对应后端模块、`doctor.py`、`capabilities.py` | `tests/test_*_parse.py`、`tests/test_doctor.py` |
-| ③ 已知答案负载（selftest 那一族） | `src/kernoscope/selftest.py` | `selftest.py` | `tests/test_diff_selftest.py` |
-| ④ 能力问题 | `src/kernoscope/capabilities.py` | `capabilities.py`、重跑 `tools/gen_coverage.py` | `tests/test_capabilities.py`、`tests/test_opening_package.py` |
-| ⑤ 拒绝类型 | `src/kernoscope/refusals.py` | `refusals.py` | `tests/test_refusals.py` |
-| ⑥ bench 产物 / 公开数字 | `bench/run.sh` + 产物 | `bench/`、`bench/artifacts/README.md` | `tests/test_doc_artifact_consistency.py`、`tests/test_repo_hygiene.py` |
+| `pytest` | `uv run pytest` | ≈12.7 s | 全量测试 |
+| `coverage` | `uv run python tools/gen_coverage.py --check` | ≈0.2 s | COVERAGE.md 与 capabilities 同源 |
+| `agentrefs` | `uv run python tools/gen_agent_refs.py --check` | ≈0.2 s | references/*.md 与拒绝码/判词同源 |
+| `index` | `uv run python tools/dev_index.py --check` | ≈0.1 s | 本索引与仓库现状同源 |
+| `tasks` | `uv run python eval/make_tasks.py --check` | ≈0.1 s | 评测任务材料与 packet.build() 同源 |
+| `sanitize` | `uv run python bench/sanitize_artifacts.py bench/artifacts --check` | ≈0.2 s | 入库产物已脱敏 |
+| `build` | `uv build` | ≈1.1 s | sdist + wheel 能生成 |
+
+<!-- dev-index:end -->
 
 开始之前：
 
 ```bash
 uv sync
-uv run pytest -q                    # 必须全绿
-uv run kernoscope --help            # 确认你的开关真的存在
-uv run python tools/gen_coverage.py --check   # 文档与代码是否同源
+uv run python tools/dev_index.py --brief   # 这张表的短版（≤1.5 KB，带每类的章节与价格）
+uv run python tools/dev_index.py --gates   # 提交前：全部门禁一把跑完（全绿才算完；代价见表）
 ```
 
 ---
@@ -207,9 +237,11 @@ uv run python tools/gen_coverage.py --check
 3. **登记**：在 `bench/artifacts/README.md` 里登记每个产物目录（它是现行的还是历史的），
    `tests/test_doc_artifact_consistency.py` 会检查目录都被登记、修订号与工具版本被钉住、
    `sanitize` 步骤在 `manifest.json` 里。
-4. **公开数字**：把引用它的文档与取值函数登记到该测试的 `DOC_NUMBER_RULES`
-   （`(文档, 产物文件, 取值函数, 展示模板)`）—— 这是**追加登记**，不改动既有断言；
-   取值函数只读产物，所以数字一变、文档没跟着变就会红，并直接告诉你期望串。
+4. **公开数字**：数字对拍是**从产物反推期望值**的（`tests/test_doc_artifact_consistency.py`
+   的 `_doc_rules(art)`），所以新数字不需要登记到任何表里 —— 只要产物里真的算得出它、
+   文档里真的写着它。跨运行的**并集**说法（"批并集 −4.3% ~ +12.7%"）另有专门一条守着，
+   它最容易在新增一次运行之后过期：产物变宽了，文档没跟着变就会红，并把期望串直接告诉你。
+   新增一次运行后跑 `uv run pytest tests/test_doc_artifact_consistency.py` 看差在哪。
 5. 引用产物目录时用 `bench/artifacts/*/...` 这类**通配**写法，不要写死某一次的目录名；
    真要写目录名，它必须真的存在。
 
@@ -217,13 +249,18 @@ uv run python tools/gen_coverage.py --check
 
 ## ⑦ 测试与提交规则
 
-提交前跑：
+提交前跑**一条命令**（它依次执行上面表里的每一条门禁，并打印每条的实际耗时）：
 
 ```bash
-uv run pytest -q                       # 全量必须绿
-uv run python tools/gen_coverage.py --check   # 生成物与代码同源
-uv build                               # sdist + wheel 能生成
+uv run python tools/dev_index.py --gates
 ```
+
+门禁清单是**闭集**，定义在 `tools/dev_index.py` 的 `GATES` 里。加一条门禁要同时
+把它挂到某类改动的 `regen`/`gates` 上，否则 `--check` 会报"支持 --check 但没人跑它"。
+`uv run python tools/dev_index.py --check` 是这份索引自己的门禁。
+
+单独跑某一条时不要用管道接 `tail`（退出码会被管道吃掉）：`uv run pytest -q` 现在会正常
+打印汇总行（`pyproject.toml` 里刻意没有设 `addopts`，否则 `-q` 叠 `-q` 会把汇总行吞掉）。
 
 **提交动作与提交者身份由维护者负责**；贡献者不要自己 `git commit` / `git push`。
 提交内容遵守这几条：
@@ -237,3 +274,44 @@ uv build                               # sdist + wheel 能生成
 - 不提交构建产物：`dist/`、`*.pyc`、`__pycache__/`、编译中间件；`REVISION` 是每次部署产生的，不入库。
 - 新接口要有测试；改了公开数字要同步产物或文档（数字门禁会告诉你差在哪）。
 - 提交信息只描述这次改动**本身**（做了什么、为什么），不要描述你所在的机器或维护者的工作目录。
+
+---
+
+## ⑧ 接口面：决策包、评测材料、入口层与 CLI
+
+这一类的共同点是：**光改一个文件是完不成的** —— 它们都有生成物或字节预算。
+
+### 判词与决策包（`src/kernoscope/packet.py`）
+
+判词 id 是闭集（`VERDICT_IDS`），每个判词由 `BUILDERS` 里的一个 builder 产出；
+`tests/test_agent_surface.py::test_verdict_catalog_is_exactly_what_builders_can_emit`
+要求两者**完全一致**（生成的判词目录只认这个集合）。改判词或包结构要：
+
+1. 追加字段是**加法**：加字段就动 `PACKET_SCHEMA_REVISION`，`PACKET_SCHEMA_VERSION`
+   只在破坏兼容时才动，并写进 `CHANGELOG.md`（v1.0 的读者仍然要能读，回退规则要有测试）；
+2. 包的尺寸是**硬上限** `PACKET_SIZE_BUDGET_BYTES`（4096 B）：`enforce_budget` 按固定顺序
+   裁剪，**每应用一步就先记账再量** —— 否则裁剪日志自己会把包顶出预算；
+3. 重跑 `tools/gen_agent_refs.py`（判词目录）与 `eval/make_tasks.py`（评测材料内联了包）。
+
+### 评测材料（`eval/tasks/*.json`）
+
+**入库的 JSON 才是任务真源**（评测台与测试只读它们），但它的 `material` 必须与
+`packet.build()` 同源 —— 所以改包之后必须重跑 `eval/make_tasks.py`。真值可以手工调整
+（`--check` 只比对 `material`，不会冲掉手工别名与阈值）。
+
+### agent 入口层（`AGENTS.md` / `llms.txt` / `skills/kernoscope/SKILL.md`）
+
+两个受众、两条轨道，别混：
+
+* **改这个仓库的 agent** → `AGENTS.md`（常驻入口）+ 本文件；
+* **用这个工具分析 kernel 的 agent** → `SKILL.md` 的 frontmatter（触发词）+ `capabilities --brief`。
+
+常驻部分（`AGENTS.md` + `llms.txt` + SKILL.md 的 frontmatter）合计是 **4096 B 硬预算**
+（`tests/test_agent_surface.py` 守）：**加内容就要减内容**，否则渐进披露退化成
+"每个会话都付全量上下文的钱"。`references/*.md` 是生成物，不许手改。
+
+### CLI（`src/kernoscope/cli.py`）
+
+新开关要能：在 `--help` 里看见、被 `tests/test_documented_commands.py` 认到
+（文档里写的开关必须真的存在）、并在该拒绝时给出下一步（见 ⑤）。改完跑一遍
+`uv run kernoscope --help`，确认它真的会这么说。

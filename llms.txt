@@ -2,24 +2,24 @@
 
 > 在拿不到硬件性能计数器的受限/多租户 GPU 上，为 CUDA kernel 优化提供「每个数字都标注出处」的性能证据；CLI 与 ncu 兼容，缺依赖时优雅降级并给出下一步。
 
-## 给 agent
+## 改这个仓库（贡献者 agent）
+
+- [AGENTS.md](AGENTS.md): 开发入口与硬规则（≤40 行，先读这个）
+- [CONTRIBUTING.md](CONTRIBUTING.md): 首屏是索引表：改哪类东西 → 改哪个文件 → 跑哪条门禁
+- [tools/dev_index.py](tools/dev_index.py): 索引的单一真源；`--brief` 短版、`--gates` 提交前全跑
+
+## 用这个工具分析 kernel（优化 agent）
 
 - [skills/kernoscope/SKILL.md](skills/kernoscope/SKILL.md): 触发条件、硬规则、闭环脚本（先读这个）
-- [AGENTS.md](AGENTS.md): 入口与硬规则（≤40 行）
 - [COVERAGE.md](COVERAGE.md): 三态覆盖矩阵与能力分层
-- [skills/kernoscope/references/verdicts.md](skills/kernoscope/references/verdicts.md): 判词、方向、前提、MDD
-- [skills/kernoscope/references/refusal-codes.md](skills/kernoscope/references/refusal-codes.md): 拒绝码 → 怎么办 → 代价
 
 ## 人读
 
 - [README.md](README.md): 首屏定位与局限
 - [PROVENANCE.md](PROVENANCE.md): 出处体系（exact/measured/estimated/…）
 - [CALIBRATION.md](CALIBRATION.md): 本机峰值标定
-- [CONTRIBUTING.md](CONTRIBUTING.md): 扩展点
 - [CHANGELOG.md](CHANGELOG.md): 接口层变化
 
 ## Optional
 
-- [skills/kernoscope/references/provenance-rules.md](skills/kernoscope/references/provenance-rules.md): 出处纪律短版
-- [skills/kernoscope/references/recipes.md](skills/kernoscope/references/recipes.md): 四个闭环配方
 - [bench/artifacts/README.md](bench/artifacts/README.md): 真机产物登记表

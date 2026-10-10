@@ -45,13 +45,15 @@ def _lines(p: pathlib.Path) -> int:
 # 预算
 # --------------------------------------------------------------------------
 def test_agents_md_is_an_entry_point_not_a_manual():
-    assert AGENTS.exists(), "仓库根应当有 AGENTS.md（给 agent 的入口）"
+    """`AGENTS.md` 是**开发侧**入口（A 轨）：这里只守预算与体量。
+
+    受众分流（开发入口不带使用面的闭环命令、使用面入口必须带）由
+    `tests/test_dev_index.py` 守。
+    """
+    assert AGENTS.exists(), "仓库根应当有 AGENTS.md（给改这个仓库的 agent 的入口）"
     text = AGENTS.read_text(encoding="utf-8")
     assert _lines(AGENTS) <= 40, f"AGENTS.md 已经 {_lines(AGENTS)} 行，入口层不许长成手册"
     assert len(text.encode("utf-8")) <= 2500
-    # 入口层必须回答"怎么用"与"不能怎么用"
-    for needle in ("capabilities --brief", "--packet", "不得作为行动依据"):
-        assert needle in text, needle
 
 
 def test_skill_md_has_a_triggerable_description():
@@ -68,6 +70,10 @@ def test_skill_md_has_a_triggerable_description():
     assert 60 <= len(words) <= 800, f"description 长度 {len(words)} 不在 60–800 之间"
     # 触发词要同时说清"什么时候用"与"什么时候不要用"
     assert "不要用" in words, "description 必须写明什么时候不要用它"
+    # 使用面（B 轨）的闭环必须在 SKILL.md 里 —— 它是 B 轨唯一的常驻入口
+    body = text
+    for needle in ("capabilities --brief", "--packet", "actionable", "indistinguishable"):
+        assert needle in body, f"使用面入口少了 {needle!r}"
 
 
 def test_entry_layer_stays_small():
