@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # remedy.sh <code> —— 只查一个拒绝码：什么意思、怎么办、要多少代价。
-# 不需要 GPU，也不需要读整张 11 KB 的参考表。
+# 不需要 GPU，也不需要读整张参考表（它有多大由 gen_agent_refs.py 现算）。
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_ks.sh"
 REFS="$KS_SKILL_ROOT/skills/kernoscope/references/refusal-codes.md"

@@ -13,14 +13,14 @@ Kernoscope 的形态是「**探测 → 选最高可用层 → 采集 → 每个�
 <!-- dev-index:begin -->
 <!-- 由 tools/dev_index.py 生成；改动请改那里的 CHANGES 后重跑，不要手改本表 -->
 
-| 你要改什么 | 单一真源（先改这里） | 连带 | 生成物（重跑） | 守它的测试 | 先读 |
+| 你要改什么 | 单一真源（先改这里） | 连带 | 生成物（重跑）/ 额外门禁 | 守它的测试 | 先读 |
 |---|---|---|---|---|---|
 | 加/改一个指标（数字 + 出处） | `src/kernoscope/provenance.py` | `src/kernoscope/sections.py` | — | `tests/test_provenance.py` / `tests/test_output_consistency.py` | §①（2.9 KB） |
 | 加一族数据源（nsys / NVML / cuobjdump / NVBit） | `src/kernoscope/backends` | `src/kernoscope/doctor.py` / `src/kernoscope/capabilities.py` | — | `tests/test_doctor.py` / `tests/test_toolchain.py` | §②（2.3 KB） |
 | 加一个已知答案负载（selftest 那一族） | `src/kernoscope/selftest.py` | — | — | `tests/test_diff_selftest.py` | §③（1.4 KB） |
 | 加/改一个能力问题 | `src/kernoscope/capabilities.py` | — | `tools/gen_coverage.py` | `tests/test_capabilities.py` / `tests/test_opening_package.py` | §④（1.3 KB） |
-| 加一种拒绝理由（我们不给数） | `src/kernoscope/refusals.py` | `CHANGELOG.md` / `skills/kernoscope/scripts/remedy.sh` | `tools/gen_agent_refs.py` | `tests/test_refusals.py` / `tests/test_agent_surface.py` | §⑤（1.4 KB） |
-| 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | — | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
+| 加一种拒绝理由（我们不给数） | `src/kernoscope/refusals.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` | `tests/test_refusals.py` / `tests/test_agent_surface.py` | §⑤（1.9 KB） |
+| 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | 门禁 `sanitize` | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
 | 加/改一个判词或决策包字段 | `src/kernoscope/packet.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` / `eval/make_tasks.py` | `tests/test_packet.py` / `tests/test_agent_surface.py` / `tests/test_eval_harness.py` | §⑧（2.3 KB） |
 | 改 agent 入口层（常驻那部分） | `AGENTS.md` | `llms.txt` / `skills/kernoscope/SKILL.md` | — | `tests/test_agent_surface.py` | §⑧（2.3 KB） |
 | 加/改一个子命令或开关 | `src/kernoscope/cli.py` | `README.md` / `CHANGELOG.md` | — | `tests/test_cli.py` / `tests/test_flag_suggestions.py` / `tests/test_documented_commands.py` | §⑧（2.3 KB） |
@@ -212,6 +212,11 @@ uv run python tools/gen_coverage.py --check
 
 - 哪个能力问题会用到它（`capabilities.py` 的 `CHECKS`）；
 - `--strict` 是否要因为它 exit 2（请求了产不出来的数据就该失败，而不是悄悄给错数）。
+
+**"登记一个 code" 与 "用它拒绝" 是两件事**：上面三处只让这个 code 存在、可查、有处置。
+要让它真的在某条读数上生效，还得在**产生那条读数的模块**里挂前提（`analyze/*.py` 的
+`reliable` 守卫 + `to_metrics()`，见 ①），并补上采集该前提的数据源（`backends/`，见 ②）。
+只做前半截是有意义的改动（agent 能查到处置），但要在 `CHANGELOG.md` 里说清它还没生效。
 
 构造拒绝时把 `observed`（实测到的值）与 `threshold`（门槛）**同单位**填上 ——
 两者相减才知道差多少，agent 也才能据此规划。复合拒绝用 `combined_refusal([...])`，

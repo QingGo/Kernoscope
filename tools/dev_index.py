@@ -99,7 +99,7 @@ CHANGES = [
     Change("refusal", "加一种拒绝理由（我们不给数）",
            truth=["src/kernoscope/refusals.py"],
            regen=["tools/gen_agent_refs.py"],
-           touch=["CHANGELOG.md", "skills/kernoscope/scripts/remedy.sh"],
+           touch=["CHANGELOG.md"],
            tests=["tests/test_refusals.py", "tests/test_agent_surface.py"], sec="⑤"),
     Change("artifact", "加一次 bench 产物 / 改公开数字",
            truth=["bench/run.sh"],
@@ -152,18 +152,22 @@ def render_block() -> str:
     out = [BEGIN,
            "<!-- 由 tools/dev_index.py 生成；改动请改那里的 CHANGES 后重跑，不要手改本表 -->",
            "",
-           "| 你要改什么 | 单一真源（先改这里） | 连带 | 生成物（重跑） | 守它的测试 | 先读 |",
+           "| 你要改什么 | 单一真源（先改这里） | 连带 | 生成物（重跑）/ 额外门禁 | 守它的测试 | 先读 |",
            "|---|---|---|---|---|---|"]
     for c in CHANGES:
         truth = " / ".join(f"`{p}`" for p in c.truth)
         touch = " / ".join(f"`{p}`" for p in c.touch) or "—"
-        regen = " / ".join(f"`{p}`" for p in c.regen) or "—"
+        extra = " / ".join(f"`{p}`" for p in c.regen)
+        if c.gates:
+            extra = f"{extra}；" if extra else ""
+            extra += "门禁 " + "、".join(f"`{g}`" for g in c.gates)
+        extra = extra or "—"
         tests = " / ".join(f"`{p}`" for p in c.tests)
         if c.sec and c.sec in secs:
             read = f"§{c.sec}（{_fmt_bytes(secs[c.sec])}）"
         else:
             read = "—"
-        out.append(f"| {c.ask} | {truth} | {touch} | {regen} | {tests} | {read} |")
+        out.append(f"| {c.ask} | {truth} | {touch} | {extra} | {tests} | {read} |")
     out += ["", "提交前跑一条命令即可（下面的表就是它依次执行的东西）：", "",
             "```bash", "uv run python tools/dev_index.py --gates", "```", "",
             "| 门禁 | 命令 | 代价 | 守什么 |", "|---|---|---|---|"]
