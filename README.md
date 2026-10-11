@@ -1,16 +1,36 @@
 # Kernoscope 内核镜
-**在拿不到硬件性能计数器的多租户 GPU 上，为算子优化提供「每个数字都标注出处」的性能证据。**
 
-它回答三类问题：① 哪个 kernel 慢、launch 配置如何（`exact`）；② 离 roofline 多远、是不是 DRAM bound（`estimated`，带误差带）；③ 实际达到的 occupancy、发射槽上界与瓶颈方向（`measured`/`estimated`）。
-它**不能回答**：精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 这些与 ncu 同源的硬件计数器我们不给数字，只报 `n/a` + 原因 + 替代口径；完整三态清单见 [COVERAGE.md](COVERAGE.md)。
+**在多租户/受限 GPU 上（`ncu` 因权限跑不了），为算子优化提供「每个数字都标注出处」的性能证据，并把结论折算成成本与可排序的优化方向。**
 
-30 秒上手（没有 GPU 也能跑通）：`kernoscope doctor` —— 先看这台机器能答什么、拿不到什么、为什么（`doctor --no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读）。
+它回答：哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱、先改哪里能省多少**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。
 
-与 `ncu` 的关系：CLI 兼容，但数据源不同（它读硬件计数器，我们读物理观测量，绝不占用它的指标名）；与 `nsys` 的关系：复用它的 CUPTI activity，是它的消费者而不是替代品；与 `torch.profiler` 的关系：它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信"。
+30 秒上手（没有 GPU 也能跑通）：先 `kernoscope doctor` 看这台机器能答什么、拿不到什么、为什么（`--no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读），再 `kernoscope --packet - -- <你的命令>` 拿一份 <4 KB 决策包。
+
+与 `ncu` 的关系：CLI 兼容但数据源不同（它读硬件计数器，我们读物理观测量，**绝不占用它的指标名**）；与 `nsys` 的关系：复用它的 CUPTI activity，是消费者不是替代品；与 `torch.profiler` 的关系：它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信、改它值多少钱"。
 
 ---
 
-## 为什么需要它
+## 目录
+
+1. [为什么需要它](#1-为什么需要它) · [它明确不做什么](#它明确不做什么)
+2. [安装与第一分钟](#2-安装与第一分钟)
+3. [证据模型：每个数字都带出处](#3-证据模型每个数字都带出处)
+4. [与 ncu / nsys / torch.profiler 的关系](#4-与-ncu--nsys--torchprofiler-的关系)
+5. [DRAM 字节：两条口径与实测精度](#5-dram-字节两条口径与实测精度)
+6. [无计数器的其它能力](#6-无计数器的其它能力)
+7. [成本与处方：先改哪里、能省多少](#7-成本与处方先改哪里能省多少)
+8. [比较与 CI](#8-比较与-ci)
+9. [输出形态：一屏、决策包、案件目录、报告](#9-输出形态一屏决策包案件目录报告)
+10. [副作用与同意：`--plan`](#10-副作用与同意--plan)
+11. [局限与已知失败](#11-局限与已知失败)
+12. [数字从哪来](#12-数字从哪来)
+13. [拿不到数字时先看这里](#13-拿不到数字时先看这里)
+14. [状态与路线](#14-状态与路线)
+15. [文档与声明](#15-文档与声明)
+
+---
+
+## 1. 为什么需要它
 
 很多共享租用的多租户 GPU 容器实例宿主机带着
 `RmProfilingAdminOnly=1`，容器又没有 `CAP_SYS_ADMIN`/`CAP_PERFMON`，于是：
@@ -31,10 +51,14 @@ $ ncu --set basic -- python train.py
 | occupancy 上界与被谁限制 | 静态属性 + 架构上限，解析算术 | `exact` |
 | **实际达到的 occupancy** | `(smid, globaltimer)` 区间重叠重建（需探针） | `measured` |
 | **DRAM 字节数 / 是不是 DRAM bound** | NVML 显存忙碌时间 × 本机实测峰值带宽 | `estimated`（需窗口覆盖率达标） |
-| **DRAM 字节数的第二条口径** | NVBit 访存轨迹 + 缓存模型 | `estimated` |
+| **DRAM 字节数的第二条口径** | NVBit 访存轨迹 + 缓存模型（地址是算术） | `estimated` |
 | 离 roofline 多远 | 本机实测峰值（不是规格表）+ 你给的工作量 | `estimated` |
 | 发射槽用了多少、瓶颈方向 | NVBit 动态指令数 ÷ 硬件发射槽上限 | `estimated`（上界口径） |
-| 每 kernel 能耗 | NVML 能量累加器（ncu 没有这个指标） | `measured` |
+| 训练/推理各阶段占多少 kernel 时间 | nsys 的 NVTX 区间按重叠时长归因 | `derived` |
+| 每 kernel 能耗 | NVML 能量累加器 / 窗口内功率积分（ncu 没有这个指标） | `measured` |
+| **每百万 token 多少钱、先改哪里** | 实测能耗 + 你给的 token 数与价格 + 实测峰值头寸 | `measured`/`derived`/`estimated` |
+| 真值校准我们的替代口径 | 导入一份 `.ncu-rep`（官方只读 API）逐条对拍 | `exact` / `derived` |
+| 让已有 ncu 工作流继续能用 | 导出**带署名**的替代口径 `.ncu-rep` | `estimated` / `derived` |
 | L2/DRAM 精确字节、命中率、warp stall 细分 | **不给数字**，报 `n/a` + 原因 | `unavailable` |
 
 最后一行是重点：**我们拒绝在 ncu 的计数器指标名下面填一个模型算出来的数。**
@@ -43,13 +67,18 @@ $ ncu --set basic -- python train.py
 ### 它明确不做什么
 
 - **不做重放（replay）、不锁频。** 耗时来自 nsys 时间戳，是真实时间；ncu 默认锁频并重放被测 kernel。
-- **不碰 NVIDIA 私有格式。** 不写 `.ncu-rep`，也不做 `--import-source` 的 SASS/源码逐行对照。
-- **不追求"覆盖更多 ncu 功能"。** 覆盖的是"拿不到计数器"这一类受限场景。
-- **不重放、不插桩去伪造计数器。** 缺哪个数据源就报告缺哪个，并给出替代口径。
+- **不逆向、也不冒充 ncu 的计数器语义。** `.ncu-rep` 的容器格式是 NVIDIA **文档化**的
+  （我们按随包发布的 proto 读写，不做逆向），但导出的文件里只有**我们自己的指标名**
+  （`ks__`/`est__`/`meas__`）与"两边单位语义一致"的计数量白名单，**
+  绝不在 ncu 的计数器名下写替代值**，且每份文件都带署名（见 §4.4）。
+- **不注入代码到被测进程。** NVBit 插桩由 `tools/probes/nvbit_memtrace/collect.sh`
+  在你调用它时执行；本工具只读它产出的轨迹文件。
+- **不追求"覆盖更多 ncu 功能"。** 覆盖的是"拿不到计数器"这一类受限场景；缺哪个数据源就报告缺哪个。
+- **不给没有前提的数字。** 分母、窗口、价格、token 数没给就拒绝给那一半结论（见 §3）。
 
 ---
 
-## 安装
+## 2. 安装与第一分钟
 
 ```bash
 # uv（推荐）
@@ -66,6 +95,35 @@ uv sync && uv run kernoscope --help
 **工具的查找不只看 PATH**：`$CUDA_HOME/bin`、`/usr/local/cuda*/bin`、`/usr/bin` 都会找 ——
 在"CUDA 装了但没加 PATH"的实例上，只看 PATH 会误报"未安装"。
 
+想让它自动出现在 agent 的上下文里（一条命令装好）：
+
+```bash
+kernoscope skill                  # 只打印计划：装到哪、会新建/更新哪些文件、备份到哪
+kernoscope skill --apply          # 真的写；先备份、原子写、写后回读校验、失败逆序回滚
+kernoscope skill --client agents --apply   # 或装到 ~/.agents/skills（其它 client 的共享约定）
+```
+
+```bash
+# 第一分钟：这台机器能答什么、拿不到什么、为什么
+kernoscope doctor            # 默认会实测确认计数器门（1 秒）
+kernoscope doctor --no-probe # 只做静态推断：不跑 ncu 实测探测
+kernoscope capabilities --brief      # agent 用的入口层（<1.2 KB，只有 id/状态/计数）
+kernoscope capabilities --json       # 完整三态矩阵 + 补救动作 + 代价
+
+# 带问题来的时候先路由（只输出计划，不跑测量）
+kernoscope route "为什么这个 kernel 慢"
+kernoscope route "每百万 token 花多少钱" --json
+
+# 测一次，拿决策包（判词 + 前提 + 结构化拒绝 + 代价；<4 KB）
+kernoscope --packet - -- python bench_loop.py
+
+# 没有 GPU 也能跑通全流程（合成数据，明确标注 SYNTHETIC）
+kernoscope --ks-synthetic --set detailed
+
+# 动手之前先看副作用（起哪些进程、写哪些文件、读哪些输入；只打印不执行）
+kernoscope --plan -o rep -- python bench_loop.py
+```
+
 > 网络提示：`uv` **不继承 `pip.conf`**，会直连 PyPI。若你的网络访问 PyPI 很慢，
 > 给 uv 单独配镜像，否则 `uv sync` 可能只是"看起来卡住"：
 > ```bash
@@ -78,50 +136,74 @@ uv sync && uv run kernoscope --help
 > 实测（某国内 GPU 实例）：PyPI 直连 0.1 MB/s、某镜像 0.1 MB/s、TUNA 7.6 MB/s ——
 > 配好之后 `uv sync` 从"分钟级卡住"变成 4 秒。
 
----
+### 先把本机峰值标定出来（强烈建议）
 
-## 快速开始（30 秒路径）
+roofline 与处方头寸都用**本机实测峰值**而非规格表。一台 RTX 4090（450 W 功耗墙）的实测差异：
+
+| 指标 | 规格表 | 本机实测 |
+|---|---|---|
+| bf16 matmul | 165.2 TFLOP/s | **163.5**（口径离散 3.9%，可分辨） |
+| fp32 matmul | 82.6 | **54.6**（只有 66%！；口径离散 0.7% ⇒ **不可分辨**） |
+| DRAM copy / read / write | 1008 GB/s | **911.8 / 904.4 / 940.0** |
+| 实测期 SM 时钟 | 3105 MHz | **1815–2625（均值 2356）** |
 
 ```bash
-# 第一步：看看这台机器上「能拿到什么、拿不到什么、为什么」
-kernoscope doctor
-
-# 与 ncu 用法一致：-- 之后是要 profile 的命令
-kernoscope --set basic -k regex:gemm -c 3 -o rep -- python train.py
-
-# 回读报告 / 导出 CSV（含 provenance 与 resolution 列）
-kernoscope -i rep.ksreport.json --csv
-kernoscope -i rep.ksreport.json --csv --metrics est__dram_vs_ledger_err_pct
-
-# 每个 launch 一行（形状扫描、自己算分位数都方便）
-kernoscope --launch-csv -k regex:my_kernel -- ./bench
-
-# CI 卡门：请求了拿不到的数据就失败（exit 2），而不是悄悄给错数
-kernoscope --strict --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed -- python train.py
-
-# 没有 GPU 也能跑通全流程（合成数据，明确标注 SYNTHETIC）
-kernoscope --ks-synthetic --set detailed
+python tools/machine-profile.py --quick      # 写出 ./machine-profile.json
+kernoscope --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-dtype bf16 \
+           -k regex:gemm -- python bench.py
 ```
 
-机器可读的版本是 `kernoscope capabilities --json`：它列出**能回答哪些问题、哪些必然被拒、
-补救动作的代价多少**，给 agent 规划调用序列用（人读版本就是 `kernoscope capabilities`，
-静态总览见 [COVERAGE.md](COVERAGE.md)）。
+标定产物记录**累加口径**（`acc_caliber` / `precision_settings` / `method`）与
+**口径离散度**（`caliber_spread_pct` / `caliber_distinguishable`）——
+因为"口径能不能被分辨"本身是测量结果：同一台机器相隔一天的两次标定给出 0.4% 与 5.0% 两种结论。
+缺这些字段时，Kernoscope **拒绝用它算 roofline 拐点与处方头寸**（带宽侧照常给数）。
+详见 [CALIBRATION.md](CALIBRATION.md)。
 
-输出四件套：
+> 数字来自 [`bench/artifacts/`](bench/artifacts/) 里那次完整标定，见 §12。
 
-| 输出 | 开关 | 用途 |
+---
+
+## 3. 证据模型：每个数字都带出处
+
+这是整个项目的地基：**在受限环境里，最危险的不是"没有数据"，而是"看起来合理的假数据"。**
+所以出处分四级，且**写在指标名里**（规则 R1–R4 由 `provenance.py` 的类型校验强制）：
+
+| 出处 | 含义 | 命名 |
 |---|---|---|
-| ncu 风格文本 | 默认 | 人眼/日志；每条指标带 `[exact]`/`[estimated]`/`[unavailable]` 标签与分辨率 |
-| CSV | `--csv` | 表格分析；多出 `provenance` / `resolution` 列 |
-| JSON | `-o rep` → `rep.ksreport.json` | 机器消费、回归对比（带 `schema_version`） |
-| Perfetto trace | `-o rep` → `rep.perfetto.json` | 丢进 <https://ui.perfetto.dev> 看时间线，零安装 |
-| 逐 launch CSV | `--launch-csv`（配 `-o` 时写 `rep.launches.csv`） | 每次 launch 的 grid/block/时长/配置键 |
+| `exact` | 与 ncu 同源可得（CUPTI activity 时间戳、launch 配置、cubin 静态属性） | ncu 的名字（`gpu__time_duration.sum`、`launch__*`） |
+| `measured` | 我们的探针**实测读数**（NVML 管理计数器、区间重叠探针） | `meas__*` |
+| `derived` | 由实测/精确量**再算出来**的统计量与判词（均值、占比、成本、判词） | `ks__*` |
+| `estimated` | 模型或采样推算（代理口径、访存轨迹模型、roofline 达成率、处方头寸） | `est__*` / `model__*` |
+| `unavailable` | 给不出，只报 `n/a` | 任何名字，必须带 `code=` |
 
-`--metrics <名>` 在宽松模式下**真的筛选输出**（匹配到的 `n/a` 行照常打印、带原因）；
-`--print-units base|auto`、`--print-details all|header`、`--print-metric-name name|full`
-都是真实现（默认 `auto`/`all`/`name`）。
+两条硬纪律：
 
-### 与 ncu 的迁移
+1. **计数器命名空间（`sm__`/`dram__`/`lts__`/…）下面只允许 `exact`，且名字必须登记在允许表**
+   （当前允许表是空的）。所以"在 ncu 的指标名下填一个模型算出来的数"在**类型层面**不可能发生。
+2. **非 `exact` 的值必须用自有前缀**（`ks__`/`est__`/`meas__`/`model__`）。
+   连"由实测样本再算出来的占比"都不许叫 `meas__`（命名承诺什么，出处就得是什么）。
+
+**拒绝不是错误，是输出。** 每个 `n/a` 行都带结构化拒绝：闭集 `code` + 观测值 + 门槛 + 可执行
+处置 + 代价（`wall_seconds`/`manual`/`unavailable`）。散文只解释，判决在 code 里 ——
+所以 agent 可以编程处理（`kernoscope gate`、`refusals[code].action`、`scripts/remedy.sh <code>`）。
+
+**判词带前提。** 决策包里的每条结论都列出支撑它的前提（`observed` vs `threshold`），
+前提不成立时该判词**必须是 `refused`**，不允许以 `soft` 出现（有测试守着）。
+只有 `actionable=true` 的判词能当行动依据。
+
+`--strict` 面向 CI：**请求了产不出来的数据就 exit 2**（覆盖 `--metrics`、`--section`/`--set`、
+空转的 ncu 开关、账本裁决行、以及成本输入）。宁可直接红，也不悄悄给错数：
+
+```bash
+# CI 卡门：请求了拿不到的数据就失败（exit 2），而不是悄悄给错数
+kernoscope --strict --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed -- python train.py
+```
+
+---
+
+## 4. 与 ncu / nsys / torch.profiler 的关系
+
+### 4.1 当 `ncu` 的替代品用（CLI 兼容）
 
 ```bash
 alias ncu=kernoscope          # 或 ln -s $(which kernoscope) ~/bin/ncu
@@ -134,76 +216,85 @@ alias ncu=kernoscope          # 或 ln -s $(which kernoscope) ~/bin/ncu
 | 真实现 | `-k` / `-c` / `-s` / `--devices` / `-o` / `-i` / `--csv` / `--launch-csv` / `--print-*` | 按 ncu 语义生效 |
 | 映射实现 | `--set` / `--section` / `--metrics` | 映射到我们的数据源；产不出的只在 `unavailable` 里出现 |
 | 空转（会告警，`--strict` 下报错） | `--replay-mode` / `--cache-control` / `--clock-control` / `--pm-sampling-*` / `--mps` 等 | 我们的数据源没有 replay / 计数器 pass，所以无效 |
-| 自有扩展 | `--ks-*` | 数据源、标定、账本、窗口、synthetic |
+| 自有扩展 | `--ks-*` | 数据源、标定、账本、窗口、成本、导出的 `.ncu-rep` |
 
-`--strict` 覆盖面：`--metrics` 的指标、`--section`/`--set` 的 section、空转开关、
-以及**请求了账本对拍但裁决行算不出来**。
+**两点语义差异先讲清楚**：① ncu 默认**锁频**并 replay 被测 kernel，我们的耗时来自 nsys
+时间戳（真实时间、不 replay、不锁频），所以绝对耗时与 ncu 的锁频读数不可直接比较；
+② 我们不占用 ncu 的指标名（规则 R3），重建量一律带自有前缀并在 `source` 里注明它对应哪个 ncu 指标。
 
----
+### 4.2 ncu 名字是**发现键**，不是身份
 
-## 本机峰值标定（强烈建议）
+带着 `--metrics dram__bytes.sum` 来，不会得到一句"指标不存在"：
 
-roofline 用**本机实测峰值**而非规格表。一台 RTX 4090（450 W 功耗墙）的实测差异：
-
-| 指标 | 规格表 | 本机实测 |
-|---|---|---|
-| bf16 matmul | 165.2 TFLOP/s | **163.5**（口径离散 3.9%，可分辨） |
-| fp32 matmul | 82.6 | **54.6**（只有 66%！；口径离散 0.7% ⇒ **不可分辨**） |
-| DRAM copy / read / write | 1008 GB/s | **911.8 / 904.4 / 940.0** |
-| 实测期 SM 时钟 | 3105 MHz | **1815–2625（均值 2356）** |
-
-（数字来自 [`bench/artifacts/`](bench/artifacts/) 里那次完整标定，见「数字从哪来」。）
-
-```bash
-python tools/machine-profile.py --quick      # 写出 ./machine-profile.json
-kernoscope --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-dtype bf16 \
-           -k regex:gemm -- python bench.py
+```
+==PROF== note: --metrics dram__bytes.sum → 替代口径 est__dram_bytes_total（零依赖的 NVML 代理口径…）；
+             数值不会挂在 dram__bytes.sum 名下
 ```
 
-标定产物会记录**累加口径**（`acc_caliber` / `precision_settings` / `method`）与
-**口径离散度**（`caliber_spread_pct` / `caliber_distinguishable`）—— 因为
-"口径能不能被分辨"本身是测量结果：同一台机器相隔一天的两次标定给出 0.4% 与 5.0% 两种结论。
-缺这些字段时，Kernoscope **拒绝用它算 roofline 拐点**（带宽侧照常给数）。
-详见 [CALIBRATION.md](CALIBRATION.md)。
+- 已知的 ncu 名字会解析成"我们给什么"（替代口径的真实名字）或"为什么给不出"
+  （动态 Tensor Core 利用率、warp stall 周期细分确实拿不到）。`--strict` 下仍然 exit 2，
+  但错误信息里写明**替代口径叫什么**。
+- 硬规则一秒没松：数值仍然只出现在 `ks__`/`est__`/`meas__` 名下。
+- `--export-name-map names.json`（或 `.csv`）导出"ncu 名 → 我们给什么 / 为什么给不出"的对照表，
+  供下游脚本翻译（它是**声明**，不是数据替换）。
 
----
+### 4.3 导入真值：校准我们的替代口径（只读）
 
-## 重建硬件计数器读数（ncu 迁移对照）
+```bash
+kernoscope --ks-ncu-rep other.ncu-rep --ks-synthetic --set basic -o rep
+```
 
-ncu 的硬件计数器在受限环境里拿不到，但很多读数可以用**其它物理观测量重建**。
-每一行都标明出处等级，报告里带同样的标签。
+用官方只读 API 读一份别处采到的 `.ncu-rep`：真值以 **`ncu__` 前缀 + `exact`** 出现
+（与 ncu 同源，但不落计数器命名空间），并与我们的替代口径**逐条对拍**：
 
-**两点语义差异先讲清楚**：
-
-1. ncu 默认**锁频**（所以脚本里常见 `--clock-control none`），并且会 **replay** 被测 kernel；
-   我们的耗时来自 nsys 时间戳 —— **真实时间、不 replay、不锁频**，不同 kernel 的绝对耗时直接可比。
-2. 我们**不占用 ncu 的指标名**（规则 R3）。重建量一律带自有前缀
-   （`est__`/`meas__`/`ks__`），并在 `source` 字段里注明它对应哪个 ncu 指标 ——
-   避免"看起来像官方数字、其实是模型值"。
-
-| 想要的读数 | ncu 写法 | Kernoscope 写法 | 出处 |
+| 对拍 | 真值 | 我们 | 结果 |
 |---|---|---|---|
-| **DRAM 字节数** | `--metrics dram__bytes.sum` | `--ks-calibration … [--ks-ledger-mb <MB/launch>]` → `est__dram_bytes_total` / `est__dram_bytes_per_launch` | `estimated` |
-| **DRAM 吞吐占比** | `--metrics dram__throughput.avg.pct_of_peak_sustained_elapsed` | `est__dram_throughput_pct_of_peak`（分母带来源与标定时间） | `estimated` |
-| **与账本对拍** | —— | `--ks-ledger-mb`（per-launch）/ `--ks-ledger-total-mb`（总量）/ `--ks-ledger-range-mb LOW,HIGH` → `est__dram_vs_ledger_err_pct`、`est__dram_range_position_pct`、`ks__ledger_range_verdict` | `estimated` / `derived` |
-| Achieved Occupancy | `--section Occupancy` | 探针 + `kernoscope occupancy --write-json` → `--ks-achieved-occupancy` → `meas__achieved_occupancy_pct` | `measured` |
-| 每 kernel 耗时排序、kernel 间空隙 | `nsys stats --report cuda_gpu_kern_sum` | 内置（同一份 CUPTI activity 数据） | `exact` |
-| LaunchStats（grid/block/寄存器/共享内存） | `--section LaunchStats` | 内置；寄存器还会与 cubin 交叉校验并暴露口径差异 | `exact` |
-| 算力管道占比 | `--set speedoflight` 的 `SM [%]` | `est__pct_of_measured_compute_peak`（**仅 FMA 口径**，与 ncu 取多管道最大值不同） | `estimated` |
-| L1/L2 命中率、sectors/request、coalescing | `l1tex__t_sector_hit_rate.pct` | NVBit 访存轨迹：`meas__sectors_per_request`（直接计数）+ **模型**命中率（明确标注上界口径） | `measured` / `estimated` |
-| stall 细分、发射槽利用率 | `SchedulerStats` / `WarpStateStats` | `--ks-instr-hist`（NVBit 动态指令计数）→ `est__issue_slot_utilization_pct`、`est__stall_direction` | `estimated`（上界 + 方向） |
-| 精确 L2/DRAM 字节 | `lts__*` / `dram__*` | 只报 `n/a` + 原因 | `unavailable` |
-| 每 kernel 能耗 | （ncu 没有） | NVML 能量累加器 → `meas__device_energy_j`；窗口内功率积分 → `meas__window_energy_j` | `measured` |
-| **单位成本（每百万 token 多少钱）** | （ncu 没有） | `--ks-tokens` + `--ks-price-per-kwh` / `--ks-price-per-hour` → `ks__cost_per_mtok`、`ks__tokens_per_s`、`ks__j_per_token`；按 kernel 归因 `est__kernel_cost_per_hour` | `measured` / `derived` / `estimated` |
-| CI 门禁 | —— | `--strict` → exit 2（覆盖 set/section/账本裁决行/空转开关/成本输入）；`kernoscope gate --packet p.json --require …` → 0/1/2 | —— |
-| 真值校准我们的替代口径 | `ncu -o r.ncu-rep` 后自己比对 | `--ks-ncu-rep r.ncu-rep` → `ncu__*`（真值，exact）+ `ks__truth_vs_substitute_pct`（对拍偏差）+ `<base>.ncu-truth.json` | `exact` / `derived` |
-| 让已有的 ncu 工作流继续能用 | `.ncu-rep` | `--export-ncu-rep out.ncu-rep`（替代口径 + 三处署名；前提不成立的值不写） | `estimated` / `derived` |
-| 先改哪里、能省多少 | Estimate Speedup（规则引擎） | `Prescription` section + 判词 `saving_estimate`（保守/上界区间 + ¥/h，重叠不相加） | `estimated` |
-| 时间线可视化 | `.ncu-rep` + UI | Perfetto JSON，零安装 | `exact` |
+| 每次 launch 时长 | `ncu__gpu__time_duration.sum`（ns） | `ks__launch_time_mean`（ms） | `ks__truth_vs_substitute_pct` |
+| 每线程寄存器 / 静态共享内存 | 同名 | 同名 | 自检行：两边同源，应当逐位相同 |
+| 每次 launch DRAM 字节 | `ncu__dram__bytes.sum` | `est__dram_bytes_per_launch` | 代理精度的直接证据 |
+| L2 命中率 | `ncu__lts__t_sector_hit_rate.pct` | `est__l2_hit_rate_pct`（模型上界） | 只应作为上界比较 |
+
+一条都对不上时也是 `refused` + 原因（沉默会被读成"对上了"），并用
+`--json` 的 `ncu_truth.comparisons[].pairs[].reason` 逐条说明。
+有 `-o` 时另写 `<base>.ncu-truth.json`（可归档、可 diff 的真值对照产物）。
+读不了报 `ncu_report_unreadable` + 处置（缺的往往只是把 Nsight Compute 的 `extras/python`
+放进 `PYTHONPATH`）：**读报告不需要 GPU、也不需要计数器权限**。
+
+### 4.4 导出替代口径：让已有 ncu 工作流继续能用
+
+```bash
+kernoscope --export-ncu-rep out.ncu-rep -o rep -- python bench.py
+```
+
+写出一份**合法的 `.ncu-rep`**（官方 reader 能按名字读回值、`ncu --import` 能打开、
+ncu-ui 能打开），**同时**写 `out.ncu-rep.ATTRIBUTION.txt` 旁路署名。三条门禁：
+
+1. **署名是强制的**：文件内 `provider`/`comment` 为空 → 拒绝生成（`build_report` 抛错）；
+   `comment` 里写明"这不是硬件计数器读数"、每个值的出处、以及它的前提。
+2. **前提不成立的值不写**：决策包里任何 `status=refused` 的判词所引用的指标名都不许进文件。
+3. **一个值都不剩时拒绝生成**：生成一个空的/全是垃圾的"ncu 报告"比不生成更糟。
+
+只写**自有命名空间**（`ks__`/`est__`/`meas__`）与"两边单位语义一致"的计数量白名单
+（`launch__registers_per_thread`、`launch__shared_mem_per_block_static`、`launch__grid_size`、
+`launch__block_size`）。**不写 `gpu__time_duration.sum`**：我们是 ms、ncu 是 ns，
+写进去会让读的人差 10⁶（仓库付过一次同类代价：MB 被当字节，7.27 TB 写成 7.3 MB）。
+
+### 4.5 与 nsys / NVTX
+
+nsys 的 CUPTI activity 是我们 `exact` 级数据的来源；此外可以直接吃它的 sqlite：
+
+```bash
+kernoscope --ks-sqlite run.sqlite --ks-nvtx-phases --set basic -o rep
+kernoscope --ks-nsys-rep run.nsys-rep --set basic -o rep    # 先 nsys export，再照常分析
+```
+
+`--ks-nvtx-phases` 把 kernel 时间按 **NVTX 区间重叠**归因到训练/推理阶段
+（新 section `NvtxPhases`）：跨两个区间的 kernel 按重叠部分**切开**计入，嵌套区间各自计入
+（所以各阶段之和可 >100% —— 表里明说"这不是划分"）；没有 NVTX 数据时那一节仍以 `n/a` + code 存在。
 
 ---
 
-## DRAM 代理与账本对拍
+## 5. DRAM 字节：两条口径与实测精度
 
 ```
 bytes ≈ Σ_i ( 显存忙碌_i / 100 × Δt_i ) × 本机实测峰值带宽
@@ -231,8 +322,7 @@ bytes ≈ Σ_i ( 显存忙碌_i / 100 × Δt_i ) × 本机实测峰值带宽
 - 显存忙碌读数低于分辨率下限（例如 0.0%）→ 不给字节数，并写明
   "无法区分『真的没搬』与『0.x% 被截断成 0』"。
 - 一次采样都没有时，前提行也是 `n/a`（报"0%"等于声称量过）。
-- 拒绝时那一行**照样出现**（`n/a` + 具体失败前提），不会从报告里消失；
-  `--strict` 会因此 exit 2。
+- 拒绝时那一行**照样出现**（`n/a` + 具体失败前提），不会从报告里消失；`--strict` 会因此 exit 2。
 - 默认 `--ks-window auto`：按首个/末个忙碌采样点裁掉 `import torch`/JIT 的启动开销
   （实测这类启动开销 9–10 秒，会把覆盖率稀释到 15%）。`--ks-window full` 可关闭，
   `--ks-warmup <秒>` / `--ks-window-s <秒>` 可显式限定。
@@ -251,27 +341,11 @@ kernoscope --set basic --ks-calibration machine-profile.json \
 kernoscope -i rep.ksreport.json --csv | grep -E 'ledger|window_coverage|share|mem_busy'
 ```
 
-### 代理精度实测（字节数已知的微基准）
+### 5.1 代理精度实测（字节数已知的微基准）
 
 [`bench/ledger_probe.cu`](bench/ledger_probe.cu) 的三个 kernel 每 launch 的字节数可以**解析算出来**，
-### 两条口径怎么选（先看这张表再往下读）
-
-DRAM 字节有**两条独立路径**，选哪条取决于"你要多准"与"这台机器能不能装外挂"：
-
-| | NVML 代理（默认，零依赖） | 访存轨迹（NVBit） |
-|---|---|---|
-| 精度 | **−4.2% ~ +12.8%**（含单边偏高） | **地址是算术**：同一负载 235 MB 上差 320 B（≈ −0.0001%） |
-| 依赖 | 只要 NVML（驱动自带） | 要自己装 NVBit + 采集脚本（见 [探针目录](tools/probes/nvbit_memtrace/)），采集成本 ∝ 流量 × launch 数 |
-| 什么时候**拒绝**给数 | 窗口主导性 <95%、覆盖率 <80%、**显存忙碌低于 1 个百分点分辨率**（小 kernel / 常驻 L2） | 轨迹被截断、访问数超上限、缺 L2 容量 |
-| 什么时候用它 | 大 kernel 的稳态段：只要判断"是不是 DRAM bound"，±10% 的带够用，且不用付安装成本 | 要绝对字节、要分辨 <5% 的改动、或上面那三条拒绝正好命中你的负载 |
-
-**轨迹口径是"绝对 DRAM 字节"的首选**：它的地址部分是 measured 级算术（可逐条复核），
-只有"哪些访问命中 L2"是模型 —— 所以工具会同时给出**替换策略上下界**，让读者看到模型的影响范围。
-代理口径仍然是**默认**：它不需要任何外挂，且在满足前提的大 kernel 上够用；
-一旦前提不成立它会明确拒绝（而不是给个偏小的数）。
-
-用它当账本去对拍（RTX 4090，8 秒稳态循环，`--ks-window auto`；产物在
-[`bench/artifacts/`](bench/artifacts/)，逐项对照见「数字从哪来」）：
+于是可以给代理口径一个真实误差（RTX 4090，8 秒稳态循环，`--ks-window auto`；
+产物在 [`bench/artifacts/`](bench/artifacts/)，逐项对照见 §12）：
 
 | 负载 | 账本（解析值 / launch） | 估算 / launch | 误差 | 覆盖率 | 窗口显存忙碌 | 整进程显存忙碌 |
 |---|---|---|---|---|---|---|
@@ -279,24 +353,23 @@ DRAM 字节有**两条独立路径**，选哪条取决于"你要多准"与"这�
 | 只读归约（N×4B） | 268.4 MB | 257.7 MB | **−4.0%** | 95.2% | 95.2% | 64.5% |
 | 只写（N×4B） | 268.4 MB | —（**拒绝**） | n/a | 95.2% | 76.6% | 60.7% |
 
-上表顺便演示了两件本轮才修好的事：**「窗口显存忙碌」与「整进程显存忙碌」是两个数**
+上表顺便演示了两件事：**「窗口显存忙碌」与「整进程显存忙碌」是两个数**
 （参与估算的永远是前者，它有自己的名字 `ks__dram_window_mem_busy_mean_pct`），
 以及**两个归因前提都被打印出来**（覆盖率 95.2%、窗口主导性 100%）。
 
 **这个误差带的口径与边界**（不给出口径就等于过度声称）：
 
 - 它是在**字节数解析已知的合成微基准**上实测的范围，取上面各负载的最小/最大值
-  （本次 **−4.0% ~ +9.6%**；本轮只有两行给数，第三行被拒绝）。**它不是上界**：
+  （本次 **−4.0% ~ +9.6%**；本次只有两行给数，第三行被拒绝）。**它不是上界**：
   真实负载的访存模式与这三个微基准不同，误差可以更大。同一批微基准在更早的四次运行里
   分别是 **−4.1% ~ +12.5%**、**−4.3% ~ +12.7%**、**−4.3% ~ +9.0%** 与
   **−4.2% ~ +12.8%**（每一次的带都能在 `bench/artifacts/` 的登记表里逐项复核），
   五次运行的并集是 **−4.3% ~ +12.8%**。
 - 它是**单边偏高**的：DRAM 代理容易高估（见下）。所以结论要写"落在代理误差带内"，
   不要把"两次方向一致"当成独立证据。
-- 不要写成对称的"±N%"，也不要把它当"精度上界"。
+- 它**不是**对称的 ±4% 那种误差，也不要把它当"精度上界"。
 
-**精度 vs 稳态段长度**（同一个已知答案负载，四个时长各测一遍；
-产物 `proxy-duration-sweep.csv`）：
+**精度 vs 稳态段长度**（同一个已知答案负载，四个时长各测一遍；产物 `proxy-duration-sweep.csv`）：
 
 | 稳态段目标 | 覆盖率 | 窗口主导性 | 估算 / launch | 误差 |
 |---|---|---|---|---|
@@ -316,16 +389,30 @@ DRAM 字节有**两条独立路径**，选哪条取决于"你要多准"与"这�
    并且要带上"几次运行"这个口径。
 
 高估的系统性来源是 `utilization.memory` 在高负载下**先于** DRAM 达到可达峰值而饱和
-（读数 95% 时实际吞吐约为可达峰值的 87%）。
-
-所以：
+（读数 95% 时实际吞吐约为可达峰值的 87%）。所以：
 
 - 拿它做 "<10%" 这类验收线**只能算勉强**：登记过的运行里 `write` 出现过 +12.5%，越线。
-- 想要第二条独立口径就用**访存轨迹**（下节），两条路径的比值会作为
+- 想要第二条独立口径就用**访存轨迹**（§5.2），两条路径的比值会作为
   `ks__dram_trace_vs_nvml_pct` 一起报出来。
 - 显存忙碌读数落在分辨率下限以下时，工具**不给数字**，并说明原因。
 
-### 覆盖率不足时报告长什么样（真实输出）
+### 5.2 两条口径怎么选
+
+| | NVML 代理（默认，零依赖） | 访存轨迹（NVBit） |
+|---|---|---|
+| 精度 | 登记过的运行里 **−4.3% ~ +12.8%**（单边偏高） | **地址是算术**：同一负载 235 MB 上差 320 B（≈ −0.0001%） |
+| 依赖 | 只要 NVML（驱动自带） | 要自己装 NVBit + 采集脚本（见[探针目录](tools/probes/nvbit_memtrace/)），采集成本 ∝ 流量 × launch 数 |
+| 什么时候**拒绝**给数 | 窗口主导性 <95%、覆盖率 <80%、**显存忙碌低于 1 个百分点分辨率**（小 kernel / 常驻 L2） | 轨迹被截断、访问数超上限、缺 L2 容量 |
+| 什么时候用它 | 大 kernel 的稳态段：只要判断"是不是 DRAM bound"，带内误差够用，且不用付安装成本 | 要绝对字节、要分辨 <5% 的改动、或上面那三条拒绝正好命中你的负载 |
+
+**轨迹口径是"绝对 DRAM 字节"的首选**：它的地址部分是 measured 级算术（可逐条复核），
+只有"哪些访问命中 L2"是模型 —— 所以工具会同时给出**替换策略上下界**，让读者看到模型的影响范围。
+代理口径仍然是**默认**：它不需要任何外挂，且在满足前提的大 kernel 上够用；
+一旦前提不成立它会明确拒绝（而不是给个偏小的数）。
+
+### 5.3 拒绝长什么样（真实输出）
+
+覆盖率不足（窗口被启动开销稀释）：
 
 ```
 est__dram_bytes_total      n/a   [unavailable]  窗口覆盖率 25% < 50%：窗口没被被测负载主导，
@@ -335,11 +422,10 @@ ks__sampler_window_coverage_pct  25 %  [derived]
 est__dram_vs_ledger_err_pct n/a  [unavailable]  误差行无法给出：…；可以加 --ks-memtrace <trace>
                                               换用**轨迹口径**的 per-launch 字节
 ```
+
 `--strict` 在这份报告上返回 **2**（请求了账本裁决却产不出来）。
 
-### 代理口径不成立时：自动改用轨迹口径（真实输出）
-
-同一个负载在小工作集上跑（1 MB，常驻 L2），NVML 的显存忙碌读数落到分辨率下限以下：
+代理口径不成立时**自动改用轨迹口径**（1 MB 工作集常驻 L2，显存忙碌落到分辨率下限以下）：
 
 ```
 est__dram_bytes_total             n/a   [unavailable]  显存忙碌读数 0.0% 低于 NVML 的分辨率下限 1 个百分点…
@@ -354,7 +440,9 @@ est__dram_vs_ledger_err_pct     -66.7 % [estimated]  账本 2.1 MB；此次用**
 
 ---
 
-## 达到的 occupancy（无需硬件计数器）
+## 6. 无计数器的其它能力
+
+### 6.1 达到的 occupancy（区间重叠法）
 
 ncu 的 Achieved Occupancy 来自计数器；这里用**区间重叠法**重建 —— 让每个 block 记录
 `(smid, 起止 %globaltimer)`，时间平均的并发 block 数 × 每 block warps ÷ 每 SM 上限：
@@ -379,9 +467,7 @@ kernoscope --ks-achieved-occupancy occ.json -k regex:<kernel> -- your_app
 （文件头注释列了三个必须保留的坑：时间戳要值依赖、跨 SM 只能用 `%globaltimer`、
 共享内存必须写后读否则被 ptxas 当死代码删掉）。
 
----
-
-## 发射槽利用率与瓶颈方向（无计数器，但有上界）
+### 6.2 发射槽利用率与瓶颈方向（上界口径）
 
 官方 NVBit 的 `opcode_hist` 在默认模式下统计的是**每 warp 每条指令执行一次** ——
 这正好是"消耗掉多少个发射槽"。于是：
@@ -420,31 +506,144 @@ kernoscope --set full --ks-instr-hist hist.txt --ks-sm-count 128 --ks-clock-mhz 
 `gpu__time_duration.sum`；`kernoscope issue` 需要你自己把 CUPTI 时长传进来）。
 直方图那次的 launch 数与报告不同时，会按 per-launch 平均对齐，并在 note 里写明。
 
----
-
-## 访存轨迹（NVBit 官方 mem_trace）
+### 6.3 访存轨迹（NVBit 官方 mem_trace）
 
 ```bash
-make -C tools/probes/nvbit_memtrace NVBIT_PATH=~/nvbit_release_x86_64
-NVBIT_PATH=~/nvbit_release_x86_64 bash tools/probes/nvbit_memtrace/collect.sh -- ./your_app
-kernoscope memtrace --from memtrace-official.txt --l2-bytes 75497472
+bash tools/probes/nvbit_memtrace/collect.sh -- <你的命令>   # 产出轨迹（体积 ∝ 流量）
+kernoscope --set basic --ks-memtrace trace.txt --ks-l2-bytes 50331648 -k regex:<kernel> -o rep -- <你的命令>
 # 缓存模型可调：--line-bytes（默认 32 = sector 口径）、--l1-bytes、--l1-ways、--l2-ways
 # --max-accesses（默认 4M；超过就拒绝给 DRAM 字节，避免偏小的假值）
-kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o rep -- ./your_app
 ```
 
-给出 `sectors/request`（直接计数）、合并效率、工作集、L1/L2 命中率（**模型上界**，不是计数器）、
-以及轨迹口径的 per-launch DRAM 字节（可参与账本对拍）。
+产出 `meas__sectors_per_request`（直接计数，合并效率 ≤ 100% 有测试守着）、
+模型给出的 L1/L2 命中率与工作集、以及第二条口径的 per-launch DRAM 字节。
+按采样比放大的轨迹**不是实测**：那时的前缀是 `est__` + `estimated`（命名承诺什么，出处就得是什么）。
 
-⚠️ 轨迹体积与**流量**成正比（一条记录 = 一条 warp 访存指令 ≤128 B），
-几十 MB 工作集就能产出上 GB 的文本；先想清楚要看哪个 kernel，或只做小规模验证。
+### 6.4 静态分析（不需要 GPU）
 
-> **NVBit 许可是 `LicenseRef-NvidiaProprietary`（禁止再分发）**：Kernoscope **不打包、不 vendor**
-> 任何 NVBit 二进制或由其构建的工具。请自行安装并遵守其许可。详见 [`NOTICE`](NOTICE)。
+```bash
+kernoscope --set basic --ks-cubin kernel.cubin -o rep          # 寄存器/共享内存/occupancy 上界
+kernoscope --set detailed --ks-cubin kernel.cubin -o rep       # 加 SASS 指令混合
+```
+
+静态分析**不执行**被测二进制，也不证明任何运行行为。静态混合只说明代码长相，
+动态占比要靠 §6.2 的指令直方图。
 
 ---
 
-## 成本可预算
+## 7. 成本与处方：先改哪里、能省多少
+
+优化算子是为了**降本**。所以除了"快了多少毫秒"，工具直接给钱的维度。
+能耗是**实测**，量与价格由你给 —— 没给就拒绝给那一半，不按"典型值"猜。
+
+```bash
+kernoscope --set basic --ks-tokens 8192 --ks-price-per-kwh 0.6 --ks-price-per-hour 2.5 \
+           --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-dtype bf16 \
+           -k regex:gemm -o rep -- python serve.py
+```
+
+| 指标 | 含义 | 出处 |
+|---|---|---|
+| `meas__window_energy_j` / `meas__window_power_mean_w` | 窗口内能耗与平均功耗（NVML 功率读数在窗口内梯形积分） | `measured` |
+| `ks__steps_in_window` / `ks__tokens_in_window` | 窗口内等效 step 数与 token 数（分母与能耗**同一个窗口**） | `derived` |
+| `ks__tokens_per_s`、`ks__j_per_token` | 吞吐与每 token 焦耳（能耗口径，不需要价格） | `derived` |
+| `ks__cost_per_hour`、`ks__cost_per_mtok`（含 `_energy` / `_rental` 分量） | 钱 | `derived` |
+| `est__kernel_energy_share_pct`、`est__kernel_energy_per_launch_j`、`est__kernel_cost_per_hour` | 按 kernel 归因（**代理口径**：窗口内时间占比 × 能耗） | `estimated` |
+| `kind=Prescription` 的 `ks__prescription_*` | 头寸与排序：保守/上界区间 + ¥/h + ¥/Mtoken | `derived`/`estimated` |
+
+**给一半输入就拿一半结论，缺什么一望可知**：只给功率+电价 → 给 `ks__cost_per_hour`；
+再加 `--ks-tokens` → 给单位成本；不给 token 数就**拒绝**给单位成本（`no_tokens`）；
+不给价格就拒绝给钱（`no_price`），能耗照给；窗口短于 0.5 s 直接拒绝给能耗
+（`below_resolution`），不按 TDP 顶替；半路缺功率采样点报 `no_energy`。
+电费与租约是两种**载体**，分别报、都给才相加 —— 所以 `ks__cost_per_mtok` 永远能拆回它的组成部分。
+
+### 处方（`saving_estimate` 判词 + `Prescription` section）
+
+代价是"能省多少"，但它必须建立在**本机实测峰值**上，否则就是一个看起来很像预测的数：
+
+- 头寸 = 本次达成值 vs **本机实测峰值**。保守端是"把差距关掉一半"（`u/(2−u)`，`u` = 差距比例），
+  乐观端是"完全填满"（`u`），**明确标注为上界、不是预测**。
+- `--ks-peak-*` 覆盖值或规格表**算不出**头寸（`calibration_caliber_mismatch`）——
+  "规格 vs 实测"的差距正是本工具存在的理由。
+- 没有价格就没有钱（比例照给）；价格有但无法按 kernel 份额归因 → `premise_failed`
+  （与"没给价格"的处置不同）。按 token 计的节省**额外**要求被匹配 kernel 主导窗口
+  （份额 ≥ 50%）：否则省下的是 GPU 时间，不是 token 成本。
+- **重叠的头寸不相加**：同一 kernel 的多个头寸按最大者封顶，被丢弃的量写进 note
+  （"全部相加会得到 X"）；跨 kernel 同资源的头寸会显式标注它们其实在争同一份资源。
+- 一条都不可辩护时：`ranked == []` + 一条结构化拒绝 —— 不是空输出，也不是一个假数字。
+
+处方排序进决策包（`saving_estimate`，`ok`/`soft` + 拒绝码），也进一屏的「路径」段：
+**先改哪个 kernel、保守能省多少、上界是多少、有多确定**。
+
+---
+
+## 8. 比较与 CI
+
+### 8.1 比较两次运行：`diff` + MDD
+
+```bash
+kernoscope selftest --out machine-selfcheck.json        # 一次即可：本机误差带 + MDD
+kernoscope diff before.json after.json --selfcheck machine-selfcheck.json --json
+kernoscope diff a.json b.json --selfcheck machine-selfcheck.json --fail-on regressed   # CI 卡门
+```
+
+`diff` 用 MDD 做四态判定：**真改进 / 真退化 / 分不出来（indistinguishable）/ 不可比**。
+没有误差带与 MDD 时拒绝给方向（`no_selftest_band`）；两次运行的协议（标定文件、窗口模式、
+工具版本、kernel 选择）不同时判 `protocol_mismatch`；基线为 0 时走 `zero_baseline`
+（相对差无定义，只给绝对差值）。判据是**相对差 vs 相对误差带**（`%` 单位不再拿百分点去比 MDD）。
+
+### 8.2 接进 CI：`kernoscope gate`
+
+```bash
+kernoscope --packet rep.packet.json -o rep -- python serve.py
+kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
+    --require kernel_time --require-actionable cost_per_token \
+    --forbid-code counters_denied --max-metric ks__cost_per_mtok=0.5
+```
+
+判据全是**可编程的东西**，不是散文：
+
+| 判据 | 语义 |
+|---|---|
+| `--require ID[=ok\|soft\|refused]` | 判词必须存在且状态达标（默认 `ok`）；不存在即失败（被尺寸预算裁掉也算） |
+| `--require-actionable ID` | 判词可作为行动依据（`actionable=true`；v1.0 包回退到"不是 refused 且前提全成立"） |
+| `--forbid-code CODE` | 出现该拒绝码即失败（含判词、拒绝索引与环境拒绝） |
+| `--max-metric NAME=V` / `--min-metric NAME=V` | 指标阈值；**`n/a` 一律算不通过**（"没有数"不是"没超阈值"） |
+
+退出码 `0` 通过 / `1` 不通过 / `2` 用法错误；**一条规则都没给时失败** ——
+门禁凭空绿灯是它最坏的失败模式。`--json` 给出逐条失败原因。门禁只消费已经产出的包与报告，
+不跑测量（要新数据先跑一次采集，再对新的包重跑门禁）。
+
+---
+
+## 9. 输出形态：一屏、决策包、案件目录、报告
+
+| 输出 | 开关 | 用途 |
+|---|---|---|
+| ncu 风格文本 | 默认 | 人眼/日志；每条指标带 `[exact]`/`[estimated]`/`[unavailable]` 标签与分辨率 |
+| 一屏（三段式） | `--screen only`（默认铺在报告前） | 结论 → 发现（判词与前提）→ 路径（按挡住决策的程度排序）→ 本次代价 |
+| 决策包 | `--packet <f>`（`-` = stdout） | agent 用：判词 + 前提 + 结构化拒绝 + 代价，**≤4 KB 预算** |
+| Markdown 报告 | `--report-md rep.md` | 人读的 per-kernel 报告（0–6 固定结构） |
+| CSV | `--csv` | 表格分析；多出 `provenance` / `resolution` 列 |
+| JSON | `-o rep` → `rep.ksreport.json` | 机器消费、回归对比（带 `schema_version`） |
+| Perfetto trace | `-o rep` → `rep.perfetto.json` | 丢进 <https://ui.perfetto.dev> 看时间线，零安装 |
+| 逐 launch CSV | `--launch-csv`（配 `-o` 时写 `rep.launches.csv`） | 每次 launch 的 grid/block/时长/配置键 |
+| **案件目录** | `-o rep` → `rep.case/` | 跨会话/交接：`manifest.json`（任务与输入指纹）、`journal.jsonl`（追加式调用日志）、`next.md`（下一步）、`env.json` |
+| 真值对照 | `--ks-ncu-rep …` + `-o rep` | `rep.ncu-truth.json`：真值、对拍偏差、每条不可比的 reason |
+
+一屏的顺序是稳定接口（`结论：` → `-- 发现（判词与前提）--` → `-- 路径（下一步…）--` →
+`本次代价：`），便于人和 agent 直接解析。「路径」段的排序是确定的：**先列被拒的判词**
+（它们挡住了决策），再列成立判词自带的提示，最后列未测到的组。
+
+案件目录解决的是"一次优化要跨会话做"：`next.md` 说下一步做什么，`journal.jsonl` 留下
+每次调用的 rc 与拒绝码，`manifest.json` 让你能确认"用的是同一份标定/轨迹"。`--no-case` 可关。
+
+决策包是最小可交接单元：它只放**每次都变**的东西（判词 id、状态、动态数值、前提观测值、代价），
+静态文本按 id 查表；`cost.trimmed` 如实记录为了压进预算裁掉了什么。真机教训写在实现里：
+facts 分两级裁，`kernel_time`/`cost_per_token`/`saving_estimate`/`truth_vs_substitute`
+这四条的 facts（"什么最贵、多少钱、先改哪里、真值偏差"）**最后才裁**。
+
+### 9.1 输出体积可预算
 
 小 kernel × 长循环会产生十万级 launch，逐 launch 明细会把报告撑爆。真实数字
 （同一次运行，产物在 [`bench/artifacts/`](bench/artifacts/)）：
@@ -459,132 +658,30 @@ kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o 
 
 ---
 
-## 动手之前：`--plan` 说清会发生什么
+## 10. 副作用与同意：`--plan`
 
 profiler 的副作用不平凡：它会**跑你的命令**、启动 `nsys`/`cuobjdump`、在临时目录写中间产物、
 在你的目录写报告。所以先看计划再决定：
 
 ```bash
-$ kernoscope --plan -o rep -- python serve.py
-执行计划（`--plan`：只打印，不执行；没有跑你的命令、没有采集、没有写文件）
-------------------------------------------------------------------------------------------
-1. 探测本机环境（设备型号、驱动、工具链在哪）（第三方软件）  [起进程]
-     目标：nvidia-smi --query-gpu=name,driver_version,…
-     说明：只读探测：设备查询 ＋对找到的每个工具跑一次 `<tool> --version`…
-2. 后台采样设备级读数（NVML：能耗/功率/显存忙碌/时钟）  [会话内状态]
-3. 把你的被测命令跑起来  [会话内状态、写文件、起进程]
-     目标：python serve.py
-4. 用 nsys 采集 kernel 级活动（CUPTI，不需要计数器权限）（第三方软件）  [写文件、起进程]
-5. 把报告/包/表格写到你要的路径  [写文件、可能覆盖]
-     会写：rep.ksreport.json；rep.perfetto.json；rep.case/（manifest.json / …）
+kernoscope --plan -o rep -- python serve.py      # 人读：每一步会起什么进程/写什么文件
+kernoscope --plan-json -o rep -- python serve.py # agent 读：8 项 effects + 4 项推导出的 annotations
 ```
 
-- `--plan-json` 给 agent：每条操作带 8 项 `effects`（`mutates_target` / `writes_filesystem` /
-  `launches_process` / `accesses_network` / `may_discard_data` / …）与 4 项**纯推导**的
-  annotations（`read_only_hint` / `destructive_hint` / `idempotent_hint` / `open_world_hint`）。
-- 每个操作都必须有 effects 声明，**缺了就抛**（不是文档里提一句）；测试还会用 PATH 上的记录桩
-  把"实际起了哪些子进程"记下来与计划对照 —— 这条对账第一次跑就抓到三个真缺陷
-  （漏声明 doctor 的 `nvidia-smi`/`cuobjdump --version` 探测、输出目录不存在时裸 traceback、
+- **`--plan` 只打印**：不跑你的命令、不采集、不写任何文件（有测试守着）。
+- 每个操作都必须有 effects 声明，**缺了就抛**（不是文档里提一句）；四个 MCP 风格
+  annotation（`read_only_hint`/`destructive_hint`/`idempotent_hint`/`open_world_hint`）
+  由 effects **纯推导**，禁止按命令名猜。
+- 测试还会用 PATH 上的记录桩把"实际起了哪些子进程"记下来与计划对照 ——
+  这条对账第一次跑就抓到三个真缺陷（漏声明 doctor 的只读探测、输出目录不存在时裸 traceback、
   计划里的输出文件名与实际写的不一致）。
-- 我们**不注入**任何代码到被测进程：NVBit 插桩由 `tools/probes/nvbit_memtrace/collect.sh`
-  在你调用它时执行，本工具只读它产出的轨迹文件。静态分析（`--ks-cubin`）**不执行**被测二进制。
+- 需要你点头的只有写文件与改变被测对象；只读的外部查询（`nvidia-smi --query-gpu`、
+  `<tool> --version`）不算，但仍然会如实标出"它会起进程"。
+- 我们**不注入**代码到被测进程；静态分析不执行被测二进制。
 
 ---
 
-## 单位成本：每百万 token 多少钱（不需要计数器）
-
-优化算子是为了**降本**。所以除了"快了多少毫秒"，本工具直接给钱的维度：
-
-```bash
-kernoscope --set basic --ks-tokens 8192 --ks-price-per-kwh 0.6 --ks-price-per-hour 2.5 \
-           -k regex:my_kernel -o rep -- python serve.py
-```
-
-`--ks-tokens` 是你**每次迭代（step）处理的 token 数**（推理=一次 forward，训练=一步）；
-`--ks-price-per-kwh` 是电价口径，`--ks-price-per-hour` 是整机租约口径 —— 两种**载体**分别报、
-都给才相加，所以 `ks__cost_per_mtok` 永远能拆回它的组成部分。产出：
-
-| 指标 | 含义 | 出处 |
-|---|---|---|
-| `meas__window_energy_j` / `meas__window_power_mean_w` | 窗口内能耗与平均功耗（NVML 功率读数在窗口内梯形积分） | `measured` |
-| `ks__tokens_per_s`、`ks__steps_in_window` | 窗口内吞吐与等效 step 数（分母与能耗**同一个窗口**） | `derived` |
-| `ks__j_per_token` | 每 token 焦耳（能耗口径，不需要价格） | `derived` |
-| `ks__cost_per_hour`、`ks__cost_per_mtok`（及 `_energy` / `_rental` 分量） | 钱 | `derived` |
-| `est__kernel_energy_share_pct`、`est__kernel_energy_per_launch_j`、`est__kernel_cost_per_hour` | 按 kernel 归因（**代理口径**：窗口内时间占比 × 能耗） | `estimated` |
-
-**给一半输入就拿一半结论，缺什么一望可知**：只有功率+电价 → 给 `ks__cost_per_hour`；
-再加 `--ks-tokens` → 给单位成本；不给 token 数就**拒绝**给单位成本（`no_tokens`），
-不按"典型 8k"猜；不给价格就拒绝给钱（`no_price`），能耗照给；窗口短于 0.5 s 直接
-拒绝给能耗（`below_resolution`），不按 TDP 顶替。按 kernel 的归因是**方向性**的：
-它假设窗口内功率大致均匀，`--ks-idle-power-w` 可以先把空闲功耗扣掉再分摊。
-
-成本判词会进决策包（`cost_per_token`）：有数就是 `ok`，缺输入就是 `refused` + 带 code 的
-处置（agent 据此知道该补哪个开关，而不是猜）。
-
----
-
-## 接进 CI：`kernoscope gate`
-
-```bash
-kernoscope --packet rep.packet.json -o rep -- python serve.py
-kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
-    --require kernel_time --require-actionable cost_per_token \
-    --forbid-code counters_denied --max-metric ks__cost_per_mtok=0.5
-```
-
-判据全是**可编程的东西**（判词状态、`actionable`、拒绝码、指标值+出处），不是散文：
-
-| 判据 | 语义 |
-|---|---|
-| `--require ID[=ok\|soft\|refused]` | 判词必须存在且状态达标（默认 `ok`）；不存在即失败（被尺寸预算裁掉也算） |
-| `--require-actionable ID` | 判词可作为行动依据（`actionable=true`；v1.0 包回退到"不是 refused 且前提全成立"） |
-| `--forbid-code CODE` | 出现该拒绝码即失败（含判词、拒绝索引与环境拒绝） |
-| `--max-metric NAME=V` / `--min-metric NAME=V` | 指标阈值；**`n/a` 一律算不通过**（"没有数"不是"没超阈值"） |
-
-退出码 `0` 通过 / `1` 不通过 / `2` 用法错误；**一条规则都没给时失败** —— 门禁凭空绿灯是它最坏的失败模式。
-`--json` 给出逐条失败原因。门禁只消费已经产出的包与报告，不跑测量。
-
----
-
-## 与 ncu 的名字共处（不是改名，也不改名）
-
-你带着 `--metrics dram__bytes.sum` 来，不会得到一句"指标不存在"：
-
-```
-==PROF== note: --metrics dram__bytes.sum → 替代口径 est__dram_bytes_total（零依赖的 NVML 代理口径…）；
-             数值不会挂在 dram__bytes.sum 名下
-```
-
-- **名字是发现键**：已知的 ncu 名字会解析成"我们给什么"（替代口径的真实指标名）或
-  "为什么给不出"（动态 Tensor Core 利用率、warp stall 周期细分 —— 这两条确实拿不到）。
-  `--strict` 下仍然失败（我们确实给不出 ncu 名下那个数），但错误信息里写明替代口径叫什么。
-- **硬规则没松**：数值仍然只出现在 `ks__`/`est__`/`meas__` 名下，绝不在计数器命名空间里。
-- `--export-name-map names.json|csv` 写一份对照表供下游脚本翻译（**声明**，不是数据替换）。
-- 反过来也通：`--ks-ncu-rep r.ncu-rep` 把**别处采到的真值**读进来（官方只读 API），
-  `ncu__*` 前缀 + `exact` 出真值，并逐条对拍我们的替代口径 → `ks__truth_vs_substitute_pct`；
-  一条都对不上时也是 `refused` + 原因（沉默会被读成"对上了"）。
-- `--export-ncu-rep out.ncu-rep` 把替代口径写成**合法的 `.ncu-rep`**（`ncu-ui` 能打开），
-  同时写 `out.ncu-rep.ATTRIBUTION.txt` 署名。三条门禁：文件内署名（provider/comment）为空
-  即拒绝生成；被拒判词引用过的指标不写入；过滤后一个值不剩就拒绝生成。
-  只写自有命名空间（`ks__`/`est__`/`meas__`）+ 两边单位语义一致的计数量白名单 ——
-  **不写 `gpu__time_duration.sum`**（我们是 ms、ncu 是 ns，写进去读的人会差 10⁶）。
-
----
-
-## 交给人和 agent
-
-- `--report-md rep.md`：人读的 per-kernel 报告（`## 0` 采集设置 → `## 1` 头部数字**带 Source 列**
-  + `One-line read` → `## 2` 分维度（没有数据的维度也保留并写明拒绝码）→ `## 3` 诊断 →
-  `## 4` 按影响排序的方向（最多 5 条，每条必须带 `Evidence`）→ `## 5` 置信与限制 → `## 6` 复现）。
-- `kernoscope skill`：把 skill（`SKILL.md` + `references/` + `scripts/`）装到 agent 的 skill 目录。
-  默认只打印计划，`--apply` 才写：备份 `<文件>.kernoscope.backup`（保留第一份快照）、原子写、
-  写后回读校验、失败逆序回滚、内容相同即幂等。
-- `--ks-nvtx-phases`：从 nsys 的 NVTX 区间归因 kernel 时间（训练/推理阶段各占多少）；
-  跨区间的 kernel 按重叠部分计入，嵌套区间各自计入（**不是划分**，份额和可 >100%）。
-
----
-
-## 局限与已知失败
+## 11. 局限与已知失败
 
 这一节是**我们主动交代的失败面**。它不是免责声明，而是"你会遇到什么、我们会怎么说"的清单。
 
@@ -599,12 +696,11 @@ kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
 
 DRAM 字节代理 = 显存忙碌时间 × 本机实测峰值带宽。`utilization.memory` 在高负载下
 **先于** DRAM 达到可达峰值而饱和（读数 95% 时实际吞吐约为可达峰值的 87%），
-所以误差不是对称的：本轮三个已知答案负载里两行给数（**−4.0% 与 +9.6%**），
+所以误差不是对称的：本次三个已知答案负载里两行给数（**−4.0% 与 +9.6%**），
 第三行（只写）因**对齐自检没通过而拒绝**给 per-launch（`window_launch_unaligned`，见产物
 `rep-write.txt`）—— 那正是 R-47 的修法在做的事：宁可拒绝，也不给一个分母不落在窗口里的数。
-（逐次运行与并集见上文「这个误差带的口径与边界」—— 那里是唯一一处列出各次带的地方，
-免得同一句话在文档里出现两遍、然后各自漂）。
-**它不是上界，也不是对称误差**：真实负载的访存模式与微基准不同，误差可以更大；
+（逐次运行与并集见 §5.1 —— 那里是唯一一处列出各次带的地方，免得同一句话在文档里出现两遍、
+然后各自漂。）**它不是上界，也不是对称误差**：真实负载的访存模式与微基准不同，误差可以更大；
 引用时必须写"落在代理误差带内"，而不是"两次方向一致所以可信"。
 
 ### ③ 分辨率是 **1 个百分点**
@@ -652,60 +748,58 @@ DRAM 字节代理 = 显存忙碌时间 × 本机实测峰值带宽。`utilizatio
   `calibration_caliber_mismatch`（标定口径与本次测量不可比）、
   `unknown_arch`（未知架构算不出 occupancy 上界，不猜）、
   `trace_too_many_accesses`（访问数超上限时不给偏小的值）。
+- **缺的是**输入**不是环境** → 说清该补哪个开关：`no_tokens`（每步 token 数）、
+  `no_price`（电价/租约）、`no_energy`（窗口功率读数）、`no_workload`（FLOPs/bytes）、
+  `no_memtrace`、`no_instr_hist`、`no_occupancy_probe`、`no_static_input`。
 - **比较不可比** → 不给方向判词：`protocol_mismatch`、`both_refused`、
-  `no_selftest_band`、`mdd_unknown`（没有 MDD 就说"分不出来"）。
+  `no_selftest_band`、`mdd_unknown`（没有 MDD 就说"分不出来"）、`zero_baseline`。
 - **请求的东西不存在** → `metric_absent`（不等于被拒）、`legacy_report`
-  （旧报告没有结构化拒绝信息，标注 legacy 而不猜原因）。
+  （旧报告没有结构化拒绝信息，标注 legacy 而不猜原因）、
+  `ncu_report_unreadable`（`.ncu-rep` 读不了：缺 Nsight Compute 的 Python 模块或文件损坏）。
 - **兜底** → `internal_unknown`：出现即视为本工具缺陷，请按 issue 模板报告。
+
+完整清单（含每个 code 的处置与代价）由代码生成到
+[`skills/kernoscope/references/refusal-codes.md`](skills/kernoscope/references/refusal-codes.md)，
+人读的策略表见
+[`skills/kernoscope/references/diagnosis-playbook.md`](skills/kernoscope/references/diagnosis-playbook.md)
+（信号→原因→处置、永久拿不到、任务→该跑哪条检查）。
 
 ### ⑦ 其它已知的"做不到"
 
 - **不重放、不锁频**：所以绝对耗时与 ncu 的锁频读数不可直接对比。
-- **per-launch 归因依赖窗口构成**：混合强度的窗口只认轨迹口径（见上）。
+- **per-launch 归因依赖窗口构成**：混合强度的窗口只认轨迹口径（见 §5.1）。
 - **轨迹体积与流量成正比**：几十 MB 工作集可能产出上 GB 文本。
 - **fp32 roofline 拐点可能不可分辨**：标定的口径离散度大时，工具拒绝用它算拐点。
+- **处方只给"这个 kernel 的时间/钱"的区间**，不给端到端收益预测：端到端要自己用
+  `diff` + MDD 复核（kernel 变快不等于端到端变快，除非它是关键路径）。
+
+### ⑧ 导出的 `.ncu-rep` 的已知边界
+
+- 官方 Python API 能按**名字与值**读回我们写的指标，`ncu --import` 能认出 kernel 行与几何，
+  但 `--page details` 在我们的文件上**不渲染指标表**（它把设备读成未知，怀疑缺
+  `DeviceAttributes`/`DeviceProperties`）。也就是说：**ncu-ui 的表格视图对我们的文件还不完整**，
+  这一点只做了无头验证，人眼验收（M5）尚未完成。
+- 官方 `IMetric.unit()` 对我们写的指标返回空串：**单位在文件里，但不参与回读** ——
+  所以"可回读的那一对"是名字 + 值，单位要看旁路署名。
+- 文件内的 `Comment`/`Provider` 是我们**唯一**的署名载体之一（Python API 读不到 comment），
+  所以同时写 `<path>.ATTRIBUTION.txt` 旁路署名；两条路都留。
+
+### ⑨ NVTX 阶段归因的 schema 假设
+
+`NVTX_EVENTS` 的列集、`end` 非空（push/pop 区间）、`eventType` 数值不解释、
+`StringIds` 文本解析 —— 这些是按 nsys 的通用形状写的，并有合成 schema 的测试
+（跨区间切开、嵌套各自计入、缺 NVTX 时给 reason + 零数字），但**没有在真实 nsys 导出上跑过**。
+真机验证只覆盖了 `CUPTI_ACTIVITY_KIND_KERNEL` 那一侧。
 
 ---
 
-## 先路由，再动手
-
-带着问题来的时候，先让工具给你**路线**（它只输出计划，不跑测量）：
-
-```bash
-kernoscope route "为什么这个 kernel 慢"
-kernoscope route "DRAM 搬了多少字节" --json      # agent 用这个
-kernoscope route --list                          # 全部可路由的问题
-```
-
-每条路线给出四件东西：**走哪条口径**（例如"有 NVBit 就用轨迹口径，没有走 NVML 代理"）、
-**具体命令**、**期望看到哪些指标**、以及**什么条件下会被拒**（code + 处置 + 代价）。
-匹配不上时它会明说"没有匹配到 —— 不要硬套"，而不是给你一条看起来像的路。
-
-## 输出与案件目录
-
-`-o <前缀>` 会写三类东西：
-
-| 产物 | 给谁 | 内容 |
-|---|---|---|
-| `<前缀>.ksreport.json` | 机器/复核 | 完整报告，每个数字带出处与 resolution |
-| `<前缀>.perfetto.json` | 人看图 | 时间线（`ui.perfetto.dev` 打开） |
-| `--packet` | agent | 决策包（≤4 KB 预算，判词+前提+拒绝码+代价） |
-| **`<前缀>.case/`** | **下一个会话/接手的人** | `manifest.json`（本次任务是什么、输入指纹）、`journal.jsonl`（追加式调用日志）、`next.md`（下一步）、`env.json` |
-
-案件目录解决的是"一次优化要跨会话做"：`next.md` 说下一步做什么，`journal.jsonl` 留下
-每次调用的 rc 与拒绝码，`manifest.json` 让你能确认"用的是同一份标定/轨迹"。
-用 `--no-case` 可以关掉。
-
-一屏（`--screen only`）是**三段式**：`结论：` 一行 → `发现（判词与前提）` → `路径（下一步）`
-→ `本次代价`。顺序固定，便于人和 agent 直接解析。
-
-## 数字从哪来
+## 12. 数字从哪来
 
 README 与文档里每个"实测"数字都能追到一次可复现的运行：
 
 ```bash
 bash bench/run.sh              # 全量（约 10 分钟 GPU 时间）
-bash bench/run.sh --quick      # 快速版
+bash bench/run.sh --quick       # 快速版
 ```
 
 `bench/run.sh` 会做：环境快照（**修订号 + 来源 + 是否脏树 + 工具版本**）→ `doctor` →
@@ -716,7 +810,10 @@ bash bench/run.sh --quick      # 快速版
 
 `tests/test_doc_artifact_consistency.py` 把「文档数字 ↔ 产物」变成门禁：文档里公开的
 每个实测数字都要能在最新产物里找到同一写法，产物必须钉住修订号与工具版本，
-文档引用的每个产物目录都必须存在。数字一变、文档没跟着变，测试直接红。
+文档引用的每个产物目录都必须存在。数字一变、文档没跟着变，测试直接红 ——
+所以本文里那些看起来"太具体"的数字都不是散文，是**被测试钉住的产物读数**。
+
+本文引用的数字与它们的产物：
 
 | 本文引用的数字 | 产物 |
 |---|---|
@@ -730,13 +827,18 @@ bash bench/run.sh --quick      # 快速版
 | 发射槽利用率与两个方向的判词 | `bench/artifacts/*/rep-issue-*.txt` |
 | 轨迹口径对拍与 L2 命中率 | `bench/artifacts/*/rep-tracebasis.txt`、`memtrace.json` |
 | doctor 的 ncu 四态结论 | `bench/artifacts/*/doctor.json`、`doctor-path-stripped.json` |
+| 自检误差带与 MDD（含跨进程复测） | `bench/artifacts/*/machine-selfcheck.json` |
+| 同协议两次运行的三态判词 | `bench/artifacts/*/diff-same-protocol.json` |
 | 每份产物是哪个修订产生的 | `bench/artifacts/*/environment.txt`、`manifest.json` |
 
 `bench/issue_probe.sh` 另采发射槽上界的产物（需要 NVBit）。
+本轮新增功能（成本/处方/`.ncu-rep` 双向/`gate`/报告/skill）的真机验证在 RTX 4090 +
+Nsight Compute 2025.3.1 上做过，但**没有作为产物入库**：它们的数字不要当作登记过的证据引用，
+要引用就在你的机器上自己跑一遍（工具会给出同样的口径与拒绝条件）。
 
 ---
 
-## 拿不到数字时先看这里
+## 13. 拿不到数字时先看这里
 
 | 你看到的现象 | 真实原因 | 怎么做 |
 |---|---|---|
@@ -746,35 +848,55 @@ bash bench/run.sh --quick      # 快速版
 | 账本误差行是 `n/a` 而不是数字 | per-launch 口径要求"单一 kernel + 覆盖率 ≥80%" | `-k` 锁定一个 kernel；或改用 `--ks-ledger-total-mb`；或加 `--ks-memtrace` 走轨迹口径 |
 | 误差百分比大得离谱（百万级） | 口径混用（per-launch 账本 vs 整窗口估算） | 同基比较：`--ks-ledger-mb` 对 per-launch，`--ks-ledger-total-mb` 对总量，区间永远 per-launch |
 | roofline 的 compute 侧是 `n/a` | 标定文件缺 `acc_caliber`/`precision_settings`/`method` | 用新版 `tools/machine-profile.py` 重新标定（带宽侧不受影响） |
+| 单位成本是 `n/a` + `no_tokens` / `no_price` | 缺"每次迭代的 token 数"或价格（我们**不猜**典型值） | 加 `--ks-tokens <N>` 与 `--ks-price-per-kwh` / `--ks-price-per-hour` |
+| 处方一条头寸都没有 | 没有本机实测峰值（标定），或本次没算出达成值 | 跑 `tools/machine-profile.py` 并加 `--ks-calibration`；工作负载侧加 `--ks-gemm`/`--ks-flops` |
+| `--metrics dram__bytes.sum` 没给那个名字 | 我们不占用计数器指标名（规则 R3） | 看它给的替代口径（`est__dram_bytes_total`）；`--export-name-map` 拿完整对照表 |
+| `.ncu-rep` 读不了（`ncu_report_unreadable`） | 缺 Nsight Compute 的 Python 模块（或文件损坏） | 把 `<nsight-compute>/extras/python` 加进 `PYTHONPATH`；读报告不需要 GPU 与计数器权限 |
 | 报告 JSON 上百 MB | 逐 launch 明细随 iteration 数线性增长 | `-c <N>` 限流、`--ks-json-no-launches`、逐 launch 明细改走 `--launch-csv` |
 | 轨迹文件几个 GB | 记录数 ∝ 流量 × launch 次数（插桩不区分预热） | 用小工作集 + 小的预热次数（见 [`bench/README.md`](bench/README.md)） |
 | 形状扫描只剩一行均值 | 同名 kernel 的多组 launch 配置被聚合 | 现在会逐组给出 `LaunchConfigs`；`launch__grid_size` 在混合时改报 `n/a` + 取值集合 |
-| `--strict` 一直红 | 请求了产不出来的数据（含"账本裁决行算不出来"） | 这正是它的用途；`--strict` 的报错会逐条说明是哪个请求、为什么 |
+| `--strict` 一直红 | 请求了产不出来的数据（含"账本裁决行算不出来"、成本输入算不出对应数字） | 这正是它的用途；`--strict` 的报错会逐条说明是哪个请求、为什么 |
+| `gate` 报"一条规则都没给" | 门禁不许凭空通过 | 至少给一条 `--require`/`--forbid-code`/`--max-metric` |
 
-## 状态与路线
+日常先跑这两条定位：`kernoscope doctor`（这台机器能答什么）与
+`kernoscope capabilities --json`（哪些问题被拒、code 是什么、补救代价多少）。
+单个 code 的处置用 `scripts/remedy.sh <code>`，不要通读整张表。
+
+---
+
+## 14. 状态与路线
 
 - ✅ **MVP**：ncu 兼容 CLI、LaunchStats/时长（exact）、理论与达到 occupancy、实测峰值 roofline、
   设备级计数器（能耗/显存忙碌）、四路输出、`--strict`、provenance 强制。
 - ✅ **v1.5**：`kernoscope doctor` —— 一条命令给出「能用/不可用清单 + 原因 + 已选后端 + 可交付出处」，
-  并用 ncu 实测确认计数器门（1 秒）；工具发现多路径，ncu 结论分四态。
+  并用 ncu 实测确认计数器门；工具发现多路径，ncu 结论分四态。
 - ✅ **v1.6**：DRAM 代理 + 账本对拍（per-launch / 总量 / 区间三种口径，同基比较，
   口径不成立必然出现 `n/a` + 原因），`--ks-window auto` 稳态窗口，轨迹口径回退。
-- ✅ **v1.7**：形状扫描（多组 launch 配置逐组读数）、`--launch-csv`、`--metrics` 真实筛选、
-  标定口径与离散度、报告体积可预算、发射槽上界与瓶颈方向（`kernoscope issue`）。
-- ✅ **v1.8**：结构化拒绝（闭集 code + observed/threshold + 可执行 remedy + 代价）、
-  `capabilities --json` 与三态覆盖矩阵、`selftest`（本机误差带 + MDD）、
-  `diff`（真改进/真退化/分不出来/不可比）。
-- 🚧 v1 剩余：region/阶段视图（对接 IKP Trace）、访存轨迹的输入侧复用分析（locality/复用距离）、
-  `cuobjdump -sass` 静态指令混合细化到 per-kernel。
+- ✅ **v1.7**：形状扫描、`--launch-csv`、`--metrics` 真实筛选、标定口径与离散度、
+  报告体积可预算、发射槽上界与瓶颈方向（`kernoscope issue`）。
+- ✅ **v1.8**：结构化拒绝（闭集 code + observed/threshold + remedy + 代价）、
+  `capabilities --json` 与三态覆盖矩阵、`selftest`（本机误差带 + MDD）、`diff` 四态比较。
+- ✅ **v1.9**：`route`（先路由再动手）、三段式一屏与案件目录、
+  **单位成本与处方**（能耗实测 + 你给的量与价格 → ¥/Mtoken 与排序后的头寸）、
+  **`--plan` 副作用账**、**`gate` CI 门禁**、
+  **`.ncu-rep` 双向**（导入真值对拍 / 导出带署名的替代口径）、
+  **NVTX 阶段归因**、`--report-md` per-kernel 报告、`kernoscope skill` 安装。
+- 🚧 v1 剩余：访存轨迹的输入侧复用分析（locality/复用距离）、`cuobjdump -sass` 静态指令混合
+  细化到 per-kernel、真机 nsys 导出上的 NVTX 归因验证。
 - 🚧 v2：因果链与 `explain`（借 ingero 思路，用 CUPTI activity + host 采样，不依赖 eBPF）、
-  真 `.ncu-rep` 回读并与我们的报告对照。
+  MCP 形态（把同一份判词暴露成工具调用）、多客户端安装矩阵。
 
-## 文档与声明
+---
+
+## 15. 文档与声明
 
 - [COVERAGE.md](COVERAGE.md)：三态覆盖矩阵 + 四层能力分层 + 必然被拒的问题（由代码生成）。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：适配器清单与扩展点（指标映射 / 后端 / 能力问题 / 拒绝类型 / 产物）。
-- [PROVENANCE.md](PROVENANCE.md)：五个出处等级、四条强制规则、命名纪律、拒绝给数的三种形态。
-- [CALIBRATION.md](CALIBRATION.md)：本机峰值标定的字段与口径纪律（roofline 依赖它）。
+- [PROVENANCE.md](PROVENANCE.md)：五个出处等级、四条强制规则、命名纪律、拒绝给数的形态。
+- [CALIBRATION.md](CALIBRATION.md)：本机峰值标定的字段与口径纪律（roofline 与头寸都依赖它）。
+- [`skills/kernoscope/SKILL.md`](skills/kernoscope/SKILL.md)：给 agent 的入口（触发条件 + 三步闭环）。
+- [`skills/kernoscope/references/diagnosis-playbook.md`](skills/kernoscope/references/diagnosis-playbook.md)：
+  受限环境诊断手册（由代码生成：拒绝码 → 处置 → 代价；哪些是永久拿不到）。
 - [NOTICE](NOTICE)：第三方与商标声明。许可见 [LICENSE](LICENSE)（Apache-2.0）。
 
 Kernoscope is **not affiliated with, endorsed by, or sponsored by NVIDIA Corporation.**

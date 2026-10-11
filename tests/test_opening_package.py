@@ -72,9 +72,14 @@ def test_readme_first_screen_positions_against_neighbours():
 
 
 def test_readme_has_a_standalone_limitations_section():
-    """「局限与已知失败」必须是独立一节，且点到几条硬事实。"""
+    """「局限与已知失败」必须是**独立一节**（二级标题），且点到几条硬事实。
+
+    允许标题带编号前缀（README 改成了编号章节便于导航）—— 判据是"独立成节"，不是"标题
+    里不许出现数字"。编号本身不改变这条门禁的意图。
+    """
     text = _read("README.md")
-    assert re.search(r"^##\s+局限与已知失败", text, re.M), "缺少独立的「局限与已知失败」一节"
+    assert re.search(r"^##\s+(?:\d+(?:\.\d+)*\.\s*)?局限与已知失败", text, re.M), \
+        "缺少独立的「局限与已知失败」一节"
     for needle in ("计数器", "单边偏高", "1 个百分点", "MDD", "拒绝给数"):
         assert needle in text, f"局限一节缺少「{needle}」"
 
