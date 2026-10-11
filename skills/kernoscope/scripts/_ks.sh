@@ -3,7 +3,10 @@
 # 被 scripts/ 下的其它脚本 source。
 set -uo pipefail
 
-KS_SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 只用 bash 内建做路径处理：`dirname` 是**外部命令**，PATH 被裁剪过的环境（测试、极简容器）里
+# 它会 "command not found"，于是 KS_SKILL_ROOT 解析错、后面所有候选路径都不成立 ——
+# 那种情况下脚本会"看起来跑通、其实找错解释器"（本地一次假绿就是这么来的）。
+KS_SKILL_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 KS_SKILL_ROOT="$(cd "$KS_SKILL_DIR/../../.." && pwd)"
 
 # 找一个能用的 Python 解释器（第五轮真机教训：容器里 `python3` 常常不在 PATH，

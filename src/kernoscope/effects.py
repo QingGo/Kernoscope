@@ -88,6 +88,12 @@ OPERATIONS: dict[str, Operation] = {
         "read_inputs", "读你给的数据文件",
         "只读：标定文件、访存轨迹、指令直方图、cubin、自检/回显报告。不修改它们。",
         ToolEffects()),
+    "read_telemetry": Operation(
+        "read_telemetry", "读一个**平台已授权**的遥测端点（DCGM/Prometheus 文本）",
+        "`--ks-telemetry <http(s)://…|文件>`：**只读**（GET，带超时），不发任何写请求、不碰驱动策略、"
+        "不提权。给了 http(s) 时这是一次**联网**读；读不到只报 `probe=failed` + 原因，不抛异常、"
+        "也不把「没读到」当成 0。端点里有 `DCGM_FI_PROF_*` 只可能是平台管理员授权了那些字段。",
+        ToolEffects(), external=True),
     "device_sample": Operation(
         "device_sample", "后台采样设备级读数（NVML：能耗/功率/显存忙碌/时钟）",
         "只读设备管理计数器（免 admin）；会开一个采样线程。不改 GPU 状态、不碰你的进程。",
@@ -314,6 +320,14 @@ def plan_for(args: Any, argv: Sequence[str] | None = None) -> Plan:
                     ("-k/--import", getattr(args, "import_report", None)),
                     ("--ks-sqlite", getattr(args, "ks_sqlite", None)),
                     ("--ks-nsys-rep", getattr(args, "ks_nsys_rep", None))]
+    telemetry_src = getattr(args, "ks_telemetry", None)
+    if telemetry_src:
+        # 遥测是一条**独立**的读取通道（可能是联网的），单独声明：它的副作用性质与"读你给的数据文件"
+        # 不同（会发 HTTP 请求），混在一起会让 `--plan` 的读者以为只是一个本地文件。
+        plan.items.append(PlanItem(
+            OPERATIONS["read_telemetry"], target=str(telemetry_src),
+            detail=("联网读取（GET，带超时）" if str(telemetry_src).startswith(("http://", "https://"))
+                    else "本地文件，只读")))
     cubins = list(getattr(args, "ks_cubin", []) or [])
     named = [f"{flag} {path}" for flag, path in read_targets if path]
     if cubins:

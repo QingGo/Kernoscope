@@ -281,10 +281,10 @@
 - `capabilities --brief` 的 `next_layer.bytes` 现在等于**它自己命名的那个命令的真实输出
   字节数**（以前用紧凑序列化算，低估 35%）；新增 `blocked_by_unavailable`。
 - `capabilities --json` 的输出不再多一个换行。
-- 文档命令门禁：**全部**可检命令（当前 64 条）都交给**真实解析器**（11 个子命令各有自己的
+- 文档命令门禁：**全部**可检命令（当前 65 条）都交给**真实解析器**（11 个子命令各有自己的
   `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
-  其中**读者面 11 条**逐字执行并断言结论（比例 11/64，不是"每条都断言"）。
+  其中**读者面 11 条**逐字执行并断言结论（比例 11/65，不是"每条都断言"）。
   注：这三个数字随代码走动，若与 `tests/test_documented_commands.py` 的断言不一致，以测试为准。
 
 ### 访存轨迹口径（NVBit）
@@ -595,6 +595,38 @@ kernoscope mcp --stdio
   也**不控制 warm/cold 缓存** —— 喂给 `diff` 时与误差带取最大值，只能抬高门槛。
 - `--plan` 会声明这次会重复 N 次与（给了 `-o` 时）那个 `.repeat.json`；新操作 `repeat_runs`
   在 effects 表里登记。`-i` + `--repeat` 是用法错误（rc=2），不静默忽略。
+
+### 授权遥测：消费平台已经开给你的端点（N7）
+
+- 新增 `--ks-telemetry <url|file>`（+ `--ks-telemetry-timeout-s`，默认 5 s）：读 dcgm-exporter 的
+  Prometheus 文本端点（`http(s)://` 或本地文件），把 `DCGM_FI_DEV_*` / `DCGM_FI_PROF_*` 按
+  **字段自己的真名与真单位**发布到 `meas__telemetry_dcgm_*`（带端点署名与一行语义），报告里是
+  独立的 `Telemetry` 节；缺席字段以 `unavailable` + code 出现（**不是 0**）。
+  **这不是绕过计数器权限**：`PROF_*` 出现在端点里只可能是管理员授权了；端点里没有就只说「没有」，
+  不推「被拒绝」，也不从 `DEV_*` 反推 `PROF_*`。
+- **两条"百分比 ≠ 字节"的陷阱在构造期就不可能发生**：`DCGM_FI_PROF_DRAM_ACTIVE`（旧名
+  `DCGM_FI_PROF_DRAM_UTIL_RATIO`）是带宽/周期占比（0–1）、`DCGM_FI_DEV_MEM_COPY_UTIL` 是时间占比；
+  名字/单位/维度三者不相容就抛 `TelemetryTrapError`，另有发布前复核，**没有**任何
+  "比例 × 峰值 ⇒ 字节"的入口。`B/s` 只出现在确实是字节速率的 PCIe 两条上。
+- `probe` 三态（`ok` / `not_run` / `failed`）与 `missing` 的原因码把"没跑 / 读不到 / 端点里没有 /
+  实测到 0"分开；网络、IO、超时、HTTP 错误与"一行序列都解析不出"只报 `failed` + 原因，
+  不抛异常、也不给"空的 ok"（报告里以 `n/a` + code 出现，整次运行不失败）。
+- 复用既有拒绝码闭集（缺席 → `metric_absent`；读不到/未知 → `env_reading_unknown`），未新增 code。
+- `--plan` 新增独立声明 `read_telemetry`（联网读标 `external`）—— 它的副作用性质与"读本地数据文件"
+  不同，混在一起会让计划的读者以为只是又一个本地文件。
+
+### 测试卫生：一条"只在本地成立"的假绿 + CI 对等检查
+
+- **修掉一条本地绿、CI 红的测试**（`test_ks_python_…`）：它依赖"仓库里有没有 `.venv`"
+  —— 本机有、CI 由 `uv sync` 创建 ⇒ CI 红；更糟的是它在本机**假绿**：测试把 `PATH` 清空，
+  脚本里的 `dirname` 于是失效、技能树根目录解析错，"找不到 `.venv`"纯属巧合。现在这条测试
+  **自带一棵技能树**（把 `_ks.sh` 拷进临时目录）+ 保留 coreutils 的 PATH，并把两条真实契约都钉住：
+  有 `.venv` 时它优先、没有时找 conda 布局。
+- `skills/kernoscope/scripts/_ks.sh` 的根目录解析改用 bash 参数展开（不再调外部 `dirname`）：
+  极简容器/裁剪过 PATH 的环境里，脚本不该因为少一个 coreutils 就"看起来跑通、其实找错解释器"。
+- 新增 `bench/ci-parity.sh`：把 HEAD 的干净快照导出、`uv sync`、跑与 CI 相同的门禁命令
+  （可传 `<commit>` 复现历史提交的 CI 结果）。这条脚本的价值就是本轮的两次红：
+  "本地工作树 + 本地环境"与"刚 clone 的某次提交"不是同一个东西。
 
 ## 0.2.0
 

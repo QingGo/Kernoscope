@@ -159,6 +159,7 @@ _OP_BINARIES: dict[str, set[str]] = {
     "write_report_md": set(),
     "write_html_view": set(),
     "repeat_runs": set(),          # 起的是我们自己的解释器，不是第三方二进制
+    "read_telemetry": set(),       # 只读端点（联网但不调外部二进制）
     "write_ncu_rep": set(),
     "write_ncu_truth": set(),
     "write_name_map": set(),

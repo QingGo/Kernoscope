@@ -35,6 +35,17 @@ bash bench/preflight-first-run.sh          # 期望：PREFLIGHT OK 6/6
 - **alpha 期间允许破坏性变更**，但必须：① 写清"按旧行为写的脚本要改哪一行"；
   ② 在 PR/Release 里给出迁移一句；③ 不留"没写进 CHANGELOG 的静默变更"。
 
+## 2.5 推之前：跑一次「CI 对等检查」
+
+```bash
+bash bench/ci-parity.sh
+```
+
+它把 **HEAD 的干净快照**导出到临时目录、`uv sync`、再跑与 CI **完全相同**的那条门禁命令。
+为什么需要：本地跑的是"我的工作树 + 我的环境"，CI 跑的是"刚 clone 的某次提交" —— 已经踩过两次
+（一条测试依赖仓库里有没有 `.venv`；另一条把 `PATH` 清空后脚本里的 `dirname` 失效 ⇒ **本机假绿**）。
+想看某个历史提交在 CI 上会怎样：`bash bench/ci-parity.sh <commit>`。
+
 ## 3 发布前检查单（每条都能在本机跑）
 
 ```bash

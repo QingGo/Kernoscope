@@ -76,7 +76,7 @@ $ ncu --set basic -- python train.py
 |---|---|---|
 | **kernel 级计数重放**（为 multiplex 计数器反复跑被测 kernel） | 不引入特权控制面、不扰动同机他人；耗时是 nsys 时间戳里的**真实时间** | `--ks-warmup` / `--ks-window-s` 只统计稳态段（重放的弱形式） |
 | **默认锁频**（不改设备时钟） | 时钟是**设备级**状态，锁了会影响同机所有进程 | 记录时钟驻留与降频原因（公开位名解码，未知位照实写 `bitN`）作为环境证据；**读不到一律记未知（`unspecified` / `env_reading_unknown`），不当作"没有降频"** |
-| **绕过计数器权限** | 计数器是 host-wide 观测面，能泄露同机租户；平台锁它有正当理由 | 报 `counters_denied` + 物理原因（策略/capability），并给替代口径 |
+| **绕过计数器权限** | 计数器是 host-wide 观测面，能泄露同机租户；平台锁它有正当理由 | 报 `counters_denied` + 物理原因（策略/capability）并给替代口径；**消费平台已授权的遥测**（`--ks-telemetry`：dcgm-exporter/Prometheus 文本），按字段自己的真名与真单位发布，**绝不把带宽占比/时间占比当字节** |
 | **冒充计数器语义** | 可审计性是唯一不可让渡的资产 | 同源量按 ncu 同名同单位写（`gpu__time_duration.sum`：ms × 10⁶ = ns；单位不符就不写）；代理/模型/成本量只进 `ks__`/`est__`/`meas__`；每份文件带署名 |
 | **向被测进程注入我们的指令** | 不产生观察者效应、不需要用户改代码 | 复用厂商通道；NVBit 插桩由 `tools/probes/nvbit_memtrace/collect.sh` 在你调用它时执行，本工具只读它产出的文件 |
 | **自研插桩框架** | 不重复造轮子 | 用 NVBit，并从**实物**读它的版本（版本号不是可用性凭据） |
@@ -592,6 +592,31 @@ kernoscope --set detailed --ks-cubin kernel.cubin -o rep       # 加 SASS 指令
 
 静态分析**不执行**被测二进制，也不证明任何运行行为。静态混合只说明代码长相，
 动态占比要靠 §6.2 的指令直方图。
+
+---
+
+### 6.4 平台已授权的遥测：`--ks-telemetry`（最便宜的补法）
+
+平台管理员**可能已经在提供**这些读数 —— K8s GPU operator 常装的 `dcgm-exporter`（Prometheus
+文本格式 `http://<host>:9400/metrics`）、云厂商的 GPU 监控 API。读一个平台自愿开给你的只读端点
+**不是**绕过计数器权限：`DCGM_FI_PROF_*`（SM occupancy、DRAM 活跃占比、PCIe 字节）**需要**
+profiling 授权，端点里有它就说明管理员授权了；端点里没有，我们只说「没有」，**不推**「被拒绝」，
+也不从 `DCGM_FI_DEV_*` 反推 `DCGM_FI_PROF_*`。
+
+```bash
+kernoscope --ks-telemetry http://dcgm-exporter.monitoring:9400/metrics -- python bench.py
+```
+
+读数写在我们自己的名字下（`meas__telemetry_dcgm_*`），照抄端点的**真单位**（W / mJ / % / MHz /
+MiB / B/s / ratio / code），带端点署名与一行语义；端点里不认得的字段按"语义未知"留在 `n/a` 里。
+两条边界必须记住：
+
+- `DCGM_FI_PROF_DRAM_ACTIVE`（旧名 `DCGM_FI_PROF_DRAM_UTIL_RATIO`）是**带宽/周期占比**（0–1），
+  `DCGM_FI_DEV_MEM_COPY_UTIL` 是**时间占比** —— **都不是字节**。本工具在任何路径上都不会把它们
+  变成字节（构造期拒绝 + 发布前复核），因为那属于研究诚信事故而不是精度问题；
+- `probe` 三态（`ok` / `not_run` / `failed`）把"没跑 / 读不到 / 读到了但没有这个字段 / 实测到 0"
+  分开：端点读不到时报 `failed` + 原因，报告里以 `n/a` + code 出现，不给一个"空的 ok"，
+  也不让整次运行失败。
 
 ---
 

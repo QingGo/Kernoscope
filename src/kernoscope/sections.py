@@ -88,6 +88,8 @@ class BuildOptions:
     nvml_summary: dict[str, float] = field(default_factory=dict)
     #: 窗口的环境证据（时钟驻留 / 降频画像 / 同卡其他进程），来自 SamplerResult.environment()
     nvml_env: dict[str, Any] = field(default_factory=dict)
+    #: 平台**已授权**的遥测（backends.telemetry.TelemetryResult）：外部量写它自己的名字
+    telemetry: Any = None
     dram: Any = None      # analyze.dram.DramEstimate（避免循环 import）
     cost: Any = None      # analyze.cost.CostEstimate（成本账；None = 本次不给成本结论）
     memtrace: Any = None  # {kernel: analyze.memtrace.MemTraceStats}
@@ -272,6 +274,43 @@ def _cost_unavailable(s: Section, name: str, ref, unit: str = "", source: str = 
                              code=ref.code, observed=ref.observed,
                              threshold=ref.threshold, remedy=ref.remedy,
                              severity=ref.severity))
+
+
+def build_telemetry_section(opt: BuildOptions) -> Section | None:
+    """平台**已授权**的遥测读数（N7）：外部量写在自己的名字下，单位照抄端点。
+
+    三件事必须成立，否则这个 section 宁可不出现：
+      * 每条读数带**端点署名**与真单位（`to_provenance_metrics()` 已经这么做）；
+      * 缺席/读不到的字段以 `unavailable` + code 出现（**不是 0**，也不是消失）；
+      * "百分比/比例"绝不当字节 —— 那由 `backends.telemetry` 在构造期与发布前两道闸拦住，
+        这里再跑一次 `byte_claim_violations()` 复核（N7 把它定为研究诚信事故）。
+    """
+    tel = opt.telemetry
+    if tel is None:
+        return None
+    sec = Section("Telemetry")
+    for m in tel.to_provenance_metrics():
+        sec.add(m)
+    for m in tel.unavailable_metrics():
+        sec.add(m)
+    if not sec.metrics:
+        return None
+    from .backends import telemetry as _tel_backend
+
+    bad = _tel_backend.byte_claim_violations(tel.metrics)
+    if bad:
+        # 发布前的最后一道闸：真出现了就是我们的 bug，必须炸在写报告之前，而不是发出去
+        raise ValueError("遥测里的比例/百分比被当成了字节（N7 的研究诚信红线）：" + "；".join(bad))
+    note = (f"端点：{tel.source}；probe={tel.probe}"
+            + (f"（{tel.reason}）" if tel.reason else "")
+            + ("；端点里**有** profiling 字段 ⇒ 说明平台管理员授权了这些字段"
+               if tel.profiling_present else
+               "；端点里**没有** profiling 字段 —— 这只说明「没导出」，**不推**「被拒绝」"))
+    sec.metrics.insert(0, Metric.measured(
+        "meas__telemetry_endpoint_readings", float(len(tel.metrics)), "个",
+        source=f"DCGM/Prometheus 文本端点（{tel.source}）", note=note,
+        resolution="按端点自己的导出周期（不由我们控制）"))
+    return sec
 
 
 def build_cost_section(opt: BuildOptions) -> Section | None:

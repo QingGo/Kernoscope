@@ -551,28 +551,51 @@ def test_generated_verdicts_reference_lists_the_premises_from_code():
     assert "env_shared_gpu" in row and "env_throttled" in row, row
 
 
-def test_ks_python_finds_a_conda_interpreter_when_path_has_none(tmp_path):
-    """第七轮 X-4：真机上 python 只在 `/root/miniconda3/bin/python3`（PATH 里没有 `python3`），
-    而旧 `ks_python()` 的顺序是 KS_PY → shebang → PATH → `.venv` → 兜底 `python3` ⇒ 调用方 127。
-    这里造一个"PATH 里没有 python、但有 conda 布局"的环境，断言它被找到。
+def test_ks_python_picks_the_repo_venv_then_falls_back_to_conda(tmp_path):
+    """`ks_python` 的两条真实契约（CI 上才暴露出来的那条一起钉）：
+
+    ① **仓库/技能树里的 `.venv` 优先**（开发树上最可能就是对的那个解释器）；
+    ② 没有 `.venv` 时找 conda 布局（真机教训：容器里 python 只在 `/root/miniconda3/bin/python3`，
+       PATH 上既没有 `python3` 也没有 `/usr/bin/python3` ⇒ 旧实现走到兜底，调用方拿到 127）。
+
+    ⚠️ 这条测试**自带一棵技能树**（把 `_ks.sh` 拷进 `<tmp>/skills/kernoscope/scripts/`），
+    所以不依赖仓库环境里有没有 `.venv` —— 旧版本依赖环境，本机绿、CI 红（CI 的 `uv sync`
+    会创建 `.venv`）。同时 PATH 必须**保留 coreutils**：把 PATH 清空会让脚本里的 `dirname`
+    失效、根目录解析错，于是"找不到 `.venv`"而**碰巧绿**（本机就是这么假绿的）。
     """
+    import os
+    import shutil
+    import sys as _sys
+
+    root = tmp_path / "skillroot"
+    scripts = root / "skills" / "kernoscope" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(SCRIPTS / "_ks.sh", scripts / "_ks.sh")
+
     home = tmp_path / "home"
     (home / "miniconda3" / "bin").mkdir(parents=True)
-    fake_py = home / "miniconda3" / "bin" / "python3"
-    fake_py.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
-    fake_py.chmod(0o755)
-    # PATH 里要有 `bash` 自己（否则 subprocess 都起不来），但**不能**有 python
-    bash_dir = str(pathlib.Path(shutil.which("bash")).parent)
-    ks = SCRIPTS / "_ks.sh"
-    r = subprocess.run(
-        ["bash", "-c", f'source "{ks}" && ks_python'],
-        capture_output=True, text=True,
-        env={**os.environ, "HOME": str(home), "PATH": bash_dir,
-             "KS_PY": "", "KS_SKILL_ROOT": ""})
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == str(fake_py), (r.stdout, r.stderr)
+    conda = home / "miniconda3" / "bin" / "python3"
+    conda.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+    conda.chmod(0o755)
 
+    # PATH：bash + coreutils（dirname 等），但**没有** python
+    needed = [shutil.which("bash"), shutil.which("dirname") or shutil.which("sh")]
+    path = ":".join(sorted({os.path.dirname(p) for p in needed if p}))
+    env = {**os.environ, "HOME": str(home), "PATH": path}
 
+    def resolve():
+        r = subprocess.run(["bash", "-c", f'source "{scripts / "_ks.sh"}" && ks_python'],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    # ① 没有 .venv ⇒ conda 候选
+    assert resolve() == str(conda), "conda 布局没被找到（真机 127 的那个原因）"
+
+    # ② 有 .venv ⇒ 它优先（CI 上暴露的真实契约）
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "python").symlink_to(_sys.executable)
+    assert resolve() == str(root / ".venv" / "bin" / "python"), ".venv 没赢过 conda 候选"
 def test_ks_python_version_guard_matches_the_declared_minimum():
     """`_ks.sh` 的解释器版本关必须与 `pyproject` 的 `requires-python` 同源。
 

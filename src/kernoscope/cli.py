@@ -47,6 +47,7 @@ from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
                        build_cost_attribution_section, build_cost_section,
                        build_device_kernel, build_dram_section, build_kernel_sections,
+                       build_telemetry_section,
                        build_prescription_section, counter_section_reason,
                        requested_sections)
 
@@ -247,6 +248,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "`ncu --import` / ncu-ui 能打开），同时写 PATH.ATTRIBUTION.txt 署名。"
                         "文件内署名（provider/comment）为空则拒绝生成；前提不成立的指标不写；"
                         "一个值都不剩时拒绝生成（宁可不生成，也不生成假的 ncu 报告）")
+    k.add_argument("--ks-telemetry", default=None, metavar="URL|FILE",
+                   help="消费平台**已授权**的遥测端点（dcgm-exporter 的 Prometheus 文本格式；"
+                        "http(s):// 或本地文件）。读数写在我们自己的名字下"
+                        "（meas__telemetry_dcgm_*），带端点署名与真单位；"
+                        "**不是**绕过计数器权限 —— 端点里有 PROF_* 只可能是管理员授权了。"
+                        "两条红线：比例/百分比绝不当字节；缺席/读不到印 n/a + code，不是 0")
+    k.add_argument("--ks-telemetry-timeout-s", type=float, default=5.0, metavar="SEC",
+                   help="读遥测端点的超时（默认 5 s；网络/IO/超时只报 failed + 原因，不抛异常）")
     k.add_argument("--repeat", type=int, default=1, metavar="N",
                    help="把整条命令跑 **N 次（进程级）**，给出跨运行分布与 MDD 下界 "
                         "（M5/N1）。不是 kernel 级重放：不插桩、不锁时钟、不碰其他租户，"
@@ -1088,6 +1097,19 @@ def _main(argv: Sequence[str] | None = None) -> int:
     elif not args.quiet:
         log(f"cost: 能耗不给数（{cost_est.energy_refusal.message if cost_est.energy_refusal else '未知原因'}）")
 
+    telemetry_result = None
+    if getattr(args, "ks_telemetry", None):
+        from .backends import telemetry as telemetry_backend
+
+        telemetry_result = telemetry_backend.collect_telemetry(
+            str(args.ks_telemetry), timeout_s=float(args.ks_telemetry_timeout_s))
+        if telemetry_result.probe == "ok":
+            log(f"telemetry: {len(telemetry_result.metrics)} 条读数来自 {args.ks_telemetry}"
+                + ("（端点里有 profiling 字段）" if telemetry_result.profiling_present else ""))
+        else:
+            log(f"telemetry: 读不到端点（{telemetry_result.probe}：{telemetry_result.reason}）"
+                f"—— 报告里会以 n/a + code 出现，不当成 0")
+
     opt = BuildOptions(
         set_name=args.set_name,
         sections=list(args.section),
@@ -1099,6 +1121,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         cubin_sass=cubin_sass,
         nvml_summary=nvml_summary,
         nvml_env=sampler.result.environment(),
+        telemetry=telemetry_result,
         sm_count=sm_count,
         device_name=device.name,
         arch=arch,
@@ -1158,6 +1181,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
     opt.cost = cost_est
     dev_kr = KernelReport("(device)", launch_count=0)
     dev_sections = [build_device_kernel(opt)]
+    tel_sec = build_telemetry_section(opt)          # N7：平台已授权的遥测（可选）
+    if tel_sec is not None:
+        dev_sections.append(tel_sec)
     if "DramTraffic" in requested_sections(opt):
         dram_sec = build_dram_section(opt)
         if dram_sec is not None:
