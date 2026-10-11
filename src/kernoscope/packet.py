@@ -939,8 +939,8 @@ def enforce_budget(packet: dict[str, Any],
     下面 `steps` 里的顺序**就是**实际顺序（这条注释与实现逐字一致，改一处就改两处）：
 
         未测到的例子 > 判词的指标名 > 下一步指针 > 未测到归组数 > 成立的前提 >
-        remedy 命令 > 处置文本 > 判词条数 > 判词 facts > 拒绝条目数 > 判词硬上限 >
-        环境降级诊断的 message > 环境降级诊断条目数
+        remedy 命令 > 处置文本 > 判词条数 > **次要判词的 facts** > 全部 facts > 拒绝条目数 >
+        判词硬上限 > 环境降级诊断的 message > 环境降级诊断条目数
 
     每一步都只删"能从完整报告里再取回来"的东西，并把步骤名写进 `cost.trimmed` ——
     读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。最后一级丢掉的
@@ -1055,6 +1055,13 @@ def enforce_budget(packet: dict[str, Any],
         # 最后才丢条目、并把丢掉的 **code 列出来**（读者知道少了什么、去哪看）。
         ("refusal_actions", _shorten_refusal_actions),
         ("verdicts", lambda: _cap_list(packet, "verdicts", 6)),
+        # 真机教训（拒绝密集的机器上包被裁到 facts 全丢）：facts 是判词的**动态内容**，
+        # 而 `kernel_time` / `cost_per_token` / `saving_estimate` / `truth_vs_substitute`
+        # 这四条是"什么最贵、多少钱、先改哪里"的结论本身 —— 一屏上出现
+        # "最耗时的是 ?（None ms）"就等于把结论裁没了。所以先只裁次要判词的 facts，
+        # 到下一个更狠的级别才动这四条。
+        ("facts_secondary", lambda: [v.pop("facts", None) for v in packet["verdicts"]
+                                     if v.get("id") not in PRIMARY_FACT_IDS]),
         ("facts", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),
         ("refusal_entries", _cap_refusal_entries),
         ("refusal_action_text", _drop_refusal_action_text),
@@ -1080,6 +1087,9 @@ REFUSAL_KEEP = 8              # 最多保留几条拒绝条目（丢掉的名字
 ENVIRONMENT_KEEP = 4          # 最多保留几条环境降级诊断（其余 code 列进 *_more）
 REFUSAL_LIST_CODES = 4        # refusals_omitted 里最多列几个 code（再多就只给计数）
 VERDICT_KEEP_HARD = 4         # 最后一级：判词只留最关键的四条
+# 这几条判词的 facts 是"什么最贵/多少钱/先改哪里/真值偏差"的结论本身，最后才裁。
+PRIMARY_FACT_IDS: tuple[str, ...] = ("kernel_time", "cost_per_token", "saving_estimate",
+                                     "truth_vs_substitute")
 
 
 def _cap_list(packet: dict[str, Any], key: str, n: int) -> None:
@@ -1391,8 +1401,11 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
         elif f.get("per_hour") is not None:
             bits.append(f"每小时成本 {f['per_hour']} {v.get('unit', '')}".strip())
         if f.get("top_kernel"):
+            # 单位要从"每百万 token"里取出币种再拼 /h：直接拼 unit + "/h" 会得到
+            # "CNY/Mtoken/h" 这种不存在的单位（真机一屏上出现过）。
+            cur = (v.get("unit") or "CNY/Mtoken").split("/")[0] or "CNY"
             bits.append(f"最贵的是 {f['top_kernel']}"
-                        f"（{f.get('top_kernel_per_hour')} {v.get('unit', '')}/h 量级）".strip())
+                        f"（{f.get('top_kernel_per_hour')} {cur}/h 量级）".strip())
         return "；".join(bits) or "成本账"
     if fid == "saving_estimate":
         if f.get("top_pct_lo") is not None:
@@ -1405,6 +1418,11 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
         return (f"与 ncu {f.get('ncu', '?')} 的真值对拍 {f.get('compared')}/{f.get('pairs')} 条"
                 + (f"，最大相对偏差 {f['max_abs_err_pct']}%"
                    if f.get("max_abs_err_pct") is not None else ""))
+    if not f and v.get("value") is not None:
+        # facts 被尺寸预算裁掉时也要说人话：`value`/`unit` 还在包里，别印一个光秃秃的 id
+        # （真机一屏曾经因为 facts 全丢而出现"最耗时的是 ?（None ms）"）。
+        return (f"{v.get('id')}：{v.get('value')} {v.get('unit', '')}"
+                f"（facts 被尺寸预算裁掉，细节见完整报告）").replace("  ", " ")
     return v.get("id", "")
 
 

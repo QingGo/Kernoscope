@@ -741,3 +741,46 @@ def test_onepage_says_what_was_left_out():
     text = render_onepage(p)
     assert "拒绝条目省了" in text and str(p["refusals_omitted"]["count"]) in text
     assert (p["refusals_omitted"]["codes"] or [""])[0] in text
+
+
+def test_primary_verdict_facts_survive_the_first_facts_trim():
+    """拒绝密集的机器上，facts 是**分两级**裁的：先裁次要判词，结论四条最后才动。
+
+    真机教训：一处 GEMM 负载 + 8 个拒绝码时，包被裁到"全部 facts 丢失"，
+    一屏上出现"最耗时的是 ?（None ms）"—— 结论本身被裁没了。
+    """
+    from kernoscope.packet import PRIMARY_FACT_IDS, enforce_budget
+
+    packet = {
+        "schema_version": 1, "schema_revision": "1.2", "tool": "kernoscope",
+        "tool_version": "0.2.0",
+        "verdicts": ([
+            {"id": "kernel_time", "status": "ok", "facts": {"top": "k", "top_ms": 37.8},
+             "metrics": ["gpu__time_duration.sum"], "premises": [{"id": "x", "observed": 1.0}]},
+            {"id": "cost_per_token", "status": "ok",
+             "facts": {"per_mtok": 0.0089, "tokens_s": 62972.0},
+             "metrics": ["ks__cost_per_mtok"]},
+            {"id": "saving_estimate", "status": "ok",
+             "facts": {"n": 1, "top_pct_lo": 79.0, "top_pct_hi": 88.2},
+             "metrics": ["ks__prescription_total_saving_per_hour"]},
+        ] + [{"id": f"extra_{i}", "status": "ok",
+              "facts": {"padding": "x" * 60}, "metrics": [f"ks__m{i}"],
+              "premises": [{"id": "p", "observed": i, "ok": True}]} for i in range(12)]),
+        "unmeasured": [{"code": "counters_denied", "count": 3,
+                        "examples": ["sm__a", "sm__b"]} for _ in range(4)],
+        "refusals": {f"code_{i}": {"action": "很长很长的处置文本" * 12, "cmd": "kernoscope x",
+                                   "cost_kind": "wall_seconds", "cost_s": 20}
+                     for i in range(8)},
+        "next": [{"verdict": f"v{i}", "action": "下一步" * 20} for i in range(6)],
+    }
+    enforce_budget(packet, limit=1400)
+    trimmed = packet["cost"]["trimmed"]
+    assert "facts_secondary" in trimmed, f"没走到次要 facts 裁剪：{trimmed}"
+    by_id = {v["id"]: v for v in packet["verdicts"]}
+    if "facts" not in trimmed:            # 只裁到次要级别：结论四条的 facts 必须还在
+        for vid in PRIMARY_FACT_IDS:
+            if vid in by_id:
+                assert by_id[vid].get("facts"), f"{vid} 的 facts 是结论本身，不该先被裁"
+        assert any(not v.get("facts") for k, v in by_id.items() if k.startswith("extra_"))
+    else:                                  # 裁到最深一级：那就都没了（如实记录在 trimmed 里）
+        assert "facts" in trimmed

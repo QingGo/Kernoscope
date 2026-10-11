@@ -141,6 +141,16 @@
   "ncu 名 → 我们给什么 / 为什么给不出"的对照表；它是**声明**，不是数据替换。
   映射表是代码（`ncu_names.NCU_DISCOVERY_MAP`），文档只是视图。
 
+### 决策包：facts 分两级裁剪（真机回归）
+
+- 真机上（一处 GEMM 负载 + 8 个拒绝码）包被裁到**全部判词的 `facts` 丢失**，于是人视图出现
+  「最耗时的是 ?（None ms）」「成本账」这种把结论裁没了的输出。现在 `facts` 分两级：
+  先裁次要判词，`kernel_time` / `cost_per_token` / `saving_estimate` / `truth_vs_substitute`
+  这四条的 facts（"什么最贵、多少钱、先改哪里、真值偏差"的结论本身）最后才动；
+  裁剪顺序写进 `cost.trimmed`（`facts_secondary` → `facts`）。
+- `phrase_verdict` 增加兜底：facts 确实被裁掉时不再印 `?`/`None`，而是用仍在包里的
+  `value`/`unit` 说人话。
+
 ### 处方：先改哪里、能省多少钱（C2）
 
 - 新增 section **`Prescription`** 与判词 **`saving_estimate`**。头寸 = 本次达成值 vs
