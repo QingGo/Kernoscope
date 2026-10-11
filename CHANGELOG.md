@@ -649,6 +649,30 @@ kernoscope mcp --stdio
   这条证据依然成立。`references/refusal-codes.md`、`diagnosis-playbook.md` 与
   `eval/tasks/*.json` 已按新 code 重生成。
 
+### 包预算与前提门禁的三条不变量（第七轮 X-15 / X-17 / X-20 / X-22）
+
+- **守卫判词的身份与结论四条同列保护级**（X-15）：`over_peak` 的 facts 装的是"这次超峰属于
+  哪个 kernel"——它是那条结论的**身份**。旧实现在 `facts_secondary` 这一级就把它删光
+  （常态 3.6 KB 包实测 `over_peak.facts=null`），而 refused 判词的 `next`/`metrics` 早已被清空
+  ⇒ 包里**零归属**，正好退化成 V-6 要消灭的"把某个 kernel 的超峰当成整份报告的结论"。
+  现在它与 `PRIMARY_FACT_IDS` 同列，要裁就一起到最后一档 `facts_primary` 才裁。
+- **`VERDICT_KEEP_HARD` 从优先级集合大小推导**（X-17）：旧值硬编码 4，而优先级集合是 5
+  （结论四条 + `over_peak`）⇒ **对抗顺序**下第五条（`truth_vs_substitute`）会整条消失
+  （验收方 8400 场景里 3776 例；自然顺序打不中，因为 `over_peak` 排在第 13 位）。
+  现在 `VERDICT_KEEP_HARD = len(PRIMARY_FACT_IDS) + len(GUARD_VERDICT_IDS)`，并有测试把
+  "硬上限 ≥ 优先级集合"与"对抗顺序下一条都不许被挤掉"两件事都钉住。
+- **M13 第一级的 `facts.top` 改成结构化列表**（X-20）：它曾经是拼接字符串，于是
+  `FACT_STR_LIMIT=48` 会把它截断 —— 真实 C++ 模板实例化名（一个名字就 60+ 字）下 top-N 直接
+  退化成 top-1，而夹具用短名所以永远绿。现在每项是 `{kernel, pct}` 对象且**名字不截断**
+  （`to_dict()` 只截字符串 fact，嵌套结构原样带出）；渲染层逐项印，一屏契约按"列表里每一项的
+  每个值都要出现"扩展（契约没放松，只是从标量扩到列表）。
+- **前提检查成了逐判词的、并且落在 `agentrefs` 门禁里**（X-22）：新增
+  `tools/premise_audit.py` —— 解析 `packet.py`，对每个 builder **传递展开**它调用的 helper，
+  要求"这个判词能发出的前提 ⊆ `VERDICT_PREMISES[该判词]`"。旧实现只做"生成物 == 生成器输出"，
+  外加 pytest 里一个**全局并集**检查，于是验收方的变异 A4（给 `dram_bytes` 挂
+  `_environment_premises`：三个 id 都在标签表里）在 `agentrefs` 门禁 rc=0、116 条相关测试全绿。
+  现在 `gen_agent_refs.py --check` 会红，并且有一条测试**复刻 A4** 证明它真的会红。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

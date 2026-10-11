@@ -291,7 +291,15 @@ def test_onepage_uses_only_packet_contents():
     # 判词里的关键数字必须出现在人视图里
     for v in p["verdicts"]:
         for key, val in (v.get("facts") or {}).items():
-            if isinstance(val, dict):
+            if isinstance(val, list):
+                # 结构化 fact（X-20 的 `top` 是一串对象）：**每一项**的每个值都要在人视图里，
+                # 否则"结构化"就成了"藏起来"——契约的意思没变，只是从标量扩到列表。
+                for item in val:
+                    if isinstance(item, dict):
+                        assert all(str(x) in text for x in item.values()), f"{v['id']}.{key}"
+                    else:
+                        assert str(item) in text, f"{v['id']}.{key}={item}"
+            elif isinstance(val, dict):
                 assert all(str(x) in text for x in val.values()), f"{v['id']}.{key}"
             elif key == "mb" and v.get("value") is not None:
                 # `mb` 不是独立信息，而是 `value`（字节）的另一种单位表示；一屏按人读单位
@@ -843,11 +851,17 @@ def test_verdict_caps_are_both_traced():
     """`MAX_VERDICTS` 截断与预算截断共用一个留痕字段（count 是两者之和）。"""
     from kernoscope.packet import enforce_budget
 
+    from kernoscope.packet import GUARD_VERDICT_IDS, PRIMARY_FACT_IDS, VERDICT_KEEP_HARD
+
     packet = _budget_fixture()
     enforce_budget(packet, limit=1000)
     more = packet["verdicts_more"]
     assert more["count"] == 16 - len(packet["verdicts"]) == len(more["ids"])
-    assert len(packet["verdicts"]) <= 4
+    assert len(packet["verdicts"]) <= VERDICT_KEEP_HARD
+    # X-17（第七轮）：硬上限**必须**覆盖整个优先级集合（结论四条 + 守卫），否则对抗顺序下
+    # 第五条（`truth_vs_substitute`）会整条消失。这里把不变量钉住，不再靠手写的 4。
+    assert VERDICT_KEEP_HARD >= len(PRIMARY_FACT_IDS) + len(GUARD_VERDICT_IDS), \
+        f"硬上限 {VERDICT_KEEP_HARD} 小于优先级集合 {len(PRIMARY_FACT_IDS) + len(GUARD_VERDICT_IDS)}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1040,10 +1054,11 @@ def test_discovery_ranking_survives_without_calibration_or_price():
     assert sv["facts"]["money"] == "unavailable", sv
     assert sv["facts"]["top_kernel"] == "top_kernel"          # 9 ms ≫ 1 ms
     assert sv["facts"]["top_pct"] == pytest.approx(90.0, abs=0.1)
-    # `top` 压成一行人类可读、机器可 split 的字符串（一屏契约要求每个 fact 都能被渲染）
+    # X-20：`top` 是**结构化列表**（不是拼接串）⇒ 名字不受 48 字显示限长影响
     top = sv["facts"]["top"]
-    assert top.split("；")[0].startswith("top_kernel ") and "90.0%" in top, top
-    assert "cheap_kernel" in top and "10.0%" in top, top
+    assert isinstance(top, list) and len(top) == 2, top
+    assert top[0]["kernel"] == "top_kernel" and top[0]["pct"] == pytest.approx(90.0, abs=0.1)
+    assert top[1]["kernel"] == "cheap_kernel" and top[1]["pct"] == pytest.approx(10.0, abs=0.1)
     assert sv["facts"]["needs"] == "calibration,price", sv["facts"]["needs"]
     assert sv["provenance"] == "exact" and sv["unit"] == "%"
     assert sv["actionable"] is True, "排序本身是实测的，可依据"
@@ -1267,3 +1282,84 @@ def test_device_level_over_peak_poisons_the_kernel_roofline_conservatively():
     assert by_id["roofline"]["status"] == "refused", \
         f"设备级超峰没有传播到 kernel 的 roofline：{by_id['roofline']}"
     assert by_id["roofline"]["actionable"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 第七轮 X-15 / X-17：守卫判词的身份与"结论优先"必须是**不变量**，不是自然顺序的巧合
+# --------------------------------------------------------------------------- #
+def test_over_peak_keeps_its_kernel_identity_in_the_normal_budget():
+    """X-15（P2）：常态包（< 4096 B）里 `over_peak` 的 **kernel 归属**必须还在。
+
+    它是"这条结论属于谁"的身份：一旦被裁，refused 判词的 `next`/`metrics` 又早被清空 ⇒
+    包里**零归属**，正好退化成 V-6 要消灭的"把某个 kernel 的超峰当成整份报告的结论"。
+    所以守卫的 facts 与结论四条**同列保护级**（要裁一起到最后一档才裁）。
+    """
+    rep = _two_kernel_report(cheap_over_peak=True, top_over_peak=False)
+    p = build(rep)
+    assert len(dumps(p).encode("utf-8")) <= 4096, "这条用例要在**常态预算**下成立"
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert "over_peak" in by_id, [v["id"] for v in p["verdicts"]]
+    facts = by_id["over_peak"].get("facts") or {}
+    assert facts.get("kernel"), f"超峰的 kernel 归属被裁光了：{by_id['over_peak']}"
+    assert facts["kernel"] in ("cheap_kernel", "top_kernel"), facts
+
+
+def test_adversarial_verdict_order_cannot_evict_a_conclusion(monkeypatch):
+    """X-17（P3）：`over_peak` **提前**时，四条结论一条都不许整条消失。
+
+    旧实现的优先级集合是 5（结论四条 + 守卫）而硬上限硬编码 4 ⇒ 对抗顺序下第五条
+    （`truth_vs_substitute`）整条消失（8400 场景里 3776 例）。供应商自带夹具里没有
+    `over_peak`，所以自然顺序永远打不中 —— 这条用例把顺序**手动**改成对抗的。
+    """
+    import kernoscope.packet as pk
+
+    order = pk.BUILDERS
+    guard = [b for b in order if b.__name__ == "_verdict_over_peak"]
+    assert guard, "找不到 over_peak 的 builder（它改名了？）"
+    monkeypatch.setattr(pk, "BUILDERS", tuple(guard) + tuple(b for b in order if b not in guard))
+
+    def _with_guard() -> dict:
+        pkt = _budget_fixture()
+        # 夹具本身没有 `over_peak`（它不是每条报告都有）—— 而**优先级集合有 5 个成员**，
+        # 不把它加进来就测不到"第五条会不会被挤掉"。
+        pkt["verdicts"].append(
+            {"id": "over_peak", "status": "refused",
+             "facts": {"kernel": "cheap_kernel"},
+             "refusal": {"code": "env_reading_unknown", "message": "超峰"}})
+        return pkt
+
+    for label, use_adversarial in (("自然顺序", False), ("对抗顺序", True)):
+        if use_adversarial:
+            monkeypatch.setattr(pk, "BUILDERS",
+                                tuple(guard) + tuple(b for b in order if b not in guard))
+        else:
+            monkeypatch.setattr(pk, "BUILDERS", order)
+        packet = _with_guard()
+        pk.enforce_budget(packet, limit=1000)
+        ids = {v["id"] for v in packet["verdicts"]}
+        missing = [vid for vid in pk.PRIMARY_FACT_IDS + pk.GUARD_VERDICT_IDS if vid not in ids]
+        assert not missing, f"{label}下被挤掉的结论：{missing}（留下的是 {sorted(ids)}）"
+        # 被挤掉的那些必须有留痕（否则"少了"和"本来没有"分不开）
+        more = packet.get("verdicts_more") or {}
+        assert more.get("count", 0) > 0 and len(more.get("ids") or []) == more["count"], more
+
+
+def test_discovery_top_survives_long_cpp_template_kernel_names():
+    """X-20（P2）：真实 C++ 模板实例化名下，top-N 不许退化成 top-1。
+
+    旧实现把 `top` 拼成一行字符串，而 `to_dict()` 对字符串 fact 有 48 字限长 ⇒ 一个名字就
+    60+ 字时，第二项整个被截掉（`void cutlass::Kernel2<… 50.0%；…`），而夹具用的是短名，
+    所以那条路径永远绿。现在 `top` 是结构化列表，**名字一字不截**，渲染层逐项印。
+    """
+    rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=False, same_prefix=True)
+    p = build(rep)
+    sv = next(v for v in p["verdicts"] if v["id"] == "saving_estimate_share")
+    top = sv["facts"]["top"]
+    assert isinstance(top, list) and len(top) == 2, top
+    names = [str(t["kernel"]) for t in top]
+    assert len(names[0]) > 48, f"这条用例要用**长**模板名才有分辨力：{names[0]!r}"
+    assert names[0].endswith("top") and names[1].endswith("cheap"), names
+    # 一屏契约：不截断的名字必须一字不差地出现在人视图里
+    text = render_onepage(p)
+    for n in names:
+        assert n in text, f"长模板名没有出现在人视图里：{n!r}"

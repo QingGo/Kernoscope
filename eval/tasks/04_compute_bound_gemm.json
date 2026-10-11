@@ -68,7 +68,12 @@
             "n": 1,
             "top_kernel": "ampere_sgemm_128x128_nn",
             "top_pct": 100.0,
-            "top": "ampere_sgemm_128x128_nn 100.0%"
+            "top": [
+              {
+                "kernel": "ampere_sgemm_128x128_nn",
+                "pct": 100.0
+              }
+            ]
           },
           "value": 100.0,
           "unit": "%",
@@ -194,7 +199,7 @@
           "verdict_metrics",
           "next_pointers"
         ],
-        "packet_bytes": 3859
+        "packet_bytes": 3877
       }
     }
   },

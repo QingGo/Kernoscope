@@ -62,7 +62,12 @@
             "n": 1,
             "top_kernel": "l2_resident_apply_kernel",
             "top_pct": 100.0,
-            "top": "l2_resident_apply_kernel 100.0%"
+            "top": [
+              {
+                "kernel": "l2_resident_apply_kernel",
+                "pct": 100.0
+              }
+            ]
           },
           "value": 100.0,
           "unit": "%",
@@ -203,7 +208,7 @@
           "next_pointers",
           "passing_premises"
         ],
-        "packet_bytes": 3995
+        "packet_bytes": 4013
       }
     },
     "files": {

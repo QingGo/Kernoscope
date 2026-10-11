@@ -218,6 +218,18 @@ def main(argv: list[str] | None = None) -> int:
         path.write_text(text, encoding="utf-8")
         print(f"wrote {path.relative_to(ROOT)}  {len(text.encode('utf-8'))} B")
     bad += sync_skill_index(args.check)
+    # 第七轮 X-22：**逐判词**前提审计。旧实现只做"生成物 == 生成器输出"（外加 pytest 里一个
+    # **全局并集**检查），于是"给 `dram_bytes` 挂一整套环境前提"这种漂移两个门禁都抓不到。
+    # 这里补上另一半，让它成为 **agentrefs 门禁**的一部分（而不是只活在 pytest 里）。
+    from premise_audit import audit
+
+    problems = audit() if args.check else []
+    for msg in problems:
+        print(f"FAIL 前提审计：{msg}")
+    if problems:
+        bad += 1
+    elif args.check:
+        print("ok  逐判词前提 ⊆ 文档列出的前提")
     return 1 if bad else 0
 
 

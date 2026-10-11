@@ -66,7 +66,20 @@
             "n": 4,
             "top_kernel": "preprocess_kernel",
             "top_pct": 45.0,
-            "top": "preprocess_kernel 45.0%；cutlass_gemm_f16 41.0%；…"
+            "top": [
+              {
+                "kernel": "preprocess_kernel",
+                "pct": 45.0
+              },
+              {
+                "kernel": "cutlass_gemm_f16",
+                "pct": 41.0
+              },
+              {
+                "kernel": "epilogue_kernel",
+                "pct": 9.0
+              }
+            ]
           },
           "value": 45.0,
           "unit": "%",
@@ -194,24 +207,6 @@
           "cost_kind": "unavailable"
         }
       },
-      "next": [
-        {
-          "for": "kernel_time",
-          "hint": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
-        },
-        {
-          "for": "dram_bytes",
-          "hint": "与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期"
-        },
-        {
-          "for": "dram_bytes_per_launch",
-          "code": "share_too_low"
-        },
-        {
-          "for": "unmeasured",
-          "code": "counters_denied"
-        }
-      ],
       "cost": {
         "wall_s": 0.9,
         "launches": 420,
@@ -219,9 +214,10 @@
         "selftest_band": false,
         "trimmed": [
           "unmeasured_examples",
-          "verdict_metrics"
+          "verdict_metrics",
+          "next_pointers"
         ],
-        "packet_bytes": 4095
+        "packet_bytes": 3837
       }
     },
     "files": {

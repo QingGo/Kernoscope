@@ -882,10 +882,14 @@ def _discovery_ranking(rep: Any, *, limit: int = 3) -> dict[str, Any] | None:
         needs.append("calibration")            # 本机实测峰值（tools/machine-profile.py）
     if metric_value(rep, "ks__cost_per_hour") is None:
         needs.append("price")                  # --ks-price-per-hour / --ks-price-per-kwh
-    # facts 只放**标量**：一屏契约要求"包里的每个 fact 都出现在人视图里"，列表/嵌套结构
-    # 会让那条契约失效（或逼渲染层去猜）。所以 top 压成一行人类可读、机器可 split 的字符串。
-    top_line = "；".join(f"{_clip(str(k.name), 40)} {100.0 * float(k.total_ns) / total:.1f}%"
-                        for k in kernels[:limit])
+    # X-20（第七轮，P2）：`top` 曾经是**拼接字符串**，于是 `FACT_STR_LIMIT=48` 会把它截掉 ——
+    # 真实 C++ 模板实例化名（本项目域的常态，一个名字就 60+ 字）下 top-N 直接退化成 top-1，
+    # 而测试用的是短名所以永远绿。现在改成**结构化列表**：每项一个对象、名字不截断
+    # （`to_dict()` 只截**字符串** fact，嵌套结构原样带出）。
+    # 为什么不是"标量才安全"：一屏契约要的是"包里每个 fact 都能在人视图里看到"，
+    # 那由渲染层负责（`phrase_verdict` 会把每一项都印出来）——契约没变，只是渲染器多印几项。
+    top_items = [{"kernel": str(k.name), "pct": round(100.0 * float(k.total_ns) / total, 1)}
+                 for k in kernels[:limit]]
     return {
         "basis": "time_share",
         "money": "unavailable",
@@ -893,7 +897,7 @@ def _discovery_ranking(rep: Any, *, limit: int = 3) -> dict[str, Any] | None:
         "n": len(kernels),
         "top_kernel": _clip(str(kernels[0].name), FACT_STR_LIMIT),
         "top_pct": round(100.0 * float(kernels[0].total_ns) / total, 1),
-        "top": top_line,
+        "top": top_items,
     }
 
 
@@ -1562,9 +1566,14 @@ def enforce_budget(packet: dict[str, Any],
         # 这四条是"什么最贵、多少钱、先改哪里"的结论本身 —— 一屏上出现
         # "最耗时的是 ?（None ms）"就等于把结论裁没了。所以先只裁次要判词的 facts，
         # 到下一个更狠的级别才动这四条。
+        # X-15（第七轮，P2）：守卫判词 `over_peak` 的 facts 里装的是**超峰归属哪个 kernel**
+        # ——它就是"这条结论属于谁"的身份。旧实现在这一级就把它删光（常态 3.6 KB 包实测
+        # `over_peak.facts=null`），而 refused 判词的 `next`/`metrics` 早被清空 ⇒ 包里**零归属**，
+        # 正好退化成 V-6 要消灭的"被当成整份报告的结论"。所以它与结论四条**同列保护级**：
+        # 要裁就一起到最后一档 `facts_primary` 才裁。
         ("facts_secondary", lambda: _record_trimmed_items(
             "facts_secondary",
-            _drop_facts(lambda v: v.get("id") not in PRIMARY_FACT_IDS))),
+            _drop_facts(lambda v: v.get("id") not in _priority_ids()))),
         # V-1（第五轮 P0）：**拒绝散文先裁、判词最后裁**。
         # 旧顺序把 `verdicts` 排在 `refusal_entries`/`refusal_action_text` 之前，
         # 与函数自己的 docstring（"结论比处置散文重要"）相反：真机 9 条判词 → 包 6 条，
@@ -1605,10 +1614,14 @@ REFUSAL_ACTION_LIMIT = 72     # 截短后的处置文本上限（完整版在报
 REFUSAL_KEEP = 8              # 最多保留几条拒绝条目（丢掉的名字列进 refusals_omitted）
 ENVIRONMENT_KEEP = 4          # 最多保留几条环境降级诊断（其余 code 列进 *_more）
 REFUSAL_LIST_CODES = 4        # refusals_omitted 里最多列几个 code（再多就只给计数）
-VERDICT_KEEP_HARD = 4         # 最后一级：判词只留最关键的四条
 # 这几条判词的 facts 是"什么最贵/多少钱/先改哪里/真值偏差"的结论本身，最后才裁。
 PRIMARY_FACT_IDS: tuple[str, ...] = ("kernel_time", "cost_per_token", "saving_estimate",
                                      "truth_vs_substitute")
+# 最后一级：判词只留最关键的这几条。**必须 ≥ 优先级集合**（结论四条 + 守卫）——
+# X-17（第七轮，P3）：旧值硬编码 4，而优先级集合是 5（多了 `over_peak`），于是**对抗顺序**
+# （把 `over_peak` 提前）下第五条会整条消失（8400 场景里 3776 例；自然顺序打不中，只有
+# 供应商夹具——它不含 `over_peak`——之外的人才会遇到）。这里改成从集合大小推导，不再手写。
+VERDICT_KEEP_HARD = len(PRIMARY_FACT_IDS) + len(GUARD_VERDICT_IDS)
 
 
 def _cap_list(packet: dict[str, Any], key: str, n: int) -> None:
@@ -1966,8 +1979,13 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
             # 发现层第一级（M13）：按实测时间占比排的头寸，**明说这不是钱**
             # 人话里带上机器字段（basis/money）：一屏契约要求"包里的每个 fact 都能在
             # 人视图里看到"，藏起来就等于两个视图分叉。
+            top = f.get("top") or []
+            if isinstance(top, list):      # X-20：结构化列表逐项印（名字**不截断**）
+                shown = "；".join(f"{t.get('kernel')} {t.get('pct')}%" for t in top)
+            else:
+                shown = str(top)           # 旧包（v1.2 消费者）可能还是拼接串：照印
             return (f"按**实测时间占比**排的头寸（basis={f.get('basis')}；"
-                    f"money={f.get('money')}）：{f.get('top')}"
+                    f"money={f.get('money')}）：{shown}"
                     f"（共 {f.get('n')} 个 kernel；最大一条 {f.get('top_pct')}%）"
                     f"；这是时长占比**不是钱**，要钱与区间还需补：{f.get('needs')}")
         if f.get("top_pct_lo") is not None:

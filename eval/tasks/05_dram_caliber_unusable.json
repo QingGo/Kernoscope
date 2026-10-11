@@ -70,7 +70,12 @@
             "n": 1,
             "top_kernel": "fused_attention_fwd",
             "top_pct": 100.0,
-            "top": "fused_attention_fwd 100.0%"
+            "top": [
+              {
+                "kernel": "fused_attention_fwd",
+                "pct": 100.0
+              }
+            ]
           },
           "value": 100.0,
           "unit": "%",
@@ -230,7 +235,7 @@
         "unmeasured_metrics": 6,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 3857
+        "packet_bytes": 3875
       }
     },
     "capabilities": {
