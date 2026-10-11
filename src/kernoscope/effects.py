@@ -135,6 +135,13 @@ OPERATIONS: dict[str, Operation] = {
         "`--force-overwrite` **只管** `.ksreport.json` 与 perfetto 两处，其它文件（含案件目录里的 "
         "`journal.jsonl` 追加）不看它。",
         ToolEffects(writes_filesystem=True, may_discard_data=True)),
+    "repeat_runs": Operation(
+        "repeat_runs", "把整条命令**进程级**重复跑 N 次（`--repeat N`）",
+        "自我调用 N 次（每次都是完整的采集与报告，共用同一份测量代码，不引入第二条口径）；"
+        "子进程的中间产物落在系统临时目录，结束时删掉。给了 `-o <前缀>` 时另写一个"
+        "`<前缀>.repeat.json`（跨运行分布 + MDD 下界）。**不是** kernel 级重放：不插桩、"
+        "不锁时钟、不碰其他租户，也不控制 warm/cold 缓存。",
+        ToolEffects(writes_filesystem=True, launches_process=True, mutates_session=True)),
     "write_html_view": Operation(
         "write_html_view", "写单文件 HTML 证据单（给人看/截图/贴 issue）",
         "写 `--html <path>` 指定的**一个**自包含 `.html`（内联 CSS、零外部 URL、零 JS、无服务器）。"
@@ -419,6 +426,16 @@ def plan_for(args: Any, argv: Sequence[str] | None = None) -> Plan:
         fmt = "csv" if path.lower().endswith(".csv") else "json"
         plan.items.append(PlanItem(
             OPERATIONS["write_name_map"], target=f"{path}（{fmt}）", writes=[path]))
+    if int(getattr(args, "repeat", 1) or 1) > 1:
+        n = int(args.repeat)
+        export = str(getattr(args, "export", "") or "")
+        base = export[:-len(".json")] if export.endswith(".json") else export
+        plan.items.append(PlanItem(
+            OPERATIONS["repeat_runs"], target=f"{n} 次",
+            writes=([f"{base}.repeat.json"] if base else []),
+            commands=[f"×{n}：kernoscope …（同一条命令，去掉 --repeat）"],
+            detail=f"进程级重复 {n} 次：每次独立采集与报告；跨运行分布与 MDD 下界"
+                   f"{'写到 ' + base + '.repeat.json' if base else '只打屏'}"))
     if getattr(args, "html", None) and str(args.html) != "-":
         path = str(args.html)
         plan.items.append(PlanItem(

@@ -10,6 +10,10 @@ import pytest
 from kernoscope.cli import main
 
 
+#: 合成首跑（不需要 GPU/nsys）：这一节所有用例都用它，读起来比一串开关清楚
+_SYNTH = ("--ks-synthetic", "--ks-no-nvml", "--set", "basic")
+
+
 def run(capsys, *argv):
     rc = main(list(argv))
     out = capsys.readouterr()
@@ -483,3 +487,63 @@ def test_plan_declares_the_html_file(tmp_path):
             "--html", str(out)]
     plan = plan_for(build_parser().parse_args(argv), argv)
     assert str(out) in plan.declared_writes()
+
+
+# ---------------------------------------------------------------------------
+# M5/N1：`--repeat N` 进程级重复（引擎在 repeat.py，这里钉 CLI 面）
+# ---------------------------------------------------------------------------
+def _rep_ok(out: str) -> bool:
+    return "进程级重复 2 次" in out and "跨运行分布" in out
+
+
+def test_repeat_runs_the_whole_command_n_times_and_reports_a_distribution(capsys):
+    rc, out, err = run(capsys, "--repeat", "2", *_SYNTH, "--screen", "off")
+    assert rc == 0, (rc, out, err)
+    assert _rep_ok(out), out
+    assert "kernel_time" in out and "MDD下界" in out
+    # 诚实边界必须在人视图里（不是只写在文档里）
+    assert "不锁时钟" in out or "缓存" in out, out
+    assert "不编价格" in out, out
+
+
+def test_repeat_with_packet_dash_gives_one_json_object(capsys):
+    rc, out, err = run(capsys, "--repeat", "2", *_SYNTH, "--packet", "-")
+    assert rc == 0, (rc, out, err)
+    payload = json.loads(out)                     # stdout 必须是**一个**合法 JSON
+    assert payload["mdd_lower_bound"] and "kernel_time" in payload["mdd_lower_bound"]
+    assert payload["cost"]["runs"] == 2
+    # 成本块里**不许**出现价格/币种：换算是调用方的事（与 repeat.py 自己的测试同一纪律）
+    cost_blob = json.dumps(payload["cost"], ensure_ascii=False).lower()
+    assert not any(k in cost_blob for k in ("price", "currency")), payload["cost"]
+
+
+def test_repeat_one_is_the_normal_path(capsys):
+    rc, out, err = run(capsys, "--repeat", "1", *_SYNTH, "--screen", "off")
+    assert rc == 0
+    assert "跨运行分布" not in out, "只跑一次不该出现分布"
+
+
+def test_repeat_with_import_is_a_usage_error_not_silently_ignored(capsys, tmp_path):
+    rep = tmp_path / "rep.json"
+    rep.write_text("{}", encoding="utf-8")
+    rc, out, err = run(capsys, "--repeat", "2", "-i", str(rep))
+    assert rc == 2, (rc, out, err)
+    assert "--repeat" in err and "-i" in err, err
+
+
+def test_repeat_all_runs_failing_refuses_instead_of_pretending(capsys):
+    """N 次都失败 ⇒ 不许给"分布"，rc=1，并说清没有可用分布。"""
+    rc, out, err = run(capsys, "--repeat", "2", "--", "ks-no-such-binary-xyz")
+    assert rc == 1, (rc, out, err)
+    assert "没有可用分布" in out or "0/2" in out, out
+
+
+def test_plan_declares_the_repeat_run_and_its_output(tmp_path):
+    from kernoscope.cli import build_parser
+    from kernoscope.effects import plan_for
+
+    argv = ["--repeat", "3", *_SYNTH, "-o", str(tmp_path / "rep.json")]
+    plan = plan_for(build_parser().parse_args(argv), argv)
+    ids = [i.op.id for i in plan.items]
+    assert "repeat_runs" in ids, ids
+    assert str(tmp_path / "rep.repeat.json") in plan.declared_writes(), plan.declared_writes()

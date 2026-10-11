@@ -666,6 +666,30 @@ kernoscope diff a.json b.json --selfcheck machine-selfcheck.json --fail-on regre
 **判决不变**：原拒绝码照旧保留、remedy 照旧指路；这是"把钱算出来给你看"的一条路，
 不是把拒绝改成通过。
 
+### 8.1.1 进程级重复执行：`--repeat N`
+
+自己手工跑两次容易把噪声当改进（跨进程实测差过 4.7%）。`--repeat N` 让工具把**同一条命令**
+跑 N 次（进程级），直接给出跨运行分布与 MDD 下界：
+
+```bash
+kernoscope --repeat 3 --packet - -- python bench.py     # stdout 是一个 JSON（给 agent）
+kernoscope --repeat 3 -o rep.json -- python bench.py    # 另写 rep.repeat.json
+```
+
+- `distributions` 每个指标一格：`n / min / max / mean / sd`，**只含成功**运行；
+  `n` 是真正产出该指标的运行次数，`not_produced` 是成功但没产出它的次数；
+- `mdd_lower_bound = max(3×sd / |mean| × 100, 0.5)`（与 `selftest` 的 `SD_FACTOR` 同源：
+  比两次单次测量时差值噪声是 √2×sd，t(95%,ν≈4)·√2≈2.8~3σ）。它是**下界**：N 小、机器状态会漂、
+  缓存冷热没被控制，真实噪声只会更大 —— 喂给 `diff` 时与误差带**取最大值**，只能抬高门槛；
+- **失败的那次照样记**（`ok=false` + rc + 报告），但**不参与分布**：不完整的报告会把 sd 压小、
+  把 MDD 压低，最后把噪声判成真改进。只有 1 次成功产出该指标时逐指标拒 `mdd_unknown`，
+  同名指标单位不一致时拒 `protocol_mismatch`（宁缺勿混），均值为 0 时不给相对 MDD（`zero_baseline`）；
+- 只出 **GPU 秒**（`cost.gpu_s`），**不编价格**；`wall_time_ns` 不当 GPU 秒顶替（要 wall 口径得显式注入）；
+- **它不是 kernel 级重放**：不插桩、不锁时钟、不碰其他租户，也**不控制 warm/cold 缓存**
+  （所以跨运行分布里同时含仪器噪声与缓存效应）；
+- `-i`（回读已有报告）与 `--repeat` 不能一起用（重跑的是采集，不是解析）—— 显式报用法错误，
+  不静默忽略。
+
 ### 8.2 接进 CI：`kernoscope gate`
 
 ```bash

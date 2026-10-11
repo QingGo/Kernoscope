@@ -247,6 +247,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "`ncu --import` / ncu-ui 能打开），同时写 PATH.ATTRIBUTION.txt 署名。"
                         "文件内署名（provider/comment）为空则拒绝生成；前提不成立的指标不写；"
                         "一个值都不剩时拒绝生成（宁可不生成，也不生成假的 ncu 报告）")
+    k.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="把整条命令跑 **N 次（进程级）**，给出跨运行分布与 MDD 下界 "
+                        "（M5/N1）。不是 kernel 级重放：不插桩、不锁时钟、不碰其他租户，"
+                        "也不控制 warm/cold 缓存 —— 所以真实噪声只会比这条下界更大。"
+                        "喂给 `diff` 时与误差带**取最大值**，只能抬高门槛")
     k.add_argument("--html", default=None, metavar="PATH",
                    help="写一个**自包含**的单文件 HTML 证据单（给人看/截图/贴 issue：内联 CSS、"
                         "零外部 URL、零 JS、无服务器；每个数字带出处角标，拿不到的数字印 n/a + "
@@ -732,6 +737,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "对应的 ncu section 会以 n/a + 原因出现。")
 
     # ---------- 回读模式 ----------
+    # `--repeat` 对"回读一份已有报告"没有意义（重跑的是采集，不是解析）：显式拒绝，
+    # 不许静默忽略（静默忽略 = 承诺了 N 次却只做了一次）。
+    if int(getattr(args, "repeat", 1) or 1) > 1 and getattr(args, "import_report", None):
+        log_error("error: `--repeat` 只用于采集（要重复跑的是目标命令）；"
+                  "`-i` 是回读已有报告，两者不能一起用")
+        return 2
     if args.import_report:
         # V-25：`-i /nonexistent.json` 或坏 JSON 曾经是裸 FileNotFoundError/JSONDecodeError
         # （rc=1、无 error: 行）。这里按自家约定翻译。
@@ -758,6 +769,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
         print("\nSections that require GPU performance counters are always reported as "
               "unavailable with a reason (never as substituted numbers).")
         return 0
+
+    # ---------- M5/N1：进程级重复执行（`--repeat N`）----------
+    # 放在 `--plan` **之后**（`--plan` 只打印、不执行，连重复也不跑）
+    if int(getattr(args, "repeat", 1) or 1) > 1:
+        return _repeat_path(args, argv)
 
     # ---------- 能力探测（W1/W5）----------
     # 便宜（只读 /proc + 多路径查工具，不跑 ncu 探测）但必须先做：它决定这次能给出什么，
@@ -1963,6 +1979,73 @@ def _ensure_parent(path: str, logged: list[str] | None = None) -> None:
     parent.mkdir(parents=True, exist_ok=True)
     if logged is not None:
         logged.append(f"note: 输出目录不存在，已创建 {parent}/")
+
+
+def _strip_repeat(argv: Sequence[str]) -> list[str]:
+    """去掉 `--repeat N` / `--repeat=N`（子进程不该再进重复路径）。"""
+    out: list[str] = []
+    skip_next = False
+    for a in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--repeat":
+            skip_next = True
+            continue
+        if a.startswith("--repeat="):
+            continue
+        out.append(a)
+    return out
+
+
+def _repeat_path(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """`--repeat N`：把整条命令跑 N 次（进程级），给出跨运行分布与 MDD 下界。
+
+    为什么用**自我调用**而不是进程内循环：每次运行都需要自己的采集、报告与案件身份，
+    进程内循环会让它们互相污染，也很容易长成"第二条测量路径"。子进程走的是与单次运行
+    **完全相同**的那段代码，所以重复执行不引入新的口径。
+
+    它不是 kernel 级重放：不插桩、不锁时钟、不碰其他租户，也**不控制 warm/cold 缓存** ——
+    所以真实噪声只会比这里给的下界更大（喂给 `diff` 时与误差带取最大值）。
+    """
+    from . import repeat as repeat_mod
+
+    n = int(args.repeat)
+    child_argv = _strip_repeat(argv)
+    work = tempfile.mkdtemp(prefix="ks-repeat-")
+    runs: list[tuple[int, str]] = []
+    try:
+        for i in range(n):
+            packet_path = os.path.join(work, f"run{i}.packet.json")
+            cmd = [sys.executable, "-m", "kernoscope", *child_argv,
+                   "--packet", packet_path, "--screen", "off", "--no-case", "--quiet"]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            runs.append((proc.returncode, packet_path))
+        counter = {"i": 0}
+
+        def runner():
+            rc, path = runs[counter["i"]]
+            counter["i"] += 1
+            try:
+                return rc, json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return rc, None
+
+        result = repeat_mod.repeat_runs(runner, n)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    blob = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+    if getattr(args, "export", None):
+        export = str(args.export)
+        base = export[:-len(".json")] if export.endswith(".json") else export
+        out = f"{base}.repeat.json"
+        _write_text_or_fail(blob, out, what="重复执行分布", logged=[])
+    if getattr(args, "packet", None) == "-":
+        sys.stdout.write(blob + "\n")          # agent 要机器格式就只给机器格式
+    elif not getattr(args, "quiet", False):
+        print(result.render())
+    return 0 if result.mdd_lower_bound else 1
 
 
 def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list[str],
