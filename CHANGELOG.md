@@ -112,6 +112,7 @@
 |---|---|---|
 | `capabilities` | `--json` / `--brief` / `--probe` / `--out <f>` / `--quiet` | 参考层 JSON / 入口层（<1.2 KB，带下一层字节价格）/ 实测探测 / 写文件 / 静音 |
 | `selftest` | `-o, --out <f>` / `--json` / `--size-mb` / `--duration` / `--runs` / `--dtype` / `--only` / `--cross-process` / `--quick` / `--strict` / `--quiet` | 纯 torch 的已知答案自检：写 `--ks-selfcheck` 用的文件（**不是** `--ks-calibration`，见 `PEAK_CAVEAT`）；`--cross-process` 把跨进程复测算进 MDD |
+| `skill` | `--apply` / `--target <dir>` / `--client {claude,agents}` / `--json` / `--source <dir>` | 把 skill 装到 agent 的 skill 目录：默认只打印计划；备份（保留第一份）、原子写、写后回读校验、失败逆序回滚、内容相同即幂等 |
 | `route` | `--list` / `--json` / `--probe` | **先路由再动手**：把一条问题（中文口语也行）转成「走哪条口径 + 命令 + 期望输出 + **会被拒的条件**」；只输出计划，不跑测量；匹配不上就说匹配不上（不许硬套） |
 | `diff` | `--selfcheck <f>` / `--json` / `--fail-on {none,regressed,change}` / `--strict` / `--quiet` | 误差带对拍；**`--fail-on` 是唯一能拿去卡 CI 退出码的开关**（`regressed`/`change` 命中即非零退出） |
 
@@ -122,6 +123,56 @@
   `--json` 是给 agent 的真源），文档只是视图；匹配不上会明说"不要硬套"。
   口径决策规则（有 NVBit 走轨迹、否则走代理）跟着路由一起输出，避免 agent 自己猜。
 - `route` **只输出计划，不跑任何测量**（有测试守着它的实现里不出现采集调用）。
+
+### 处方：先改哪里、能省多少钱（C2）
+
+- 新增 section **`Prescription`** 与判词 **`saving_estimate`**。头寸 = 本次达成值 vs
+  **本机实测峰值**：保守端「把差距关掉一半」= u/(2−u)（u = 差距比例），乐观端 = u 且
+  **明确标注为上界、不是预测**；`--ks-peak-*` 覆盖值或规格表**算不出**头寸
+  （`calibration_caliber_mismatch`），因为「规格 vs 实测」的差距正是本工具的理由。
+- 钱的规则：没有价格就没有钱（比例照给）；价格有但无法按 kernel 份额归因 →
+  `premise_failed`（与"没给价格"处置不同）；per-token 节省额外要求被匹配 kernel 主导窗口
+  （份额 ≥ 50%）——否则省下的是 GPU 时间，不是 token 成本。
+- **重叠头寸不相加**：同 kernel 的多个头寸按最大者封顶，被丢弃的量写进 note
+  （"全部相加会得到 X"），跨 kernel 同资源的相加会显式标注它们其实在争同一份资源。
+- 一条都不可辩护时：`ranked == []` + 一条结构化拒绝（不是空输出）。
+
+### 真值对拍与写 `.ncu-rep`（I1/I2）
+
+- 新增 **`--ks-ncu-rep <file>`**（别名 `--from-ncu-report`）：用官方只读 API 导入一份
+  `.ncu-rep` 作真值，指标以 **`ncu__` 前缀 + `exact`** 出现（与 ncu 同源，但不落计数器
+  命名空间、不触发允许表），并逐条与我们的替代口径对拍 → `ks__truth_vs_substitute_pct`。
+  判词 **`truth_vs_substitute`**：一条都对不上时也是 `refused` + 原因（沉默会被读成"对上了"）。
+  有 `-o` 时另写 **`<base>.ncu-truth.json`**（可归档、可 diff 的真值对照产物）。
+  读不了报新拒绝码 **`ncu_report_unreadable`** + 处置（缺的往往只是 PYTHONPATH）。
+- **读 `.ncu-rep` 走子进程隔离**：真机实测在主进程里读会 Segmentation fault（rc=139）——
+  主进程 import 了 torch，其 CUDA 运行时与 `_ncu_report` 同进程调 CUDA；同一文件单独读正常。
+  段错误抓不住，所以隔离是唯一可靠做法（`ncu_rep.load_isolated`，子进程不 import torch）。
+- 新增 **`--export-ncu-rep <path>`**：把替代口径写成一个合法的 `.ncu-rep`
+  （官方 reader 可按名字读回值，`ncu --import` 能打开），**同时**写
+  `<path>.ATTRIBUTION.txt` 旁路署名。三条门禁：文件内署名（provider/comment）为空即拒绝；
+  前提不成立的指标（决策包里被拒判词引用的）不写入；过滤后一个值都不剩时**拒绝生成**。
+- 写进去的名字**只允许自有命名空间**（`ks__`/`est__`/`meas__`）与"两边单位语义一致"的
+  计数量白名单（`launch__registers_per_thread` 等）。**不写 `gpu__time_duration.sum`**：
+  我们是 ms、ncu 是 ns，写进去会让读的人差 10⁶（R-51 同类错误在源头拦截）。
+
+### 人读报告与阶段归因（I3/I8）
+
+- 新增 **`--report-md <path>`**：按生态里通用的 per-kernel 报告结构写出 Markdown
+  （`## 0` 采集设置 → `## 1` 头部数字**带 Source 列** + `**One-line read:**` → `## 2` 分维度
+  （没有数据的维度也保留并写明拒绝码）→ `## 3` 诊断 → `## 4` 按影响排序的方向（**最多 5 条**，
+  每条必须带 `**Evidence:**`）→ `## 5` 置信与限制（三段）→ `## 6` 复现）。
+- 新增 **`--ks-nvtx-phases`**：从 `--ks-sqlite`/`--ks-nsys-rep` 的 NVTX 区间归因 kernel 时间
+  （新 section `NvtxPhases`）。跨区间的 kernel 按**重叠部分**计入，嵌套区间各自计入
+  （份额之和可 >100%，明说不是划分）；没有 NVTX 数据时那一节仍以 `n/a` + code 存在。
+
+### skill 安装（I4）
+
+- 新增子命令 **`kernoscope skill`**：`--apply`（默认只打印计划）/ `--target <dir>` /
+  `--client {claude,agents}` / `--json` / `--source <dir>`。把 `SKILL.md` + `references/` +
+  `scripts/` 装到 `~/.claude/skills/kernoscope`（或 `~/.agents/skills/kernoscope`）。
+  备份 `<文件>.kernoscope.backup`（**已存在则保留第一份快照**）、原子写、**写后回读校验**、
+  失败**逆序回滚**、内容相同即 `unchanged`（幂等）。
 
 ### 副作用账与 `--plan`（A2）
 

@@ -209,6 +209,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "`ncu --import` / ncu-ui 能打开），同时写 PATH.ATTRIBUTION.txt 署名。"
                         "文件内署名（provider/comment）为空则拒绝生成；前提不成立的指标不写；"
                         "一个值都不剩时拒绝生成（宁可不生成，也不生成假的 ncu 报告）")
+    k.add_argument("--report-md", default=None, metavar="PATH",
+                   help="写出**人读的 per-kernel 报告**（Markdown，结构对齐生态里通用的 "
+                        "per-kernel 报告模板：0 采集设置 → 1 头部数字（带 Source 列）→ "
+                        "2 分维度 → 3 诊断 → 4 按影响排序的方向 → 5 置信与限制 → 6 复现）。"
+                        "多 kernel 时导出最耗时的那个（用 -k 选别的）")
+    k.add_argument("--ks-nvtx-phases", action="store_true",
+                   help="从 --ks-sqlite/--ks-nsys-rep 的 NVTX 区间归因 kernel 时间"
+                        "（训练/推理阶段各占多少）；没有 NVTX 数据时如实给 n/a + code")
     k.add_argument("--ks-ncu-rep", "--from-ncu-report", default=None, metavar="PATH",
                    dest="ks_ncu_rep",
                    help="读一个已有的 .ncu-rep 作**真值**（官方只读 API）：ncu__* 前缀 + exact "
@@ -384,7 +392,8 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
 # 主流程
 # --------------------------------------------------------------------------
 SUBCOMMANDS: tuple[str, ...] = (
-    "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff", "route")
+    "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff", "route",
+    "skill")
 
 
 def subcommand_parser(name: str) -> Any:
@@ -403,11 +412,12 @@ def subcommand_parser(name: str) -> Any:
     from .occupancy_cmd import build_parser as occupancy_parser
     from .route_cmd import build_parser as route_parser
     from .selftest import build_parser as selftest_parser
+    from .skill_cmd import build_parser as skill_parser
 
     return {"doctor": doctor_parser, "occupancy": occupancy_parser,
             "memtrace": memtrace_parser, "issue": issue_parser,
             "capabilities": capabilities_parser, "selftest": selftest_parser,
-            "diff": diff_parser, "route": route_parser}[name]()
+            "diff": diff_parser, "route": route_parser, "skill": skill_parser}[name]()
 
 
 def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
@@ -420,10 +430,12 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     from .occupancy_cmd import occupancy_main
     from .route_cmd import route_main
     from .selftest import selftest_main
+    from .skill_cmd import skill_main
 
     return {"doctor": doctor_main, "occupancy": occupancy_main, "memtrace": memtrace_main,
             "issue": issue_main, "capabilities": capabilities_main,
-            "selftest": selftest_main, "diff": diff_main, "route": route_main}
+            "selftest": selftest_main, "diff": diff_main, "route": route_main,
+            "skill": skill_main}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -854,6 +866,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     dev_kr.sections = dev_sections
     rep.kernels.append(dev_kr)
 
+    # ---------- I8：NVTX 阶段归因（训练/推理阶段各占多少 kernel 时间）----------
+    _attach_phases(rep, args, dev_kr, log)
+
     # ---------- C2：把"改哪里、能省多少"算出来（头寸 + 排序）----------
     _attach_prescription(rep, args, cost_est, peaks, log)
 
@@ -997,6 +1012,58 @@ def _stderr_log(args: argparse.Namespace, logged: list[str]):
             print(msg, file=sys.stderr)
 
     return log
+
+
+def _attach_phases(rep: Report, args: argparse.Namespace, dev_kr, log) -> None:
+    """I8：从 nsys sqlite 的 NVTX 区间把 kernel 时间分成训练/推理阶段。
+
+    两个诚实点：
+      * **没有 NVTX 数据也要出一行**（n/a + code）："这个阶段没标"与"没测"是两件事，
+        消失的行会让读者以为工具没这个能力（B1）。
+      * 阶段之和**不是划分**（嵌套区间各自计入），这句话写在 basis 里随数字一起走。
+    """
+    from .analyze.phases import attribute as attribute_phases
+    from .provenance import Metric, Section
+    from .sections import _split_unavailable  # noqa: PLC2701 - 同一仓库内的共享约定
+
+    db = (getattr(args, "ks_sqlite", None) or rep.meta.get("nsys_sqlite")
+          or rep.meta.get("nsys_sqlite_path"))
+    if not db:
+        if getattr(args, "ks_nvtx_phases", False):
+            log("warn: --ks-nvtx-phases 需要 --ks-sqlite/--ks-nsys-rep 指向的 nsys 数据库"
+                "（本次没有 kernel 级数据源，阶段归因无从谈起）")
+        return
+    try:
+        att = attribute_phases(str(db))
+    except Exception as exc:      # 只有输入错误才会抛：文件不存在/不是 sqlite
+        log(f"warn: NVTX 阶段归因失败（{type(exc).__name__}: {exc}）")
+        return
+    sec = Section("NvtxPhases")
+    for name, value, unit, note in att.to_metrics():
+        if value is None:
+            code, why = _split_unavailable(note)
+            sec.add(Metric.unavailable(name, why, unit=unit, code=RefusalCode(code),
+                                       observed={"basis": att.basis[:200]}, severity="degraded"))
+        else:
+            # 每行的 note 与 section 级 basis 可能不同（逐阶段那几行带"嵌套时不是划分"这类
+            # 只对那一行成立的前提）：相同就省掉重复，不同就必须留 —— 前置纪律是"前提随数字走"。
+            extra = "" if note == att.basis else note
+            sec.add(Metric.derived(name, value, unit, source=att.basis, note=extra))
+    if sec.metrics:
+        dev_kr.sections.append(sec)
+        rep.meta["nvtx_phases"] = {
+            "attributed_ms": att.attributed_ms, "unattributed_ms": att.unattributed_ms,
+            "count": len(att.phases), "omitted": att.omitted, "basis": att.basis,
+            "reason": att.reason,
+            "phases": [{"name": p.name, "depth": p.depth, "kernel_ms": p.kernel_ms,
+                        "share_pct": p.share_pct, "kernels": p.kernels} for p in att.phases],
+        }
+        if att.reason:
+            log(f"nvtx: 不给阶段数字（{att.reason}）")
+        else:
+            top = att.phases[0] if att.phases else None
+            log(f"nvtx: {len(att.phases)} 个阶段"
+                + (f"，最重的是「{top.name}」占 kernel 时间 {top.share_pct:.1f}%" if top else ""))
 
 
 def _kernel_metric(kr, name: str) -> float | None:
@@ -1223,6 +1290,33 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
             f"（用 -k 选别的）")
     rep.meta["out_ncu_rep"] = res.ncu_rep_path
     rep.meta["out_ncu_rep_sidecar"] = res.sidecar_path
+    return 0
+
+
+def _write_report_md(rep: Report, args: argparse.Namespace, packet: dict[str, Any] | None,
+                     logged: list[str]) -> int:
+    """I3：把 per-kernel 报告写成 Markdown（人读；结构对齐生态里通用的报告模板）。"""
+    from .report_md import render_report_md
+
+    kernels = [k for k in rep.kernels if k.name != "(device)"]
+    if not kernels:
+        print("error: --report-md 需要至少一个 kernel（本次没有 kernel 级数据）", file=sys.stderr)
+        return 1
+    kernels.sort(key=lambda k: k.total_ns, reverse=True)
+    kr = kernels[0]
+    try:
+        text = render_report_md(rep, packet, kernel=kr.name)
+    except (ValueError, TypeError) as exc:
+        print(f"error: 生成 Markdown 报告失败：{exc}", file=sys.stderr)
+        return 1
+    out = str(args.report_md)
+    _ensure_parent(out, logged)
+    Path(out).write_text(text, encoding="utf-8")
+    rep.meta["out_report_md"] = out
+    print(f"==PROF== per-kernel 报告: {out}（{len(text.encode('utf-8'))} B）", file=sys.stderr)
+    if len(kernels) > 1:
+        print(f"==PROF== 注：报告里有 {len(kernels)} 个 kernel，只写了最耗时的 {kr.name}"
+              f"（用 -k 选别的）", file=sys.stderr)
     return 0
 
 
@@ -1537,6 +1631,12 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
             json.dumps(rep.meta["ncu_truth"], ensure_ascii=False, indent=2), encoding="utf-8")
         rep.meta["out_ncu_truth"] = truth_path
         print(f"==PROF== 真值对拍: {truth_path}", file=sys.stderr)
+
+    # ---------- I3：人读的 per-kernel 报告（Markdown）----------
+    if getattr(args, "report_md", None):
+        rc_md = _write_report_md(rep, args, packet, logged)
+        if rc_md:
+            return rc_md
 
     # 标准输出
     if getattr(args, "packet", None) == "-":
