@@ -249,6 +249,7 @@
         "static_resources": "available",
         "theoretical_occupancy": "available",
         "device_busy": "available",
+        "cost_per_token": "available",
         "dram_bytes": "available",
         "roofline": "available",
         "achieved_occupancy": "refused",
@@ -318,6 +319,19 @@
             "meas__device_energy_j"
           ],
           "how": ""
+        },
+        {
+          "id": "cost_per_token",
+          "question": "这次推理/训练的单位成本（每百万 token 多少钱 / 每小时多少钱）",
+          "state": "available",
+          "tier_required": 1,
+          "outputs": [
+            "ks__cost_per_mtok",
+            "ks__tokens_per_s",
+            "ks__j_per_token"
+          ],
+          "how": "",
+          "alternative": "只给能耗口径（--ks-tokens 给量即得 J/token）；给价格才换算成钱，电费与租约两种载体分别报"
         },
         {
           "id": "dram_bytes",

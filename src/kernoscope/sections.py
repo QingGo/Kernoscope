@@ -87,6 +87,7 @@ class BuildOptions:
     cubin_sass: dict[str, Any] | None = None
     nvml_summary: dict[str, float] = field(default_factory=dict)
     dram: Any = None      # analyze.dram.DramEstimate（避免循环 import）
+    cost: Any = None      # analyze.cost.CostEstimate（成本账；None = 本次不给成本结论）
     memtrace: Any = None  # {kernel: analyze.memtrace.MemTraceStats}
     issue_hist: Any = None  # backends.opcode_hist.OpcodeHist（NVBit 官方 opcode_hist 输出）
     clock_mhz: float = 0.0  # 用于发射槽上限的 SM 时钟（NVML 实测或用户给定）
@@ -182,6 +183,160 @@ def build_dram_section(opt: BuildOptions) -> Section | None:
         else:
             s.add(Metric.estimated(name, value, unit, source=source, note=note,
                                    resolution=resolution))
+    return s
+
+
+def _cost_unavailable(s: Section, name: str, ref, unit: str = "", source: str = "",
+                      note: str = "") -> None:
+    """成本账里的 n/a 行：拒绝必须带 code（R1/W3），散文只解释。"""
+    s.add(Metric.unavailable(name, ref.message, unit=unit, source=source, note=note,
+                             code=ref.code, observed=ref.observed,
+                             threshold=ref.threshold, remedy=ref.remedy,
+                             severity=ref.severity))
+
+
+def build_cost_section(opt: BuildOptions) -> Section | None:
+    """成本账（C1）：窗口能耗 → tokens/s → 单位成本（钱）。
+
+    出数规则（每一格都对应 cost.CostEstimate 里的一个事实，不在这里二次计算）：
+      * 能耗实测（`meas__`）→ J/token、tokens/s（`ks__` derived，取自实测与调用方给的 token 数）；
+      * 没给 token 数 → 单位成本的**分母**不存在 ⇒ 那几行是 n/a + `no_tokens`，
+        而"每小时多少钱"仍然给（它只需要功率与电价）；
+      * 没给价格 → 钱那几行 n/a + `no_price`，能耗数字照给。
+    这样"给一半输入也能拿到一半结论"，且缺什么一望可知（remedy 里写明加哪个开关）。
+    """
+    est = opt.cost
+    if est is None:
+        return None
+    s = Section("CostLedger")
+    cur = est.inputs.currency or "CNY"
+    src = f"NVML 能耗（{est.energy_source}）" if est.energy_source else "NVML 能耗"
+
+    # ---- ① 能耗（实测）----
+    if est.has_energy:
+        s.add(Metric.measured("meas__window_energy_j", round(est.window_energy_j, 3), "J",
+                              source=src, resolution=est.energy_resolution,
+                              note="；".join(est.notes) if est.notes else ""))
+        if est.energy_w is not None:
+            s.add(Metric.measured("meas__window_power_mean_w", round(est.energy_w, 1), "W",
+                                  source=src, resolution=est.energy_resolution,
+                                  note="窗口内平均功耗（能量 ÷ 窗口长度）；"
+                                       "不是瞬时峰值功耗"))
+    else:
+        _cost_unavailable(s, "meas__window_energy_j", est.energy_refusal, "J",
+                          source="NVML 功率/能量读数")
+
+    body_note = ("；".join(est.notes) if est.notes else "")
+
+    # ---- ② 量：窗口内 steps 与 token 数 ----
+    if est.steps_in_window is not None:
+        s.add(Metric.derived("ks__steps_in_window", round(est.steps_in_window, 3), "",
+                             source="窗口内等效 launch 数（按 launch 时间区间与采样窗口重叠加权）",
+                             note="单位成本的分母：只有窗口对齐时才算得出来"))
+    elif est.steps_refusal is not None:
+        _cost_unavailable(s, "ks__steps_in_window", est.steps_refusal,
+                          source="窗口/launch 时间区间对齐")
+    if est.tokens_total is not None:
+        s.add(Metric.derived("ks__tokens_in_window", round(est.tokens_total, 1), "token",
+                             source=f"--ks-tokens {est.inputs.tokens_per_step:g} × 窗口内 "
+                                    f"{est.steps_in_window:g} step",
+                             note="token 数由调用方给出（我们不知道你的 step 装了多少 token）"))
+    elif est.tokens_refusal is not None:
+        _cost_unavailable(s, "ks__tokens_in_window", est.tokens_refusal, "token",
+                          source="--ks-tokens")
+    if est.tokens_per_s is not None:
+        s.add(Metric.derived("ks__tokens_per_s", round(est.tokens_per_s, 1), "token/s",
+                             source="窗口内 token 数 ÷ 窗口秒数", note=body_note))
+    elif est.tokens_refusal is not None:
+        _cost_unavailable(s, "ks__tokens_per_s", est.tokens_refusal, "token/s",
+                          source="--ks-tokens + 窗口对齐的 launch 数")
+    if est.j_per_token is not None:
+        s.add(Metric.derived("ks__j_per_token", float(f"{est.j_per_token:.4g}"), "J/token",
+                             source=f"窗口能耗 ÷ 窗口内 token 数（{src}）",
+                             resolution=f"由 {est.energy_resolution} 与 token 数共同决定",
+                             note=body_note))
+    elif est.tokens_refusal is not None:
+        _cost_unavailable(s, "ks__j_per_token", est.tokens_refusal, "J/token",
+                          source="窗口能耗 ÷ token 数")
+
+    # ---- ③ 钱：两种载体 ----
+    if est.cost_per_hour is not None:
+        comp = []
+        if est.cost_per_hour_energy is not None:
+            comp.append(f"电费 {est.cost_per_hour_energy:.3g}（{est.inputs.price_per_kwh:g}/{cur}/kWh）")
+        if est.cost_per_hour_rental is not None:
+            comp.append(f"租约 {est.cost_per_hour_rental:.3g}（{est.inputs.price_per_hour:g}/{cur}/h）")
+        s.add(Metric.derived("ks__cost_per_hour", round(est.cost_per_hour, 4), f"{cur}/h",
+                             source=" + ".join(comp),
+                             note="两种载体是不同口径的成本：分别可查，各自给就各自算，"
+                                  "都给才相加（不做汇率换算）"))
+        if est.cost_per_hour_energy is not None:
+            s.add(Metric.derived("ks__cost_per_hour_energy", round(est.cost_per_hour_energy, 4),
+                                 f"{cur}/h", source=f"窗口平均功耗 × {est.inputs.price_per_kwh:g} {cur}/kWh"))
+        if est.cost_per_hour_rental is not None:
+            s.add(Metric.derived("ks__cost_per_hour_rental", round(est.cost_per_hour_rental, 4),
+                                 f"{cur}/h", source=f"--ks-price-per-hour {est.inputs.price_per_hour:g}"))
+    else:
+        ref = est.price_refusal or est.energy_refusal
+        if ref is not None:
+            _cost_unavailable(s, "ks__cost_per_hour", ref, f"{cur}/h",
+                              source="--ks-price-per-kwh / --ks-price-per-hour")
+
+    if est.cost_per_mtok is not None:
+        s.add(Metric.derived("ks__cost_per_mtok", float(f"{est.cost_per_mtok:.4g}"),
+                             f"{cur}/Mtoken",
+                             source=f"每小时成本 ÷ 每小时 token 数（{est.tokens_per_s:,.0f} token/s）",
+                             note="= ks__cost_per_hour × 1e6 ÷ (tokens/s × 3600)；"
+                                  "拆分见下面两行（电费/租约）"))
+    else:
+        ref = est.price_refusal or est.tokens_refusal
+        if ref is not None:
+            _cost_unavailable(s, "ks__cost_per_mtok", ref, f"{cur}/Mtoken",
+                              source="每小时成本 ÷ tokens/s")
+    for name, value, label in (("ks__cost_per_mtok_energy", est.cost_per_mtok_energy, "电费口径"),
+                               ("ks__cost_per_mtok_rental", est.cost_per_mtok_rental, "租约口径")):
+        if value is not None:
+            s.add(Metric.derived(name, float(f"{value:.4g}"), f"{cur}/Mtoken",
+                                 source=f"{label}；只含这一种载体"))
+    return s
+
+
+def build_cost_attribution_section(opt: BuildOptions, kr) -> Section | None:
+    """按 kernel 归因的成本账（代理口径：窗口内时间占比 × 能耗）。
+
+    `est__` + estimated 是刻意的：能耗计在**设备**上，按时间占比分摊是假设
+    （窗口内功率大致均匀）。名字与出处一起把这件事说清楚，读者不会把它当计数器读数。
+    """
+    est = opt.cost
+    if est is None or kr is None or not est.has_energy:
+        return None
+    if est.kernel_share_pct is None or est.kernel_energy_j is None:
+        return None
+    cur = est.inputs.currency or "CNY"
+    s = Section("CostLedger")
+    note = (f"分摊口径：该 kernel 占窗口时间 {est.kernel_share_pct:.1f}% × 窗口能耗 "
+            f"{est.window_energy_j:.1f} J。**代理口径**：它假设窗口内功率大致均匀，"
+            f"所以是方向性的，不是计数器读数"
+            + ("；已按 --ks-idle-power-w 扣除空闲能耗"
+               if est.inputs.idle_power_w is not None else
+               "；未扣空闲功耗，空闲占比较高时这一项会偏大（可用 --ks-idle-power-w 扣）"))
+    s.add(Metric.estimated("est__kernel_energy_share_pct", round(est.kernel_share_pct, 1), "%",
+                           source="窗口内该 kernel 的时间占比（CUPTI activity）", note=note))
+    s.add(Metric.estimated("est__kernel_energy_j",
+                           float(f"{est.kernel_energy_j:.4g}"), "J",
+                           source=f"窗口能耗 × 时间占比（窗口合计 {est.window_energy_j:.1f} J）",
+                           note="整个 kernel（同名全部 launch）在窗口内的能耗分摊"))
+    if est.kernel_energy_per_launch_j is not None:
+        s.add(Metric.estimated("est__kernel_energy_per_launch_j",
+                               float(f"{est.kernel_energy_per_launch_j:.4g}"), "J",
+                               source="上者 ÷ 窗口内等效 launch 数",
+                               note="单次 launch 的分摊能耗"))
+    if est.kernel_cost_per_hour is not None:
+        s.add(Metric.estimated("est__kernel_cost_per_hour",
+                               float(f"{est.kernel_cost_per_hour:.4g}"), f"{cur}/h",
+                               source="ks__cost_per_hour × 时间占比",
+                               note="这个 kernel 按时间占比分摊到的每小时成本；"
+                                    "优化它省下的钱不会超过这个数"))
     return s
 
 

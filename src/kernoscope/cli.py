@@ -42,6 +42,7 @@ from .refusals import Refusal, RefusalCode
 from .report import DeviceInfo, KernelLaunch, KernelReport, Report
 from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
+                       build_cost_attribution_section, build_cost_section,
                        build_device_kernel, build_dram_section, build_kernel_sections,
                        counter_section_reason, requested_sections)
 
@@ -182,6 +183,19 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-selfcheck", default=None,
                    help="本机自检文件（kernoscope selftest 产出）：给判词带上误差带与 MDD，"
                         "diff 才能区分真改进与噪声")
+    # ---- 成本账（C1）：把秒换算成钱与量。没给的输入我们拒绝，绝不按"典型值"猜 ----
+    k.add_argument("--ks-tokens", type=float, default=None,
+                   help="每次迭代(step)处理的 token 数（推理=一次 forward 的 token，"
+                        "训练=一步的 token）：给了才有 tokens/s 与 ¥/Mtoken")
+    k.add_argument("--ks-price-per-kwh", type=float, default=None,
+                   help="电费口径：每 kWh 多少钱（能量实测，乘价格得钱）")
+    k.add_argument("--ks-price-per-hour", type=float, default=None,
+                   help="租约口径：这台机器每小时多少钱（与电费是两种载体，都给才相加）")
+    k.add_argument("--ks-idle-power-w", type=float, default=None,
+                   help="空闲功耗(W)：分摊到 kernel 前先把非计算能耗扣掉（不给则不扣，"
+                        "空闲占比高时归因会偏大）")
+    k.add_argument("--ks-currency", default="CNY",
+                   help="价格单位标签（默认 CNY；我们只做标签，不做汇率换算）")
     k.add_argument("--strict", action="store_true",
                    help="请求了不可得数据时 exit 2（CI 卡门）；空转选项也视为错误")
 
@@ -714,6 +728,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     if issue_hist is not None and not clock_mhz:
         log("warn: 没有 SM 时钟读数（NVML 被关掉？）：发射槽上界算不出来，"
             "加 --ks-clock-mhz <MHz> 或用 --ks-no-nvml 之外的方式采样")
+    # ---------- 成本账（C1）：窗口能耗 → 量 → 钱 ----------
+    # 口径与 DRAM 账共用同一个积分窗口（dram_est.window_t0/t1/window_used_s），
+    # 否则"窗口内字节"和"窗口内能耗"会各自裁一次窗口，两个数说的不是同一段负载。
+    from .analyze.cost import CostInputs, estimate as estimate_cost
+
+    cost_inputs = CostInputs(tokens_per_step=args.ks_tokens,
+                             price_per_kwh=args.ks_price_per_kwh,
+                             price_per_hour=args.ks_price_per_hour,
+                             idle_power_w=args.ks_idle_power_w,
+                             currency=args.ks_currency)
+    cost_est = estimate_cost(
+        sampler.result.samples,
+        inputs=cost_inputs,
+        energy_j=sampler.result.energy_j,
+        sampler_duration_s=sampler.result.duration_s,
+        window_s=(dram_est.window_used_s or wall_ns / 1e9),
+        window_t0=dram_est.window_t0,
+        window_t1=dram_est.window_t1,
+        steps_in_window=dram_est.launches_in_window,
+    )
+    if cost_est.window_energy_j is not None:
+        log(f"cost: 窗口能耗 {cost_est.window_energy_j:.1f} J"
+            f"（{cost_est.energy_source}）"
+            + (f"；{cost_est.tokens_per_s:,.0f} token/s、"
+               f"{cost_est.j_per_token:.3g} J/token" if cost_est.tokens_per_s else "")
+            + (f"；{cost_inputs.currency} {cost_est.cost_per_mtok:.3g}/Mtoken"
+               if cost_est.cost_per_mtok is not None else ""))
+    elif not args.quiet:
+        log(f"cost: 能耗不给数（{cost_est.energy_refusal.message if cost_est.energy_refusal else '未知原因'}）")
+
     opt = BuildOptions(
         set_name=args.set_name,
         sections=list(args.section),
@@ -731,6 +775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         peak_source=peak_source,
         ledger_basis=args.ks_ledger_basis,
         dram=dram_est,
+        cost=cost_est,
         memtrace=memtrace_stats,
         issue_hist=issue_hist,
         clock_mhz=clock_mhz,
@@ -755,13 +800,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         kr = KernelReport(name, launch_count=len(ls), alias=alias,
                           launches=sorted(ls, key=lambda x: x.start_ns))
         kr.sections = build_kernel_sections(kr, opt)
+        # 成本归因（C1）：按该 kernel 在窗口内的时间占比分摊窗口能耗与钱。
+        # 份额的分母是**参与积分的窗口**（与能耗同一个窗口），不是整段 wall。
+        if cost_est.has_energy and cost_est.window_s > 0:
+            from .analyze.cost import attribute as attribute_cost
+
+            share = min(100.0, 100.0 * kr.total_ns / (cost_est.window_s * 1e9))
+            if share > 0:
+                opt.cost = attribute_cost(cost_est, share, steps=kr.launch_count or None)
+                attr_sec = build_cost_attribution_section(opt, kr)
+                if attr_sec is not None:
+                    kr.sections.append(attr_sec)
         rep.kernels.append(kr)
+    opt.cost = cost_est
     dev_kr = KernelReport("(device)", launch_count=0)
     dev_sections = [build_device_kernel(opt)]
     if "DramTraffic" in requested_sections(opt):
         dram_sec = build_dram_section(opt)
         if dram_sec is not None:
             dev_sections.append(dram_sec)
+    cost_sec = build_cost_section(opt)
+    if cost_sec is not None:
+        dev_sections.append(cost_sec)
     dev_kr.sections = dev_sections
     rep.kernels.append(dev_kr)
 
@@ -1054,6 +1114,22 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
     if getattr(args, "page", "details") == "source":
         problems.append("--page source asks for SASS/source line correlation, which this tool "
                         "does not implement (use --page raw to see each metric's source field)")
+    # 5) 成本账（C1）：**给了输入就必须给出对应的数** —— 门禁要能变红，否则
+    #    "成本账"就成了一个永远说"稍后再算"的装饰。两类输入各查各的输出。
+    def _cost_missing(name: str) -> bool:
+        return name not in _collect_metric_names(rep) or name in unavailable_names
+
+    if getattr(args, "ks_price_per_kwh", None) or getattr(args, "ks_price_per_hour", None):
+        if _cost_missing("ks__cost_per_hour"):
+            problems.append(
+                "cost ledger cannot price this run: "
+                + (reason_by_name.get("ks__cost_per_hour") or "未产出 ks__cost_per_hour"))
+    if getattr(args, "ks_tokens", None):
+        for name in ("ks__tokens_per_s", "ks__cost_per_mtok"):
+            if _cost_missing(name):
+                problems.append(
+                    f"cost ledger cannot produce {name} with --ks-tokens given: "
+                    + (reason_by_name.get(name) or f"{name} 未产出"))
     return problems
 
 

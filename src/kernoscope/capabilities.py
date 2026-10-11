@@ -122,6 +122,10 @@ QUESTIONS: tuple[Question, ...] = (
              ("ks__theoretical_occupancy_pct", "ks__blocks_per_sm")),
     Question("device_busy", "这段时间 GPU 显存子系统有多忙（实测）", 1,
              ("meas__nvml_mem_busy_mean_pct", "meas__device_energy_j")),
+    Question("cost_per_token", "这次推理/训练的单位成本（每百万 token 多少钱 / 每小时多少钱）", 1,
+             ("ks__cost_per_mtok", "ks__tokens_per_s", "ks__j_per_token"),
+             alt="只给能耗口径（--ks-tokens 给量即得 J/token）；给价格才换算成钱，"
+                 "电费与租约两种载体分别报"),
     Question("dram_bytes", "DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；"
                           "有 NVBit 时首选轨迹口径，精度高 4 个数量级）", 1,
              ("est__dram_bytes_total", "ks__sampler_window_coverage_pct"),
@@ -431,6 +435,16 @@ def _q_device_busy(env: Env):
     return _need(env, gpu=True, nvml=True)
 
 
+def _q_cost_per_token(env: Env):
+    """成本账只依赖两件东西：GPU 的功率读数和调用方给的 token/价格。
+
+    所以它在 tier 1（零标定、零计数器、零插桩）：这是**唯一**一条不需要任何
+    "我们替你测什么"就能回答"这次花了多少钱"的路 —— 有 NVML 就有能耗，有你的
+    token 数与价格就有单位成本。缺的是输入，不是环境（因此 remedy 指向开关，不是安装）。
+    """
+    return _need(env, gpu=True, nvml=True)
+
+
 def _q_dram_bytes(env: Env):
     state, why, ref = _need(env, gpu=True, nvml=True)
     if state != STATE_AVAILABLE:
@@ -492,6 +506,7 @@ CHECKS: Checks = {
     "static_resources": _q_static_resources,
     "theoretical_occupancy": _q_theoretical_occupancy,
     "device_busy": _q_device_busy,
+    "cost_per_token": _q_cost_per_token,
     "dram_bytes": _q_dram_bytes,
     "roofline": _q_roofline,
     "achieved_occupancy": _q_achieved_occupancy,

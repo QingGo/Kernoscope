@@ -73,6 +73,9 @@ PREMISE_LABELS: dict[str, str] = {
     "matched_kernel_kernel_share_pct": "被匹配 kernel 是否占窗口 kernel 时间 ≥95%",
     "trace_vs_nvml_pct": "轨迹口径 / NVML 口径",
     "over_peak": "达成值是否超过本机实测峰值",
+    # 成本账（C1）：结论的两个分母，必须随结论一起出现
+    "window_energy_j": "窗口内实测能耗（NVML 功率积分/能量累加器）",
+    "tokens_per_s": "窗口内吞吐（调用方给的 token 数 ÷ 窗口秒数）",
 }
 
 
@@ -482,6 +485,82 @@ def _verdict_l2(rep: Any) -> Verdict | None:
         claim="；".join(bits))
 
 
+def _verdict_cost(rep: Any) -> Verdict | None:
+    """成本判词（C1）—— 这个工具存在的理由：把秒换算成钱。
+
+    三种状态都要能出现，且**拒绝本身是输出**：
+      * 有 token 数 + 价格 → 给 ¥/Mtoken（外加 token/s 与 J/token）；
+      * 只有一半输入     → 给算得出来的那一半（例如只要功率与电价就有 ¥/h），
+                            另一半用带 code 的拒绝说清楚该加哪个开关；
+      * 都没有           → refused + remedy（`no_tokens` / `no_price` / `no_energy`），
+                            agent 据此知道下一步该传什么，而不是猜。
+    """
+    per_mtok = find_metric(rep, "ks__cost_per_mtok")
+    per_hour = find_metric(rep, "ks__cost_per_hour")
+    if per_mtok is None and per_hour is None:
+        return None
+    tokens_s = metric_value(rep, "ks__tokens_per_s")
+    j_per_token = metric_value(rep, "ks__j_per_token")
+    energy = find_metric(rep, "meas__window_energy_j")
+    kernel_cost = metric_value(rep, "est__kernel_cost_per_hour")
+    top = next((k.name for k in getattr(rep, "kernels", [])
+                if any(m.name == "est__kernel_cost_per_hour"
+                       for s in getattr(k, "sections", []) for m in s.metrics)), "")
+    premises: list[Premise] = []
+    if energy is not None and energy.value is not None:
+        premises.append(Premise("window_energy_j", round(float(energy.value), 1), unit="J"))
+    if tokens_s is not None:
+        premises.append(Premise("tokens_per_s", round(float(tokens_s), 1), unit="token/s"))
+
+    # ---- ① 单位成本可用：这是主结论 ----
+    if per_mtok is not None and per_mtok.value is not None:
+        facts: dict[str, Any] = {"per_mtok": round(float(per_mtok.value), 4),
+                                 "per_hour": (round(float(per_hour.value), 4)
+                                              if per_hour is not None and per_hour.value is not None
+                                              else None),
+                                 "tokens_s": round(float(tokens_s), 1) if tokens_s else None,
+                                 "j_per_token": (float(f"{float(j_per_token):.4g}")
+                                                 if j_per_token is not None else None)}
+        if kernel_cost is not None and top:
+            facts["top_kernel"] = _clip(top, FACT_STR_LIMIT)
+            facts["top_kernel_per_hour"] = round(float(kernel_cost), 4)
+        return Verdict(
+            id="cost_per_token", question="这次推理/训练每百万 token 花多少钱", status=OK,
+            facts=facts, value=round(float(per_mtok.value), 4), unit=per_mtok.unit,
+            provenance=_prov(rep, "ks__cost_per_mtok") or "derived", premises=premises,
+            metrics=("ks__cost_per_mtok", "ks__tokens_per_s", "meas__window_energy_j"),
+            next="改完重跑同一条命令，用 kernoscope diff 比 ks__cost_per_mtok（越小越好）；"
+                 "先说清改的是哪个 kernel（est__kernel_cost_per_hour 大的那个）",
+            claim=(f"单位成本 {float(per_mtok.value):.4g} {per_mtok.unit}"
+                   + (f"（{float(tokens_s):,.0f} token/s、{float(j_per_token):.3g} J/token）"
+                      if tokens_s and j_per_token is not None else "")))
+
+    # ---- ② 只有每小时成本：仍是有用的部分结论 ----
+    if per_hour is not None and per_hour.value is not None:
+        facts = {"per_hour": round(float(per_hour.value), 4),
+                 "tokens_s": round(float(tokens_s), 1) if tokens_s else None}
+        if kernel_cost is not None and top:
+            facts["top_kernel"] = _clip(top, FACT_STR_LIMIT)
+            facts["top_kernel_per_hour"] = round(float(kernel_cost), 4)
+        return Verdict(
+            id="cost_per_token", question="这次推理/训练每百万 token 花多少钱", status=SOFT,
+            facts=facts, value=round(float(per_hour.value), 4), unit=per_hour.unit,
+            provenance=_prov(rep, "ks__cost_per_hour") or "derived", premises=premises,
+            metrics=("ks__cost_per_hour", "meas__window_energy_j"),
+            next="想把它换算成每百万 token：补 --ks-tokens <每步 token 数>（有价格就够了）",
+            claim=f"每小时成本 {float(per_hour.value):.4g} {per_hour.unit}"
+                  "（还差每步 token 数才能给单位成本）")
+
+    # ---- ③ 给不出钱：拒绝 + 该加哪个开关 ----
+    ref_metric = next((m for m in (per_mtok, per_hour, energy)
+                       if m is not None and getattr(m, "refusal", None) is not None), None)
+    if ref_metric is None:
+        return None
+    return _refused("cost_per_token", "这次推理/训练每百万 token 花多少钱", ref_metric,
+                    premises, ("ks__cost_per_mtok", "ks__cost_per_hour",
+                               "meas__window_energy_j"))
+
+
 def _verdict_over_peak(rep: Any) -> Verdict | None:
     warn = metric_value(rep, "ks__over_peak_warning")
     if not warn:
@@ -521,6 +600,7 @@ def _verdict_static_mix(rep: Any) -> Verdict | None:
 # 有测试守它与 BUILDERS 实际能产出的 id 完全一致。
 VERDICT_IDS: tuple[str, ...] = (
     "kernel_time",
+    "cost_per_token",
     "dram_bytes",
     "dram_bytes_per_launch",
     "dram_bytes_trace",
@@ -533,9 +613,9 @@ VERDICT_IDS: tuple[str, ...] = (
     "static_mix",
 )
 
-BUILDERS = (_verdict_kernel_time, _verdict_dram_total, _verdict_per_launch, _verdict_trace,
-            _verdict_ledger, _verdict_occupancy, _verdict_roofline, _verdict_issue_slot,
-            _verdict_l2, _verdict_over_peak, _verdict_static_mix)
+BUILDERS = (_verdict_kernel_time, _verdict_cost, _verdict_dram_total, _verdict_per_launch,
+            _verdict_trace, _verdict_ledger, _verdict_occupancy, _verdict_roofline,
+            _verdict_issue_slot, _verdict_l2, _verdict_over_peak, _verdict_static_mix)
 
 
 # --------------------------------------------------------------------------
@@ -658,14 +738,17 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
           report_path: str = "") -> dict[str, Any]:
     """由 Report 组出决策包（不读文件、不跑命令，纯函数便于测试）。"""
     verdicts_all = [v for fn in BUILDERS if (v := fn(rep)) is not None]
+    # 前提降级与"物理不可能"传播必须在**截断之前**做完：它们是判词之间的**逻辑约束**
+    # （over_peak 不成立 ⇒ roofline 的达成率不可引用），而不是显示层的事。截断在前的话，
+    # over_peak 一旦被 MAX_VERDICTS 挤掉，roofline 就带着一个已被推翻的前提留在包里。
+    _downgrade_broken_premises(verdicts_all)
+    _propagate_over_peak(verdicts_all)
     verdicts = verdicts_all[:MAX_VERDICTS]
     # R-53/D10：上限截断必须**留痕** —— 否则读者（人或 agent）不知道包里少了一条，
     # 而 `cost.trimmed` 只记预算裁剪、记不到这一步（它在预算裁剪之前就发生了）。
     verdicts_more = ({"count": len(verdicts_all) - MAX_VERDICTS,
                       "ids": [v.id for v in verdicts_all[MAX_VERDICTS:]]}
                      if len(verdicts_all) > MAX_VERDICTS else None)
-    _downgrade_broken_premises(verdicts)
-    _propagate_over_peak(verdicts)
 
     band = ((selfcheck or {}).get("band") or {}).get("dram_bytes_pct")
     mdd_dram = ((selfcheck or {}).get("mdd") or {}).get("dram_bytes_pct")

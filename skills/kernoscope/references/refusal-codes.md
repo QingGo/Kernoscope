@@ -2,11 +2,11 @@
 
 # 拒绝码（`refusal.code`）参考
 
-每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；47 个 code 里 29 个带可直接执行的命令、18 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
+每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；50 个 code 里 32 个带可直接执行的命令、18 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
 **硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，
 或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。
 
-共 47 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
+共 50 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
 
 | code | 什么意思 | 怎么办 | 命令 | 代价 |
 |---|---|---|---|---|
@@ -48,6 +48,9 @@
 | `no_calibration` | 缺少本机实测峰值（未标定） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它） | `python tools/machine-profile.py --out machine-profile.json` | ≈5min |
 | `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致 | `python tools/machine-profile.py --quick` | ≈5min |
 | `no_workload` | 没有给工作量（FLOPs/bytes） | 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes | `kernoscope --ks-gemm 4096,4096,4096 -- python app.py` | ≈0 |
+| `no_tokens` | 没有给每次迭代的 token/样本数：算不出单位成本 | 给出每次迭代（step）处理的 token 数：推理填一次 forward 的 token 数，训练填一步的 token 数（packing 后的实际数）—— 有了它才有 tokens/s 与单位成本 | `kernoscope --ks-tokens 8192 -- python app.py` | ≈0 |
+| `no_price` | 没有给电价或租用价：算不出钱 | 给出价格：--ks-price-per-kwh（电费口径）或 --ks-price-per-hour（整机租约口径），两者都给就相加；币种随你给的价格，不做汇率换算 | `kernoscope --ks-tokens 8192 --ks-price-per-hour 2.5 -- python app.py` | ≈0 |
+| `no_energy` | 拿不到窗口能耗读数（NVML 能量/功率不可用） | 打开 NVML 采样（别加 --ks-no-nvml）并让稳态段长于采样周期；拿不到功率读数时能耗口径不可用，我们不按 TDP 顶替 | `kernoscope --set basic -o rep -- python bench_loop.py` | ≈0 |
 | `unknown_arch` | 未知架构，算不出上界 | 用 --ks-sm-count 指定 SM 数，或报告里带上 compute capability：未知架构算不出 occupancy 上界，我们不猜 |  | 需人工 |
 | `no_selftest_band` | 没有本机误差带与 MDD | 跑一次 selftest 得到本机误差带与最小可分辨差异（MDD）；没有它就无法判断两次运行的差别是真差别还是噪声 | `kernoscope selftest --out machine-selfcheck.json` | ≈2min |
 | `mdd_unknown` | 误差带里没有这个指标的 MDD | 误差带里没有这个指标（MDD 按指标族给）：用 --metric 指定有 MDD 的指标，或重跑 selftest 覆盖该负载族 | `kernoscope selftest --out machine-selfcheck.json` | ≈2min |

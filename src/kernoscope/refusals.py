@@ -70,6 +70,9 @@ class RefusalCode(str, Enum):
     NO_CALIBRATION = "no_calibration"          # 缺本机实测峰值
     CALIBRATION_CALIBER_MISMATCH = "calibration_caliber_mismatch"  # 标定口径不可比
     NO_WORKLOAD = "no_workload"                # 没给 FLOPs/bytes，roofline 无输入
+    NO_TOKENS = "no_tokens"                    # 没给每次迭代的 token/样本数 -> 算不出单位成本
+    NO_PRICE = "no_price"                      # 没给电价/租用价 -> 算不出钱
+    NO_ENERGY = "no_energy"                    # 拿不到窗口能耗读数（NVML 功率/能量不可用）
     UNKNOWN_ARCH = "unknown_arch"              # 架构不在表里，算不出上界
     NO_SELFTEST_BAND = "no_selftest_band"      # 没跑 selftest，没有本机误差带/MDD
     MDD_UNKNOWN = "mdd_unknown"                # 误差带里没有这个指标的 MDD
@@ -122,6 +125,9 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NO_CALIBRATION: "缺少本机实测峰值（未标定）",
     RefusalCode.CALIBRATION_CALIBER_MISMATCH: "标定口径与本次测量不可比",
     RefusalCode.NO_WORKLOAD: "没有给工作量（FLOPs/bytes）",
+    RefusalCode.NO_TOKENS: "没有给每次迭代的 token/样本数：算不出单位成本",
+    RefusalCode.NO_PRICE: "没有给电价或租用价：算不出钱",
+    RefusalCode.NO_ENERGY: "拿不到窗口能耗读数（NVML 能量/功率不可用）",
     RefusalCode.UNKNOWN_ARCH: "未知架构，算不出上界",
     RefusalCode.NO_SELFTEST_BAND: "没有本机误差带与 MDD",
     RefusalCode.MDD_UNKNOWN: "误差带里没有这个指标的 MDD",
@@ -329,6 +335,21 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes",
         command="kernoscope --ks-gemm 4096,4096,4096 -- python app.py", cost_s=0.0,
         then_answers=("roofline",)),
+    RefusalCode.NO_TOKENS: Remedy(
+        "给出每次迭代（step）处理的 token 数：推理填一次 forward 的 token 数，"
+        "训练填一步的 token 数（packing 后的实际数）—— 有了它才有 tokens/s 与单位成本",
+        command="kernoscope --ks-tokens 8192 -- python app.py", cost_s=0.0,
+        then_answers=("cost_per_token",)),
+    RefusalCode.NO_PRICE: Remedy(
+        "给出价格：--ks-price-per-kwh（电费口径）或 --ks-price-per-hour（整机租约口径），"
+        "两者都给就相加；币种随你给的价格，不做汇率换算",
+        command="kernoscope --ks-tokens 8192 --ks-price-per-hour 2.5 -- python app.py",
+        cost_s=0.0, then_answers=("cost_per_token",)),
+    RefusalCode.NO_ENERGY: Remedy(
+        "打开 NVML 采样（别加 --ks-no-nvml）并让稳态段长于采样周期；"
+        "拿不到功率读数时能耗口径不可用，我们不按 TDP 顶替",
+        command="kernoscope --set basic -o rep -- python bench_loop.py",
+        cost_s=0.0, then_answers=("cost_per_token",)),
     RefusalCode.UNKNOWN_ARCH: Remedy(
         "用 --ks-sm-count 指定 SM 数，或报告里带上 compute capability："
         "未知架构算不出 occupancy 上界，我们不猜",

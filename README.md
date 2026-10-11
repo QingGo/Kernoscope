@@ -193,8 +193,9 @@ ncu 的硬件计数器在受限环境里拿不到，但很多读数可以用**�
 | L1/L2 命中率、sectors/request、coalescing | `l1tex__t_sector_hit_rate.pct` | NVBit 访存轨迹：`meas__sectors_per_request`（直接计数）+ **模型**命中率（明确标注上界口径） | `measured` / `estimated` |
 | stall 细分、发射槽利用率 | `SchedulerStats` / `WarpStateStats` | `--ks-instr-hist`（NVBit 动态指令计数）→ `est__issue_slot_utilization_pct`、`est__stall_direction` | `estimated`（上界 + 方向） |
 | 精确 L2/DRAM 字节 | `lts__*` / `dram__*` | 只报 `n/a` + 原因 | `unavailable` |
-| 每 kernel 能耗 | （ncu 没有） | NVML 能量累加器 → `meas__device_energy_j` | `measured` |
-| CI 门禁 | —— | `--strict` → exit 2（覆盖 set/section/账本裁决行/空转开关） | —— |
+| 每 kernel 能耗 | （ncu 没有） | NVML 能量累加器 → `meas__device_energy_j`；窗口内功率积分 → `meas__window_energy_j` | `measured` |
+| **单位成本（每百万 token 多少钱）** | （ncu 没有） | `--ks-tokens` + `--ks-price-per-kwh` / `--ks-price-per-hour` → `ks__cost_per_mtok`、`ks__tokens_per_s`、`ks__j_per_token`；按 kernel 归因 `est__kernel_cost_per_hour` | `measured` / `derived` / `estimated` |
+| CI 门禁 | —— | `--strict` → exit 2（覆盖 set/section/账本裁决行/空转开关/成本输入） | —— |
 | 时间线可视化 | `.ncu-rep` + UI | Perfetto JSON，零安装 | `exact` |
 
 ---
@@ -452,6 +453,38 @@ kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o 
 
 所以：`-c <N>` 限流每个 kernel 只报 N 次、`--ks-json-no-launches` 让 JSON 不带逐 launch 数组、
 逐 launch 明细改用 `--launch-csv` 单独出表；报告写盘后 stderr 会打印实际体积与限流建议。
+
+---
+
+## 单位成本：每百万 token 多少钱（不需要计数器）
+
+优化算子是为了**降本**。所以除了"快了多少毫秒"，本工具直接给钱的维度：
+
+```bash
+kernoscope --set basic --ks-tokens 8192 --ks-price-per-kwh 0.6 --ks-price-per-hour 2.5 \
+           -k regex:my_kernel -o rep -- python serve.py
+```
+
+`--ks-tokens` 是你**每次迭代（step）处理的 token 数**（推理=一次 forward，训练=一步）；
+`--ks-price-per-kwh` 是电价口径，`--ks-price-per-hour` 是整机租约口径 —— 两种**载体**分别报、
+都给才相加，所以 `ks__cost_per_mtok` 永远能拆回它的组成部分。产出：
+
+| 指标 | 含义 | 出处 |
+|---|---|---|
+| `meas__window_energy_j` / `meas__window_power_mean_w` | 窗口内能耗与平均功耗（NVML 功率读数在窗口内梯形积分） | `measured` |
+| `ks__tokens_per_s`、`ks__steps_in_window` | 窗口内吞吐与等效 step 数（分母与能耗**同一个窗口**） | `derived` |
+| `ks__j_per_token` | 每 token 焦耳（能耗口径，不需要价格） | `derived` |
+| `ks__cost_per_hour`、`ks__cost_per_mtok`（及 `_energy` / `_rental` 分量） | 钱 | `derived` |
+| `est__kernel_energy_share_pct`、`est__kernel_energy_per_launch_j`、`est__kernel_cost_per_hour` | 按 kernel 归因（**代理口径**：窗口内时间占比 × 能耗） | `estimated` |
+
+**给一半输入就拿一半结论，缺什么一望可知**：只有功率+电价 → 给 `ks__cost_per_hour`；
+再加 `--ks-tokens` → 给单位成本；不给 token 数就**拒绝**给单位成本（`no_tokens`），
+不按"典型 8k"猜；不给价格就拒绝给钱（`no_price`），能耗照给；窗口短于 0.5 s 直接
+拒绝给能耗（`below_resolution`），不按 TDP 顶替。按 kernel 的归因是**方向性**的：
+它假设窗口内功率大致均匀，`--ks-idle-power-w` 可以先把空闲功耗扣掉再分摊。
+
+成本判词会进决策包（`cost_per_token`）：有数就是 `ok`，缺输入就是 `refused` + 带 code 的
+处置（agent 据此知道该补哪个开关，而不是猜）。
 
 ---
 

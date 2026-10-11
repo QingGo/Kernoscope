@@ -5,7 +5,7 @@
 
 要看你**这台机器**的实际状态，请现场跑 `kernoscope capabilities --json`（机器可读）或 `kernoscope capabilities`（一屏）。
 
-<!-- question ids（与 kernoscope.capabilities.QUESTIONS 同源）: kernel_time, launch_configs, static_resources, theoretical_occupancy, device_busy, dram_bytes, roofline, achieved_occupancy, dram_bytes_trace, issue_slot, l2_locality, static_mix, stall_breakdown, exact_dram, pipe_utilization, nvlink -->
+<!-- question ids（与 kernoscope.capabilities.QUESTIONS 同源）: kernel_time, launch_configs, static_resources, theoretical_occupancy, device_busy, cost_per_token, dram_bytes, roofline, achieved_occupancy, dram_bytes_trace, issue_slot, l2_locality, static_mix, stall_breakdown, exact_dram, pipe_utilization, nvlink -->
 
 ## 三态怎么读
 
@@ -38,6 +38,7 @@
 | `static_resources` | 静态寄存器/共享内存，以及谁是 occupancy 限制因素 | 不答 | 不答 | 能答 | 能答 | 能答 |
 | `theoretical_occupancy` | occupancy 理论上界是多少 | 不答 | 不答 | 能答 | 能答 | 能答 |
 | `device_busy` | 这段时间 GPU 显存子系统有多忙（实测） | 不答 | 能答 | 能答 | 能答 | 能答 |
+| `cost_per_token` | 这次推理/训练的单位成本（每百万 token 多少钱 / 每小时多少钱） | 不答 | 能答 | 能答 | 能答 | 能答 |
 | `dram_bytes` | DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级） | 不答 | 更弱 | 能答 | 能答 | 能答 |
 | `roofline` | 离 roofline 多远、compute 还是 memory bound | 不答 | 更弱 | 能答 | 能答 | 能答 |
 | `achieved_occupancy` | 实际达到的 occupancy（不是上界） | 不答 | 不答 | 不答 | 能答 | 能答 |
@@ -82,6 +83,7 @@
 | `static_resources` — 静态寄存器/共享内存，以及谁是 occupancy 限制因素 | yes | 2 | `ks__registers_used_for_occupancy`, `ks__occupancy_limiter` |
 | `theoretical_occupancy` — occupancy 理论上界是多少 | yes | 2 | `ks__theoretical_occupancy_pct`, `ks__blocks_per_sm` |
 | `device_busy` — 这段时间 GPU 显存子系统有多忙（实测） | yes | 1 | `meas__nvml_mem_busy_mean_pct`, `meas__device_energy_j` |
+| `cost_per_token` — 这次推理/训练的单位成本（每百万 token 多少钱 / 每小时多少钱） | yes | 1 | `ks__cost_per_mtok`, `ks__tokens_per_s`, `ks__j_per_token` |
 | `dram_bytes` — DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级） | yes | 1 | `est__dram_bytes_total`, `ks__sampler_window_coverage_pct` |
 | `roofline` — 离 roofline 多远、compute 还是 memory bound | yes | 1 | `est__achieved_gbs`, `est__bound`, `est__roofline_efficiency_pct` |
 | `achieved_occupancy` — 实际达到的 occupancy（不是上界） | yes | 3 | `meas__achieved_occupancy_pct` |

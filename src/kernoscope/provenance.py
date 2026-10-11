@@ -242,8 +242,8 @@ class Metric:
                       resolution=resolution)
 
     @staticmethod
-    def unavailable(name: str, reason: str, source: str = "",
-                    resolution: str = "", *, code: "RefusalCode",
+    def unavailable(name: str, reason: str, unit: str = "", source: str = "",
+                    resolution: str = "", note: str = "", *, code: "RefusalCode",
                     observed: dict[str, object] | None = None,
                     threshold: dict[str, object] | None = None,
                     remedy: "Remedy | None" = None,
@@ -257,8 +257,8 @@ class Metric:
         """
         ref = Refusal(code=code, message=reason, observed=dict(observed or {}),
                       threshold=dict(threshold or {}), remedy=remedy, severity=severity)
-        return Metric(name, None, Provenance.UNAVAILABLE, source=source, reason=reason,
-                      resolution=resolution, refusal=ref)
+        return Metric(name, None, Provenance.UNAVAILABLE, unit=unit, source=source, reason=reason,
+                      note=note, resolution=resolution, refusal=ref)
 
     # ---- 展示 ----
     def render_value(self) -> str:

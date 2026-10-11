@@ -35,6 +35,8 @@ ROUTES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("占用率", "occupancy", "并行度"), "theoretical_occupancy"),
     (("显存忙", "device busy", "利用率", "utilization", "功耗", "能耗", "energy", "joule"),
      "device_busy"),
+    (("成本", "花多少", "多少钱", "降本", "省钱", "每百万 token", "token 成本", "cost",
+      "price", "token/s", "tokens per second", "单位成本"), "cost_per_token"),
     (("dram", "带宽", "字节", "bytes", "搬了多少", "流量", "memory bound", "访存"),
      "dram_bytes"),
     (("roofline", "多远", "上限", "算力", "tflops", "compute bound"), "roofline"),
@@ -58,6 +60,7 @@ FAILURE_HINTS: dict[str, tuple[str, ...]] = {
     "static_resources": ("no_static_input", "cuobjdump_missing"),
     "theoretical_occupancy": ("unknown_arch", "no_static_input"),
     "device_busy": ("no_nvml", "no_nvml_samples", "no_gpu"),
+    "cost_per_token": ("no_energy", "no_tokens", "no_price", "below_resolution"),
     "dram_bytes": ("share_too_low", "coverage_too_low", "below_resolution", "no_calibration"),
     "roofline": ("no_workload", "no_calibration", "calibration_caliber_mismatch"),
     "achieved_occupancy": ("no_occupancy_probe", "unknown_arch"),
@@ -79,6 +82,9 @@ COMMANDS: dict[str, str] = {
     "static_resources": "kernoscope --set basic --ks-cubin <kernel.cubin> -o rep（不需要 GPU）",
     "theoretical_occupancy": "kernoscope occupancy --from <occupancy-records.txt> --json",
     "device_busy": "kernoscope --set basic -o rep -- <你的命令>（只要有 NVML）",
+    "cost_per_token": "kernoscope --set basic --ks-tokens <每步 token 数> "
+                      "--ks-price-per-kwh <元/kWh> --ks-price-per-hour <元/小时> "
+                      "-o rep -- <你的命令>（价格给哪个就算哪个载体）",
     "dram_bytes": "kernoscope --set basic --ks-calibration machine-profile.json "
                   "--ks-ledger-mb <每次 launch 的 MB> --ks-window auto -o rep -- <你的命令>",
     "roofline": "kernoscope --set basic --ks-gemm 4096,4096,4096 --ks-dtype bf16 "
@@ -100,6 +106,9 @@ COMMANDS: dict[str, str] = {
 
 # 口径选择的**决策规则**（与 README 的口径选择表、SKILL frontmatter 同源，写在一处）
 CALIBER_NOTE = {
+    "cost_per_token": "能耗是**实测**（NVML 功率窗口积分）；token/价格由你给 —— 没给就拒绝给"
+                      "那一半，不按典型值猜。电费与租约是两种载体，分别报、都给才相加。"
+                      "按 kernel 的归因是时间占比代理（est__），窗口功率越均匀越准",
     "dram_bytes": "绝对字节：**有 NVBit 就用轨迹口径**（地址算术 ≈ −0.0001%）；"
                   "没有就走 NVML 代理（−4%~+13% 带内，小 kernel/常驻 L2 会被明确拒绝）",
     "dram_bytes_trace": "轨迹口径是绝对字节的**首选**；它要求 NVBit 外挂与足够磁盘（采集体积 ∝ 流量）",

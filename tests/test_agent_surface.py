@@ -168,6 +168,11 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
         "est__stall_direction": "latency", "est__l2_hit_rate_pct": 66.7,
         "est__working_set_bytes": 3.4e7, "ks__over_peak_warning": 1.0,
         "ks__static_sass_instructions": 1234,
+        # 成本账（C1）：单位成本是主线判词，替身必须能产出它，否则"判词目录与实际一致"
+        # 这条测试会因为替身缺字段而**假绿**（漏掉 cost_per_token）。
+        "ks__cost_per_mtok": 12.5, "ks__cost_per_hour": 3.25,
+        "ks__tokens_per_s": 1.2e4, "ks__j_per_token": 0.35,
+        "meas__window_energy_j": 4200.0, "est__kernel_cost_per_hour": 2.1,
     }
 
     class FakeMetric:
@@ -177,6 +182,7 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
             # 与真 Metric 同构的字段：R-51 之后 packet 会读 unit 做字节换算，
             # 这个替身少了它就会炸 —— 替身与真类型不一致时，测的是替身不是产品
             self.unit = "B"
+            self.refusal = None
 
     monkeypatch.setattr(pk, "find_metric", lambda rep, name: FakeMetric(name, values.get(name)))
     monkeypatch.setattr(pk, "metric_value", lambda rep, name: values.get(name))

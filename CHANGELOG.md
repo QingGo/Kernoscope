@@ -123,6 +123,30 @@
   口径决策规则（有 NVBit 走轨迹、否则走代理）跟着路由一起输出，避免 agent 自己猜。
 - `route` **只输出计划，不跑任何测量**（有测试守着它的实现里不出现采集调用）。
 
+### 单位成本（C1）
+
+- 新增主命令行开关：`--ks-tokens <每步 token 数>`、`--ks-price-per-kwh <电价>`、
+  `--ks-price-per-hour <租约价>`、`--ks-idle-power-w <W>`、`--ks-currency <标签>`。
+  产出新 section **`CostLedger`**：`meas__window_energy_j` / `meas__window_power_mean_w`
+  （实测）→ `ks__tokens_per_s`、`ks__j_per_token`、`ks__cost_per_hour`、`ks__cost_per_mtok`
+  （及 `_energy` / `_rental` 两个载体分量，`derived`）→ 按 kernel 归因
+  `est__kernel_energy_share_pct` / `est__kernel_energy_per_launch_j` / `est__kernel_cost_per_hour`
+  （`estimated`，代理口径）。能耗口径与 DRAM 账**共用同一个积分窗口**，所以"窗口内字节"
+  与"窗口内能耗"说的是同一段负载。
+- 新增三个拒绝码（含 remedy）：`no_tokens`（缺每步 token 数）、`no_price`（缺价格）、
+  `no_energy`（拿不到功率/能量读数）。**给一半输入只给一半结论**：缺 token 数时
+  `ks__cost_per_hour` 照给、单位成本报 `n/a` + `no_tokens`；缺价格时能耗与 J/token 照给。
+  窗口短于 0.5 s 用 `below_resolution` 拒绝给能耗（不按 TDP 顶替）。
+- 决策包新增判词 **`cost_per_token`**（`VERDICT_IDS` 已含）：有数 → `ok`（facts 带
+  tokens/s、J/token、按 kernel 归因）；缺输入 → `refused` + 对应 code + 处置（agent 据此
+  知道该补哪个开关）。**代价：包在新判词加入后仍在 4096 B 预算内**（有序裁剪未变）。
+- **判词的前提降级与 `over_peak` 传播改为在 `MAX_VERDICTS` 截断之前执行** ——
+  以前被截断挤掉的 `over_peak` 会让带着"物理不可能"前提的 roofline 判词留在包里。
+- `--strict` 覆盖成本账：给了 `--ks-price-*` 却算不出 `ks__cost_per_hour`、或给了
+  `--ks-tokens` 却算不出 `ks__tokens_per_s` / `ks__cost_per_mtok` ⇒ exit 2。
+- `kernoscope route "每百万 token 花多少钱"` 可路由到新问题 `cost_per_token`
+  （`capabilities.QUESTIONS` 新增，tier 1：零标定、零计数器、零插桩）。
+
 ### 输出与案件目录（C5）
 
 - 一屏（`--screen only`，`-o` 时也落 `*.onepage.txt`）改为**三段式**，段落标题固定可解析：
