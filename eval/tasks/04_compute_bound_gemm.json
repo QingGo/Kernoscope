@@ -55,11 +55,25 @@
               "unit": "%"
             }
           ],
-          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词",
-          "metrics": [
-            "gpu__time_duration.sum",
-            "ks__launch_time_mean"
-          ]
+          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
+        },
+        {
+          "id": "saving_estimate",
+          "status": "soft",
+          "actionable": true,
+          "facts": {
+            "basis": "time_share",
+            "money": "unavailable",
+            "needs": "price",
+            "n": 1,
+            "top_kernel": "ampere_sgemm_128x128_nn",
+            "top_pct": 100.0,
+            "top": "ampere_sgemm_128x128_nn 100.0%"
+          },
+          "value": 100.0,
+          "unit": "%",
+          "provenance": "exact",
+          "next": "先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要：价格（--ks-price-per-hour 或 --ks-price-per-kwh）"
         },
         {
           "id": "dram_bytes",
@@ -86,11 +100,7 @@
               "unit": "%"
             }
           ],
-          "next": "与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期",
-          "metrics": [
-            "est__dram_bytes_total",
-            "ks__sampler_window_coverage_pct"
-          ]
+          "next": "与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期"
         },
         {
           "id": "occupancy",
@@ -104,11 +114,7 @@
           "value": 55.0,
           "unit": "%",
           "provenance": "measured",
-          "next": "实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy",
-          "metrics": [
-            "ks__theoretical_occupancy_pct",
-            "meas__achieved_occupancy_pct"
-          ]
+          "next": "实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy"
         },
         {
           "id": "roofline",
@@ -123,12 +129,7 @@
           "value": 78.4,
           "unit": "%",
           "provenance": "estimated",
-          "next": "compute bound → 查指令混合与发射槽利用率上界（--ks-instr-hist）",
-          "metrics": [
-            "est__bound",
-            "est__roofline_efficiency_pct",
-            "est__achieved_gbs"
-          ]
+          "next": "compute bound → 查指令混合与发射槽利用率上界（--ks-instr-hist）"
         },
         {
           "id": "issue_slot",
@@ -141,21 +142,13 @@
           "value": 71.5,
           "unit": "%",
           "provenance": "estimated",
-          "next": "方向是 latency 就先加并行度/减少依赖链；是 throughput 才谈指令精简",
-          "metrics": [
-            "est__issue_slot_utilization_pct",
-            "est__stall_direction"
-          ]
+          "next": "方向是 latency 就先加并行度/减少依赖链；是 throughput 才谈指令精简"
         }
       ],
       "unmeasured": [
         {
           "code": "counters_denied",
-          "count": 3,
-          "examples": [
-            "dram__bytes.sum",
-            "lts__t_sector_hit_rate.pct"
-          ]
+          "count": 3
         }
       ],
       "refusals": {
@@ -191,27 +184,17 @@
           "cost_kind": "unavailable"
         }
       },
-      "next": [
-        {
-          "for": "kernel_time",
-          "hint": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
-        },
-        {
-          "for": "dram_bytes",
-          "hint": "与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期"
-        },
-        {
-          "for": "unmeasured",
-          "code": "counters_denied"
-        }
-      ],
       "cost": {
         "wall_s": 1.75,
         "launches": 120,
         "unmeasured_metrics": 3,
         "selftest_band": false,
-        "trimmed": [],
-        "packet_bytes": 4075
+        "trimmed": [
+          "unmeasured_examples",
+          "verdict_metrics",
+          "next_pointers"
+        ],
+        "packet_bytes": 3853
       }
     }
   },

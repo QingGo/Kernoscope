@@ -60,6 +60,27 @@
           ]
         },
         {
+          "id": "saving_estimate",
+          "status": "soft",
+          "actionable": true,
+          "facts": {
+            "basis": "time_share",
+            "money": "unavailable",
+            "needs": "calibration,price",
+            "n": 1,
+            "top_kernel": "fused_attention_fwd",
+            "top_pct": 100.0,
+            "top": "fused_attention_fwd 100.0%"
+          },
+          "value": 100.0,
+          "unit": "%",
+          "provenance": "exact",
+          "next": "先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要：本机标定（`tools/machine-profile.py` → --ks-calibration）；价格（--ks-price-per-hour 或 --ks-price-pe…",
+          "metrics": [
+            "gpu__time_duration.sum"
+          ]
+        },
+        {
           "id": "dram_bytes",
           "status": "refused",
           "actionable": false,
@@ -209,7 +230,7 @@
         "unmeasured_metrics": 6,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 3328
+        "packet_bytes": 3851
       }
     },
     "capabilities": {

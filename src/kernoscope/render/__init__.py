@@ -62,7 +62,13 @@ def _fmt_value(value, unit: str, print_units: str = "auto") -> tuple[str, str]:
             return f"{value / 1e6:.3f}", "TB"
         if abs(value) >= 1e3:
             return f"{value / 1e3:.2f}", "GB"
-    return f"{value:.6g}" if isinstance(value, float) else str(value), unit
+    if isinstance(value, float):
+        # 整数值的 float 按**整数**印：`{:.6g}` 会把 1048576.0 印成 `1.04858e+06`
+        # （R-93③/R-108 的同一类反模式；ncrep 的 `format_value` 早就这么做了）。
+        if value.is_integer() and abs(value) < 1e15:
+            return f"{int(value):d}", unit
+        return f"{value:.6g}", unit
+    return str(value), unit
 
 
 def _wanted(name: str, metrics: Iterable[str] | None) -> bool:

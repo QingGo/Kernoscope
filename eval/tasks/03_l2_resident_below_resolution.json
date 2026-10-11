@@ -47,15 +47,27 @@
               "observed": 100.0,
               "ok": true,
               "unit": "%"
-            },
-            {
-              "id": "kernel_time_pct_of_wall",
-              "observed": 91.4,
-              "ok": true,
-              "unit": "%"
             }
           ],
           "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
+        },
+        {
+          "id": "saving_estimate",
+          "status": "soft",
+          "actionable": true,
+          "facts": {
+            "basis": "time_share",
+            "money": "unavailable",
+            "needs": "calibration,price",
+            "n": 1,
+            "top_kernel": "l2_resident_apply_kernel",
+            "top_pct": 100.0,
+            "top": "l2_resident_apply_kernel 100.0%"
+          },
+          "value": 100.0,
+          "unit": "%",
+          "provenance": "exact",
+          "next": "先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要：本机标定（`tools/machine-profile.py` → --ks-calibration）；价格（--ks-price-per-hour 或 --ks-price-pe…"
         },
         {
           "id": "dram_bytes",
@@ -67,12 +79,6 @@
               "observed": 98.2,
               "ok": true,
               "threshold": 50.0,
-              "unit": "%"
-            },
-            {
-              "id": "window_mem_busy_pct",
-              "observed": 0.0,
-              "ok": true,
               "unit": "%"
             }
           ],
@@ -97,13 +103,6 @@
               "observed": 98.2,
               "ok": true,
               "threshold": 80.0,
-              "unit": "%"
-            },
-            {
-              "id": "matched_kernel_kernel_share_pct",
-              "observed": 99.4,
-              "ok": true,
-              "threshold": 95.0,
               "unit": "%"
             }
           ],
@@ -193,20 +192,6 @@
           "cost_kind": "unavailable"
         }
       },
-      "next": [
-        {
-          "for": "kernel_time",
-          "hint": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
-        },
-        {
-          "for": "dram_bytes",
-          "code": "below_resolution"
-        },
-        {
-          "for": "unmeasured",
-          "code": "counters_denied"
-        }
-      ],
       "cost": {
         "wall_s": 0.021,
         "launches": 2400,
@@ -214,9 +199,11 @@
         "selftest_band": false,
         "trimmed": [
           "unmeasured_examples",
-          "verdict_metrics"
+          "verdict_metrics",
+          "next_pointers",
+          "passing_premises"
         ],
-        "packet_bytes": 3907
+        "packet_bytes": 3989
       }
     },
     "files": {

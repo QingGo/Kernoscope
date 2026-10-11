@@ -734,6 +734,45 @@ def _verdict_truth(rep: Any) -> Verdict | None:
               f"最大相对偏差 {facts.get('max_abs_err_pct')}%")
 
 
+def _discovery_ranking(rep: Any, *, limit: int = 3) -> dict[str, Any] | None:
+    """**发现层的第一级**：不依赖标定、不依赖价格，按**实测时间占比**排出的头寸清单（M13）。
+
+    为什么必须有它：唯一会"排头寸"的判词是 `saving_estimate`，而它的第二级（保守可省区间、
+    折算成钱）需要先跑一次本机标定 + 工作量输入 + 价格 —— 第一次上手的人/agent 通常都没有，
+    于是"钱在哪、先改什么"**在最需要它的时候缺席**（实测：合成包里整条判词不出现）。
+    而排序本身**不需要**任何前提：CUPTI activity 的时长是 `exact` 的。
+
+    诚实边界：这里的数字是**时间占比**，不是节省比例、不是钱。所以它带 `basis: time_share`、
+    `money: unavailable`，并由 `needs` 说明升级到第二级还缺什么 —— 绝不让读者把它当钱。
+    """
+    kernels = [k for k in (getattr(rep, "kernels", []) or [])
+               if float(getattr(k, "total_ns", 0) or 0) > 0]
+    if not kernels:
+        return None
+    kernels.sort(key=lambda k: float(k.total_ns), reverse=True)
+    total = sum(float(k.total_ns) for k in kernels)
+    if total <= 0:
+        return None
+    needs = []
+    if metric_value(rep, "est__achieved_gbs") is None:
+        needs.append("calibration")            # 本机实测峰值（tools/machine-profile.py）
+    if metric_value(rep, "ks__cost_per_hour") is None:
+        needs.append("price")                  # --ks-price-per-hour / --ks-price-per-kwh
+    # facts 只放**标量**：一屏契约要求"包里的每个 fact 都出现在人视图里"，列表/嵌套结构
+    # 会让那条契约失效（或逼渲染层去猜）。所以 top 压成一行人类可读、机器可 split 的字符串。
+    top_line = "；".join(f"{_clip(str(k.name), 40)} {100.0 * float(k.total_ns) / total:.1f}%"
+                        for k in kernels[:limit])
+    return {
+        "basis": "time_share",
+        "money": "unavailable",
+        "needs": ",".join(needs) or "workload",
+        "n": len(kernels),
+        "top_kernel": _clip(str(kernels[0].name), FACT_STR_LIMIT),
+        "top_pct": round(100.0 * float(kernels[0].total_ns) / total, 1),
+        "top": top_line,
+    }
+
+
 def _verdict_saving(rep: Any) -> Verdict | None:
     """处方判词（C2）—— "先改哪个、能省多少"，只有在算得出头寸时才出。
 
@@ -743,8 +782,25 @@ def _verdict_saving(rep: Any) -> Verdict | None:
       * 头寸重叠不相加（由处方模块保证，包里的 total 就是它给的那个数）。
     """
     p = (getattr(rep, "meta", {}) or {}).get("prescription")
+    disc = _discovery_ranking(rep)
     if not p:
-        return None
+        # 第二级（保守可省区间 + 钱）算不出来时，**第一级不许消失**（M13）：
+        # 按实测时间占比排出的头寸仍然可行动，并明说缺什么才能升级。
+        if disc is None:
+            return None
+        return Verdict(
+            id="saving_estimate", question="先改哪里（按实测占比排的头寸）", status=SOFT,
+            facts=disc, value=disc["top_pct"], unit="%", provenance="exact",
+            metrics=("gpu__time_duration.sum",),
+            next=("先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要："
+                  + ("本机标定（`tools/machine-profile.py` → --ks-calibration）"
+                     if "calibration" in disc["needs"] else "")
+                  + ("；" if "calibration" in disc["needs"] and "price" in disc["needs"] else "")
+                  + ("价格（--ks-price-per-hour 或 --ks-price-per-kwh）"
+                     if "price" in disc["needs"] else "")),
+            claim=(f"按**实测时间占比**排的头寸：{disc['top_kernel']} 占 {disc['top_pct']}%"
+                   f"（共 {disc['n']} 个 kernel）。这是时长占比，**不是**节省比例、也不是钱 —— "
+                   f"要钱与区间还需：{disc['needs']}"))
     ranked = list(p.get("ranked") or [])
     if not ranked:
         code = p.get("refusal") or p.get("money_refusal") or RefusalCode.NO_WORKLOAD.value
@@ -754,6 +810,7 @@ def _verdict_saving(rep: Any) -> Verdict | None:
             code_enum = RefusalCode.NO_WORKLOAD
         return Verdict(
             id="saving_estimate", question="先改哪里、能省多少钱", status=REFUSED,
+            facts=(disc or {}),          # 拒绝也可以带"第一级"的实测排序（拒绝≠空）
             refusal=Refusal(code_enum, str(p.get("refusal_message")
                                           or p.get("money_refusal_message")
                                           or "没有可辩护的头寸：缺达成值或本机实测峰值")),
@@ -948,6 +1005,32 @@ def protocol_hash(rep: Any, extra: dict[str, Any] | None = None) -> str:
 # --------------------------------------------------------------------------
 # 组包
 # --------------------------------------------------------------------------
+# 不能被截断挤掉的"守卫"判词：它们一旦消失，别的判词会带着**已被推翻的前提**留在包里
+# （`over_peak` 不成立 ⇒ roofline 的达成率不可引用）。与结论四条一起进优先集合。
+GUARD_VERDICT_IDS: tuple[str, ...] = ("over_peak",)
+
+
+def _priority_ids() -> tuple[str, ...]:
+    """结论四条 + 守卫（延迟读取：`PRIMARY_FACT_IDS` 定义在文件靠后的裁剪区）。"""
+    return PRIMARY_FACT_IDS + GUARD_VERDICT_IDS
+
+
+def _select_verdicts(vs: list[Verdict], n: int) -> tuple[list[Verdict], list[str]]:
+    """按优先级选留 n 条：**结论与守卫先保**，其余按原顺序补足。
+
+    返回 `(选留的判词, 被丢掉的 id)`；两个列表都保持**原顺序**（外部看到的顺序不变，
+    `verdicts_more.ids` 也仍是原序）。`build()` 的 `MAX_VERDICTS` 与 `enforce_budget`
+    的预算裁剪共用这一条策略 —— 两处若各写一套，迟早会分叉。
+    """
+    if len(vs) <= n:
+        return list(vs), []
+    priority = [i for i, v in enumerate(vs) if v.id in _priority_ids()]
+    rest = [i for i, v in enumerate(vs) if v.id not in _priority_ids()]
+    keep = set((priority + rest)[:n])
+    return ([v for i, v in enumerate(vs) if i in keep],
+            [v.id for i, v in enumerate(vs) if i not in keep])
+
+
 def _propagate_over_peak(verdicts: list[Verdict]) -> None:
     """`over_peak` 成立 ⇒ 由它算出来的 roofline 判词不能当依据（R-59/D18）。
 
@@ -1021,12 +1104,13 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
     # over_peak 一旦被 MAX_VERDICTS 挤掉，roofline 就带着一个已被推翻的前提留在包里。
     _downgrade_broken_premises(verdicts_all)
     _propagate_over_peak(verdicts_all)
-    verdicts = verdicts_all[:MAX_VERDICTS]
+    # 上限截断**按优先级**选留（结论四条 + 守卫 `over_peak` 先保），输出顺序不变。
+    # 位置截断会让"多了一条判词"顺手把守卫挤出去：M13 让 `saving_estimate` 常态化出现，
+    # 实测就把 `over_peak` 顶出了 10 条上限（roofline 于是带着一个已被推翻的前提留在包里）。
+    verdicts, dropped = _select_verdicts(verdicts_all, MAX_VERDICTS)
     # R-53/D10：上限截断必须**留痕** —— 否则读者（人或 agent）不知道包里少了一条，
     # 而 `cost.trimmed` 只记预算裁剪、记不到这一步（它在预算裁剪之前就发生了）。
-    verdicts_more = ({"count": len(verdicts_all) - MAX_VERDICTS,
-                      "ids": [v.id for v in verdicts_all[MAX_VERDICTS:]]}
-                     if len(verdicts_all) > MAX_VERDICTS else None)
+    verdicts_more = ({"count": len(dropped), "ids": dropped} if dropped else None)
 
     band = ((selfcheck or {}).get("band") or {}).get("dram_bytes_pct")
     mdd_dram = ((selfcheck or {}).get("mdd") or {}).get("dram_bytes_pct")
@@ -1288,9 +1372,9 @@ def enforce_budget(packet: dict[str, Any],
         vs = packet.get("verdicts") or []
         if len(vs) <= n:
             return
-        primary = [i for i, v in enumerate(vs) if v.get("id") in PRIMARY_FACT_IDS]
-        rest = [i for i, v in enumerate(vs) if v.get("id") not in PRIMARY_FACT_IDS]
-        keep = set((primary + rest)[:n])
+        priority = [i for i, v in enumerate(vs) if v.get("id") in _priority_ids()]
+        rest = [i for i, v in enumerate(vs) if v.get("id") not in _priority_ids()]
+        keep = set((priority + rest)[:n])
         # 丢掉的是"原来顺序里没被选中的"，所以 `verdicts_more.ids` 保持原序（R-110）
         _record_dropped_verdicts([v.get("id") for i, v in enumerate(vs) if i not in keep])
         packet["verdicts"] = [v for i, v in enumerate(vs) if i in keep]
@@ -1678,6 +1762,14 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
                         f"（{f.get('top_kernel_per_hour')} {cur}/h 量级）".strip())
         return "；".join(bits) or "成本账"
     if fid == "saving_estimate":
+        if f.get("basis") == "time_share":
+            # 发现层第一级（M13）：按实测时间占比排的头寸，**明说这不是钱**
+            # 人话里带上机器字段（basis/money）：一屏契约要求"包里的每个 fact 都能在
+            # 人视图里看到"，藏起来就等于两个视图分叉。
+            return (f"按**实测时间占比**排的头寸（basis={f.get('basis')}；"
+                    f"money={f.get('money')}）：{f.get('top')}"
+                    f"（共 {f.get('n')} 个 kernel；最大一条 {f.get('top_pct')}%）"
+                    f"；这是时长占比**不是钱**，要钱与区间还需补：{f.get('needs')}")
         if f.get("top_pct_lo") is not None:
             return (f"先改 {f.get('top_kernel')}（保守可省 {f['top_pct_lo']}%"
                     f"~上界 {f['top_pct_hi']}%）"

@@ -1,8 +1,8 @@
 # Kernoscope 内核镜
 
-**在多租户/受限 GPU 上（`ncu` 因权限跑不了），为算子优化提供「每个数字都标注出处」的性能证据，并把结论折算成成本与可排序的优化方向。**
+**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化头寸 + 成本折算，结论可被人与 agent 独立复核。
 
-它回答：哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱、先改哪里能省多少**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。
+它回答：**先改哪里能省多少**（按实测占比排序的头寸，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。
 
 30 秒上手（没有 GPU 也能跑通）：先 `kernoscope doctor` 看这台机器能答什么、拿不到什么、为什么（`--no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读），再 `kernoscope --packet - -- <你的命令>` 拿一份 <4 KB 决策包。
 

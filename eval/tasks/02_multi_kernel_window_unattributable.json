@@ -53,11 +53,25 @@
               "unit": "%"
             }
           ],
-          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词",
-          "metrics": [
-            "gpu__time_duration.sum",
-            "ks__launch_time_mean"
-          ]
+          "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
+        },
+        {
+          "id": "saving_estimate",
+          "status": "soft",
+          "actionable": true,
+          "facts": {
+            "basis": "time_share",
+            "money": "unavailable",
+            "needs": "calibration,price",
+            "n": 4,
+            "top_kernel": "preprocess_kernel",
+            "top_pct": 45.0,
+            "top": "preprocess_kernel 45.0%；cutlass_gemm_f16 41.0%；…"
+          },
+          "value": 45.0,
+          "unit": "%",
+          "provenance": "exact",
+          "next": "先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要：本机标定（`tools/machine-profile.py` → --ks-calibration）；价格（--ks-price-per-hour 或 --ks-price-pe…"
         },
         {
           "id": "dram_bytes",
@@ -84,11 +98,7 @@
               "unit": "%"
             }
           ],
-          "next": "与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期",
-          "metrics": [
-            "est__dram_bytes_total",
-            "ks__sampler_window_coverage_pct"
-          ]
+          "next": "与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期"
         },
         {
           "id": "dram_bytes_per_launch",
@@ -125,11 +135,7 @@
               "matched_kernel_kernel_share_pct": 95.0
             }
           },
-          "next": "改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进",
-          "metrics": [
-            "est__dram_bytes_per_launch",
-            "ks__attribution_bias_estimate_pct"
-          ]
+          "next": "改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进"
         },
         {
           "id": "ledger_verdict",
@@ -143,10 +149,7 @@
           "refusal": {
             "code": "share_too_low"
           },
-          "next": "误差超出本机误差带才值得继续优化；否则先改测量口径",
-          "metrics": [
-            "est__dram_vs_ledger_err_pct"
-          ]
+          "next": "误差超出本机误差带才值得继续优化；否则先改测量口径"
         },
         {
           "id": "occupancy",
@@ -158,21 +161,13 @@
           "value": 50.0,
           "unit": "%",
           "provenance": "exact",
-          "next": "装上 NVBit 探针可拿到实测 occupancy（不只是上界）",
-          "metrics": [
-            "ks__theoretical_occupancy_pct",
-            "meas__achieved_occupancy_pct"
-          ]
+          "next": "装上 NVBit 探针可拿到实测 occupancy（不只是上界）"
         }
       ],
       "unmeasured": [
         {
           "code": "counters_denied",
-          "count": 3,
-          "examples": [
-            "dram__bytes.sum",
-            "lts__t_sector_hit_rate.pct"
-          ]
+          "count": 3
         }
       ],
       "refusals": {
@@ -222,8 +217,11 @@
         "launches": 420,
         "unmeasured_metrics": 3,
         "selftest_band": false,
-        "trimmed": [],
-        "packet_bytes": 3924
+        "trimmed": [
+          "unmeasured_examples",
+          "verdict_metrics"
+        ],
+        "packet_bytes": 4089
       }
     },
     "files": {

@@ -399,6 +399,19 @@
   `meas__sm_clock_p50_mhz`（只在干活时统计）的差别；`meas__sm_clock_max_mhz` 写明"曾经跑到过"。
 - **降级文案不再印 `None`**：前提读不到时写「**读不到**（未知，不是 0）」。
 
+### 发现层第一级：不需要标定与价格的优化头寸（M13）
+
+- **`saving_estimate` 不再在缺标定/价格时消失**：修前它依赖 `meta["prescription"]`（需要本机标定
+  + 工作量输入），第一次上手的人/agent 通常都没有 ⇒ 最有价值的那半句「钱在哪、先改什么」
+  **整条判词不出现**（实测合成包）。现在两级：
+  **第一级**按 **CUPTI activity 的实测时长占比**排出 top-N 头寸（`exact`，零前提）；
+  **第二级**（保守可省区间 + 钱）在有标定与价格时照旧给出。
+- **第一级带三个诚实的字段**：`facts.basis="time_share"`（明说这是时长占比）、
+  `facts.money="unavailable"`、`facts.needs=[...]`（升级到第二级还缺 `calibration` / `price`）。
+  数字是占比，**不是**节省比例、也不是钱 —— 有测试钉住（不许出现 `total_per_hour`/`total_per_mtok`）。
+- **拒绝也带上第一级排序**：有 `prescription` 但 `ranked` 为空时，`refused` 判词同样携带
+  `basis/time_share` 与 `top[]`，让"拒绝"仍然给出可行动的方向。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

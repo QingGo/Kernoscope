@@ -1021,3 +1021,41 @@ def test_device_level_over_peak_verdict_does_not_silently_disappear():
     assert "over_peak" in ids, f"设备级超峰警告必须变成判词，而不是消失：{ids}"
     op = next(v for v in p["verdicts"] if v["id"] == "over_peak")
     assert op["status"] == "refused" and op["actionable"] is False
+
+
+def test_discovery_ranking_survives_without_calibration_or_price():
+    """M13（目标第二次修订）：缺标定与价格时，「钱在哪、先改什么」不许消失。
+
+    实测（收口这一轮）：只有 nsys 的机器上 `saving_estimate` **整条不见** ——
+    而"按实测时间占比排序"本来就不需要标定与价格（时长是 exact 的）。这条钉两件事：
+    ① 判词必须存在（遵守我们自己的"拒绝≠空"）；② 它必须**明说自己不是钱**。
+    """
+    from kernoscope.packet import build
+
+    rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=False)
+    p = build(rep)
+    sv = next((v for v in p["verdicts"] if v["id"] == "saving_estimate"), None)
+    assert sv is not None, f"发现层不许缺席（拒绝≠空）：{[v['id'] for v in p['verdicts']]}"
+    assert sv["facts"]["basis"] == "time_share", sv
+    assert sv["facts"]["money"] == "unavailable", sv
+    assert sv["facts"]["top_kernel"] == "top_kernel"          # 9 ms ≫ 1 ms
+    assert sv["facts"]["top_pct"] == pytest.approx(90.0, abs=0.1)
+    # `top` 压成一行人类可读、机器可 split 的字符串（一屏契约要求每个 fact 都能被渲染）
+    top = sv["facts"]["top"]
+    assert top.split("；")[0].startswith("top_kernel ") and "90.0%" in top, top
+    assert "cheap_kernel" in top and "10.0%" in top, top
+    assert sv["facts"]["needs"] == "calibration,price", sv["facts"]["needs"]
+    assert sv["provenance"] == "exact" and sv["unit"] == "%"
+    assert sv["actionable"] is True, "排序本身是实测的，可依据"
+
+
+def test_discovery_ranking_never_pretends_to_be_money():
+    """反面：第一级清单里的数字是**时间占比**，不许被表述成节省比例或钱。"""
+    from kernoscope.packet import build
+
+    p = build(_two_kernel_report(cheap_over_peak=False, top_over_peak=False))
+    sv = next(v for v in p["verdicts"] if v["id"] == "saving_estimate")
+    facts = sv["facts"]
+    assert "total_per_hour" not in facts and "total_per_mtok" not in facts
+    assert facts.get("basis") == "time_share"
+    assert facts.get("money") == "unavailable"
