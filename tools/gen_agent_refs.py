@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from kernoscope.diff_cmd import DIRECTION, MDD_KEY              # noqa: E402
 from kernoscope.packet import (PACKET_SCHEMA_REVISION, PREMISE_CODES,  # noqa: E402
-                               PREMISE_LABELS, VERDICT_IDS)
+                               PREMISE_LABELS, VERDICT_IDS, VERDICT_PREMISES)
 from kernoscope.refusals import (CODE_TITLES, DEFAULT_REMEDIES, RefusalCode,  # noqa: E402
                                  code_title, default_remedy)
 
@@ -65,19 +65,12 @@ VERDICT_QUESTION = {
     "static_mix": "静态 SASS 指令混合",
 }
 
-_PREMISES_BY_VERDICT = {
-    "kernel_time": ["kernel_share_of_total", "kernel_time_pct_of_wall"],
-    "dram_bytes": ["window_coverage_pct", "window_mem_busy_pct"],
-    "dram_bytes_per_launch": ["window_coverage_pct", "matched_kernel_kernel_share_pct"],
-    "dram_bytes_trace": ["trace_vs_nvml_pct"],
-    "ledger_verdict": ["继承 dram_bytes_per_launch 的前提"],
-    "occupancy": [],
-    "roofline": [],
-    "issue_slot": [],
-    "l2_locality": [],
-    "over_peak": ["over_peak"],
-    "static_mix": [],
-}
+# 前提列表的**单一真源在 packet.py**（`VERDICT_PREMISES`），这里不再手写一份。
+# 为什么必须改掉：第六轮 W-6 —— 旧实现里这张手写表与代码实际挂的前提是两套东西，于是
+# `cost_per_token` 在生成的 `verdicts.md` 里写着「（无强制前提）」，而代码会给它挂三条
+# 环境前提，`--gates` 却 9/9（agentrefs 只校验"生成物 == 生成器输出"）。
+# 唯一不能由 id 表达的是"继承"：`ledger_verdict` 复用 `dram_bytes_per_launch` 的前提。
+_INHERITED_PREMISES = {"ledger_verdict": "继承 dram_bytes_per_launch 的前提"}
 
 _DIR_LABEL = {"lower": "越低越好", "higher": "越高越好", "": "不判方向（只给差值）"}
 
@@ -136,8 +129,9 @@ def render_verdicts() -> str:
            "| 判词 id | 问的是什么 | 方向（diff 用） | 需要的前提 | 被拒时的 code 来源 |",
            "|---|---|---|---|---|"]
     for vid in VERDICT_IDS:
-        premise_ids = _PREMISES_BY_VERDICT.get(vid, [])
-        premises = "、".join(PREMISE_LABELS.get(p, p) for p in premise_ids) or "（无强制前提）"
+        premise_ids = VERDICT_PREMISES.get(vid, ())
+        premises = ("、".join(PREMISE_LABELS.get(p, p) for p in premise_ids)
+                    or _INHERITED_PREMISES.get(vid) or "（无强制前提）")
         codes = sorted({PREMISE_CODES[p].value for p in premise_ids if p in PREMISE_CODES})
         code_txt = f"`{'`, `'.join(codes)}`" if codes else "见 packet 的 `refusals` 表"
         out.append(f"| `{vid}` | {VERDICT_QUESTION.get(vid, vid)} | "

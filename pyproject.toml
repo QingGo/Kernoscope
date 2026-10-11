@@ -62,5 +62,11 @@ packages = ["src/kernoscope"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# R-109：**本仓库的 `src/` 是权威**。editable 安装的 `.pth` 钉住的是"安装那一刻"的源码树
+# （同步出来的副本、另一棵 checkout 都会有各自的 .pth），而 pytest 从前没有 pythonpath
+# 设置 ⇒ 单跑某些测试会 import 到**别的** src 却全绿（第六轮验收里一个复核集群正是在改
+# `src/` 的变异上被这样骗过一次：假绿）。pytest 在收集任何测试之前把这里的路径插到
+# `sys.path[0]`，因此它优先于 .pth 与 PYTHONPATH；断言见 tests/test_src_authority.py。
+pythonpath = ["src"]
 # 不设 addopts：曾经写的是 "-q"，于是 `uv run pytest -q` 变成 `-qq`，汇总行被吞掉 ——
 # 对只靠命令行自证的 agent 来说这是个纯损失，它会把"没看到 passed"当成"测试没跑"。

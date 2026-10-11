@@ -391,8 +391,12 @@ def _source_block(compute_capability: str | int | None) -> bytes:
     return block_bytes(header, frame)
 
 
-def _fmt_value(value: float) -> str:
-    """给人看的数值：整数不带科学计数法（`9.51e+07` 在 details 页里很难读）。"""
+def format_value(value: float) -> str:
+    """给人看的数值：整数不带科学计数法（`9.51e+07` 在 details 页里很难读）。
+
+    升成公开函数是因为旁路署名（`ncrep/substitute.py`）也要用同一套规则：它从前对整数值
+    用 `{:.6g}`，于是 `1048576` 被印成 `1.04858e+06` —— 同一份产物里两种写法（R-93③/R-108）。
+    """
     if value == int(value) and abs(value) < 1e15:
         return f"{int(value):,}"
     return f"{value:.6g}"
@@ -443,7 +447,7 @@ def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
             row = row_for(n)
             value = by_name[n].value * row.scale
             unit = f" {row.unit}" if row.unit else ""
-            facts.append(f"{row.label} {_fmt_value(value)}{unit}")
+            facts.append(f"{row.label} {format_value(value)}{unit}")
         ncu_rules.append({
             "Identifier": f"Kernoscope{spec.identifier}",
             "DisplayName": f"{spec.display_name} — same source as Nsight Compute",

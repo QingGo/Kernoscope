@@ -11,16 +11,22 @@ RE 纪律：位图按 NVML 公开位名解码；**未知位照实写 `bitN`**，
 from __future__ import annotations
 
 import os
+import types
 
 import pytest
 
+from kernoscope.backends import nvml as nvml_mod
 from kernoscope.backends.nvml import (
+    THROTTLE_UNKNOWN,
     DeviceSample,
+    Sampler,
     SamplerResult,
     decode_throttle,
     parse_throttle_token,
 )
-from kernoscope.packet import _environment_premises
+from kernoscope.packet import _environment_premises, build
+from kernoscope.provenance import Metric, Section
+from kernoscope.report import KernelReport, Report
 from kernoscope.sections import BuildOptions, build_device_kernel
 
 
@@ -43,17 +49,33 @@ def test_decode_throttle_names_known_bits_and_keeps_unknown_bits_verbatim():
     assert decode_throttle(0x4 | 0x1000) == ["sw_power_cap", "bit12"]
 
 
+def test_decode_throttle_negative_mask_is_unspecified_not_a_hang():
+    """R-96⑦（第六轮 W-13）：`decode_throttle(-1)` 旧实现死循环（`-1 >> 1` 永远是 `-1`）。
+
+    负数＝未知通道：给 `unspecified`（与"干净"的空列表区分开），并保证一定返回。
+    """
+    assert decode_throttle(-1) == ["unspecified"]
+    assert decode_throttle(THROTTLE_UNKNOWN) == ["unspecified"]
+
+
 @pytest.mark.parametrize("text,mask", [
     ("0x0000000000000001", 1),
     ("0x4", 4),
     ("Not Active", 0),
+    ("false", 0),
     ("0", 0),
-    ("", 0),
-    ("Active", -1),          # 有降频但没给位图 —— 不能当成 0
-    ("n/a", 0),
+    ("1", 1),
+    ("Active", THROTTLE_UNKNOWN),          # 有降频但没给位图 —— 不能当成 0
 ])
 def test_parse_throttle_token_handles_driver_variants(text, mask):
     assert parse_throttle_token(text) == mask
+
+
+@pytest.mark.parametrize("text", ["", "n/a", "N/A", "unknown", "0xZZ", "??"])
+def test_parse_throttle_token_unreadable_is_unknown_not_zero(text):
+    """R-96②：`n/a` 旧实现映射成 `0`（＝"没有降频"）—— 读不到必须走未知通道，不是 0。"""
+    assert parse_throttle_token(text) == THROTTLE_UNKNOWN
+    assert parse_throttle_token(text) != 0
 
 
 # --------------------------------------------------------------------------- #
@@ -129,13 +151,89 @@ def test_throttle_profile_counts_unspecified_and_never_as_clean():
     assert prof["reasons"] == {"unspecified": pytest.approx(50.0)}
 
 
+def test_gpu_idle_falls_back_to_sm_util_when_bitmap_unreadable():
+    """R-96③：位图拿不到时，真空闲的窗口旧实现报 `idle_pct=0.0` ⇒ 另一处假绿。"""
+    r = _result()
+    r.samples = [DeviceSample(0, 0, 0, 210, 20, THROTTLE_UNKNOWN),
+                 DeviceSample(1, 0, 0, 210, 20, THROTTLE_UNKNOWN)]
+    prof = r.throttle_profile()
+    assert prof["idle_pct"] == pytest.approx(100.0)
+    # 位图未知仍计入受限（宁可保守，不许洗成"没降频"）：两条前提一起挡住结论
+    assert prof["limited_pct"] == pytest.approx(100.0)
+
+
+def test_gpu_idle_fallback_does_not_use_sm_util_when_bitmap_is_readable():
+    """位图可读时以驱动位图为准：`sm_util==0` 不等于驱动说的 gpu_idle。"""
+    r = _result()
+    r.samples = [DeviceSample(0, 0, 0, 210, 20, 0x4)]     # 明确功率封顶，不是空闲位
+    prof = r.throttle_profile()
+    assert prof["idle_pct"] == pytest.approx(0.0)
+    assert prof["limited_pct"] == pytest.approx(100.0)
+
+
 def test_environment_reports_contention_only_when_the_probe_ran():
     r = _result()
     r.samples = [DeviceSample(0, 0, 50, 1000, 100, 0)]
     assert "other_procs" not in r.environment()          # 没探测 → 不写这一项
+    assert r.environment()["other_procs_probe"] == "not_run"
     r.other_procs_probed = True
     r.other_procs = 0
     assert r.environment()["other_procs"] == 0
+    assert r.environment()["other_procs_probe"] == "ok"
+
+
+def test_other_procs_probe_failure_is_unknown_not_zero_tenants():
+    """R-96④：探测失败 ≠"0 个别的租户"，也 ≠"从没测过"——三者必须可区分。"""
+    r = _result()
+    r.samples = [DeviceSample(0, 0, 50, 1000, 100, 0)]
+    r.other_procs_probe = "failed"                       # 探测过、但读不到
+    env = r.environment()
+    assert "other_procs" not in env                      # 不许冒充 0 个租户
+    assert env["other_procs_probe"] == "failed"
+
+    never = _result()
+    never.samples = r.samples
+    assert never.environment()["other_procs_probe"] == "not_run"
+
+    got_zero = _result()
+    got_zero.samples = r.samples
+    got_zero.other_procs_probed = True
+    assert got_zero.environment()["other_procs"] == 0
+    assert got_zero.environment()["other_procs_probe"] == "ok"
+
+
+def test_sampler_loop_marks_failed_probe_as_unknown(monkeypatch):
+    """`Sampler._loop()` 的接线：`_other_procs()` 返回 None ⇒ 探测状态 = failed（不是 0）。"""
+    s = Sampler()
+    monkeypatch.setattr(s, "_other_procs", lambda: None)
+    monkeypatch.setattr(s, "_read", lambda: None)
+    rounds = {"n": 0}
+
+    def _wait(_t):
+        rounds["n"] += 1
+        return rounds["n"] > 1                    # 只跑一轮就停
+    monkeypatch.setattr(s._stop, "wait", _wait)
+    s._loop()
+    assert rounds["n"] == 2
+    assert s.result.other_procs_probe == "failed"
+    assert s.result.other_procs_probed is False
+    assert "other_procs" not in s.result.environment()
+
+
+def test_compute_apps_query_is_scoped_to_this_device(monkeypatch):
+    """R-96⑤：`--query-compute-apps` 必须带本卡 `--id`，否则别的卡的进程算成"同卡"。"""
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(nvml_mod, "subprocess",
+                        types.SimpleNamespace(run=lambda argv, **kw: seen.append(argv) or _Proc()))
+    assert Sampler(device_index=2)._other_procs() == 0
+    argv = " ".join(seen[0])
+    assert "--query-compute-apps=pid" in argv
+    assert "--id=2" in argv
 
 
 # --------------------------------------------------------------------------- #
@@ -215,3 +313,101 @@ def test_packet_premises_flag_multi_tenant_and_throttling():
 
 def test_packet_premises_are_absent_when_we_did_not_measure_the_environment():
     assert _environment_premises(_Rep([])) == []
+
+
+# --------------------------------------------------------------------------- #
+# R-96：读不到 ≠ 干净 —— 两条采样路径纪律一致（第六轮 W-1 P0 的复现）
+# --------------------------------------------------------------------------- #
+class _FakeUtil:
+    def __init__(self, mem: float, gpu: float):
+        self.memory = mem
+        self.gpu = gpu
+
+
+def _fake_pynvml(*, throttle_raises: bool = True, sm_util: float = 80.0):
+    """最小假 pynvml：**只**让降频查询抛异常（W-1 的注入点，其余读数正常）。"""
+    m = types.SimpleNamespace()
+    m.NVML_CLOCK_SM = 1
+    m.nvmlInit = lambda: None
+    m.nvmlDeviceGetHandleByIndex = lambda i: object()
+    m.nvmlDeviceGetTotalEnergyConsumption = lambda h: 1_000_000
+    m.nvmlDeviceGetMaxClockInfo = lambda h, c: 3105
+    m.nvmlDeviceGetUtilizationRates = lambda h: _FakeUtil(3.0, sm_util)
+    m.nvmlDeviceGetClockInfo = lambda h, c: 2100
+    m.nvmlDeviceGetPowerUsage = lambda h: 200_000
+    m.nvmlDeviceGetComputeRunningProcesses = lambda h: []
+
+    def _boom(h):
+        raise RuntimeError("nvmlDeviceGetCurrentClocksThrottleReasons: 读不到")
+
+    m.nvmlDeviceGetCurrentClocksThrottleReasons = _boom if throttle_raises else (lambda h: 0)
+    return m
+
+
+def _sampled(fake, n: int = 5) -> SamplerResult:
+    """绕过线程直接走 `Sampler._read()`（生产路径就是它）。"""
+    s = Sampler()
+    s._pynvml = fake
+    s._handle = object()
+    for _ in range(n):
+        sample = s._read()
+        assert sample is not None, "读不到降频位图不许把整条样本也丢了"
+        s.result.samples.append(sample)
+    s.result.duration_s = 1.0
+    return s.result
+
+
+def _report_with_cost(res: SamplerResult) -> Report:
+    section = build_device_kernel(BuildOptions(nvml_summary=res.summary(),
+                                              nvml_env=res.environment()))
+    cost = Section("Cost")
+    cost.add(Metric.derived("ks__cost_per_mtok", 3.5, unit="¥/Mtoken"))
+    rep = Report()
+    rep.kernels = [KernelReport("k", sections=[section, cost])]
+    return rep
+
+
+def test_unreadable_throttle_never_becomes_clean_or_actionable():
+    """R-96①⑤（W-1 P0）：假 pynvml 只让降频查询抛异常 ⇒ `cost_per_token` 不得 actionable。
+
+    旧行为：`except Exception: mask = 0` ⇒ `limited_pct = 0.0` ⇒ 新前提
+    `env_no_throttle_pct observed=0.0 ok=True` ⇒ `cost_per_token` 保持 `actionable=True`。
+    """
+    res = _sampled(_fake_pynvml(throttle_raises=True))
+    assert [s.throttle_mask for s in res.samples] == [THROTTLE_UNKNOWN] * 5
+    env = res.environment()
+    assert env["throttle"]["limited_pct"] == pytest.approx(100.0)
+    assert env["throttle"]["reasons"] == {"unspecified": pytest.approx(100.0)}
+
+    rep = _report_with_cost(res)
+    prem = {p.id: p for p in _environment_premises(rep)}
+    assert "env_no_throttle_pct" in prem and prem["env_no_throttle_pct"].ok is False
+
+    packet = build(rep)
+    cost = next(v for v in packet["verdicts"] if v["id"] == "cost_per_token")
+    assert cost["actionable"] is False
+
+
+def test_readable_clean_throttle_bitmap_keeps_cost_actionable():
+    """对照：位图可读且干净时前提必须成立 —— 修法不能变成"一律拒绝"。"""
+    res = _sampled(_fake_pynvml(throttle_raises=False))
+    assert [s.throttle_mask for s in res.samples] == [0] * 5
+    prem = {p.id: p for p in _environment_premises(_report_with_cost(res))}
+    assert prem["env_no_throttle_pct"].ok is True
+    assert prem["env_gpu_busy_pct"].ok is True
+
+
+def test_nvidia_smi_unreadable_throttle_token_matches_pynvml_unknown_channel(monkeypatch):
+    """R-96①：两条路纪律一致 —— `n/a` 与 pynvml 抛异常都进"未知"，都不是"没有降频"。"""
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "3, 80, 2100, 200.00, n/a"
+
+    monkeypatch.setattr(nvml_mod, "subprocess",
+                        types.SimpleNamespace(run=lambda argv, **kw: seen.append(argv) or _Proc()))
+    sample = Sampler(device_index=1)._read()
+    assert sample is not None and sample.throttle_mask == THROTTLE_UNKNOWN
+    assert "--id=1" in " ".join(seen[0])          # 与 pynvml 的 handle 指同一张卡
+

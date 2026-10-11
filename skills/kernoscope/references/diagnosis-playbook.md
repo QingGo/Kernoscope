@@ -11,14 +11,14 @@
 
 三条读法：
 
-* 拒绝码是**闭集**（52 个）：见到 `n/a` 先看 `code`，再照 remedy 做 —— 不要猜原因。
+* 拒绝码是**闭集**（55 个）：见到 `n/a` 先看 `code`，再照 remedy 做 —— 不要猜原因。
 * `cost_kind=unavailable` 的 code 单独成节：它们**不是**「环境缺件」，
   在这台机器上没有任何合法补救路径（容器内 `sudo`/`setuid` 也突破不了）。
 * 每一列都注明来源；代码里算不出来的列写 `——`，不编（这一条比表格好看更重要）。
 
 ## 一、signal → cause → fix（按拒绝码）
 
-覆盖面：闭集里的 52 个 code 全部登记，其中 49 个在本机有补救路径（下表），3 个没有（见下一节）。**不做「受限机器上不可能发生」的人工筛选** —— 那需要判断，而判断题不该藏在生成器里；唯一的筛选规则就是 `cost_kind=unavailable`。
+覆盖面：闭集里的 55 个 code 全部登记，其中 52 个在本机有补救路径（下表），3 个没有（见下一节）。**不做「受限机器上不可能发生」的人工筛选** —— 那需要判断，而判断题不该藏在生成器里；唯一的筛选规则就是 `cost_kind=unavailable`。
 
 「观测到什么」这一列只给**触发路由**：数值阈值（`Refusal.threshold`）由各 builder 现算，代码里**没有**按 code 索引的静态阈值表，所以这一列给不出数字 —— 这是缺口，不是省略。
 
@@ -43,6 +43,9 @@
 | `not_applicable` | 该指标在本设备上无定义 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 该指标在本设备/本平台上无定义（不是数据缺失）：忽略这一行即可 | ≈0 |
 | `mixed_launch_config` | 同名 kernel 有多组 launch 配置，单值会误导 | 1 条路由会报它（`launch_configs`） | 同名 kernel 有多组 launch 配置时我们不报单一数值（会误导多数 launch）：逐组读数见 LaunchConfigs section；只关心一组时用 -c/-k 固定它 | ≈0 |
 | `no_clock_reading` | 没有 SM 时钟读数 | 1 条路由会报它（`issue_slot`） | 加 --ks-clock-mhz <MHz>（或让 NVML 采样开着）：没有 SM 时钟就算不出发射槽上限；命令：`kernoscope --ks-clock-mhz 2520 ...` | ≈0 |
+| `env_shared_gpu` | 同卡还有别的计算进程：读数被他人负载稀释 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 等到同卡其他进程结束，或换一张独占的卡再测：多租户下读数含他人负载，比值类口径（每 token 成本、显存带宽达成率）会被系统性稀释；拿不到独占环境时，结论按 env_gpu_exclusive 降级为不可引用 | 需人工 |
+| `env_throttled` | 窗口内有降频（功率封顶/热降频）：能效读数被扰动 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 等降频结束再测（温度回落/功率回到上限内），或提高功耗上限/换散热更好的实例；降频期间的时间与能耗数字仍然真实，但把它当作能效结论会偏乐观（同一份工作花了更多电）；命令：`nvidia-smi -q -d PERFORMANCE` | ≈30s |
+| `env_reading_unknown` | 环境读数读不到（未知）：不能当成"没有" | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 环境读数读不到时我们不猜：确认 NVML/nvidia-smi 可用（`kernoscope doctor`）、驱动在采样期间没有重启，或换一个能读到管理计数器的实例；"未知"与"零"是两件事，结论按未知降级；命令：`kernoscope doctor` | ≈5s |
 | `no_launch_activity` | 没有采到任何 kernel 活动 | 1 条路由会报它（`kernel_time`） | 确认被测命令真的在 GPU 上跑 kernel，且采集时带上了 CUDA activity（--ks-sqlite 指向的库要有 CUPTI_ACTIVITY_KIND_KERNEL 表）；命令：`nsys profile --trace=cuda -o run -- python app.py` | ≈30s |
 | `no_kernel_match` | 过滤后没有匹配的 kernel | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 放宽 -k 过滤（用更短的正则片段），或先不加 -k 看有哪些 kernel 名字；命令：`kernoscope --ks-sqlite kernels.sqlite --launch-csv` | ≈5s |
 | `no_kernels` | 报告里没有 kernel | 2 条路由会报它（`kernel_time`、`launch_configs`） | 先确认采集到了 kernel 活动（见 no_launch_activity 的补救办法） | ≈30s |

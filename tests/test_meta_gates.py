@@ -100,27 +100,72 @@ def _workflow_text_without_comments(path: Path) -> str:
                       if not l.strip().startswith("#"))
 
 
-def test_ci_workflow_exists_and_runs_the_gates():
-    """N5 + V-19：CI 入口必须存在，且**真的**跑 `dev_index.py --gates`。
+def _workflow_commands(path: Path) -> list[str]:
+    """工作流里每个 `run:` 步骤的**命令行**（多行块逐行拆开；注释已剔除）。
 
-    "真的"的定义：它出现在某个 `run:` 步骤里 —— 不是注释、不是别处的散文。
-    只删文件、把步骤换成 no-op、或把命令挪进注释，这条都要红。
+    返回的是"一条完整命令"的粒度 —— 调用方用 `==` 比对，**不是**子串：
+    第六轮 V-19 的残留就是 `run: echo "… dev_index.py --gates"` 仍能靠子串匹配放绿。
+    """
+    out: list[str] = []
+    for step in _workflow_steps(path):
+        out += [ln.strip() for ln in step.splitlines() if ln.strip()]
+    return out
+
+
+#: CI 必须**逐字**跑的提交前门禁命令（整行相等；`echo` 包装、注释、子串都不算）。
+EXPECTED_CI_COMMANDS = ("uv sync --locked", "uv run python tools/dev_index.py --gates")
+
+
+def test_ci_workflow_exists_and_runs_the_gates():
+    """N5 + V-19/R-105：CI 入口必须存在，且**真的**跑 `dev_index.py --gates`。
+
+    "真的"的定义：某条 `run:` **命令整行等于**期望命令 —— 不是注释、不是别处的散文、
+    也不是被 `echo`/`&&` 包住后靠子串匹配蒙混。只删文件、把步骤换成 no-op、把命令挪进
+    注释、或 `run: echo "…dev_index.py --gates"`，这条都要红。
     """
     wf_dir = ROOT / ".github" / "workflows"
     files = sorted(wf_dir.glob("*.y*ml")) if wf_dir.exists() else []
     assert files, "没有任何 CI 工作流 —— 门禁只在维护者记得的时候手跑"
-    steps = [st for f in files for st in _workflow_steps(f)]
-    joined = "\n".join(steps)
-    assert any("dev_index.py --gates" in st for st in steps), (
-        "没有任何 `run:` 步骤真的跑 `dev_index.py --gates`（注释里出现不算）：" + repr(steps))
+    commands = [c for f in files for c in _workflow_commands(f)]
+    for want in EXPECTED_CI_COMMANDS:
+        assert want in commands, (
+            f"没有任何 `run:` 命令**整行等于** {want!r}（注释、`echo` 包装、子串都不算）：\n"
+            f"  实际命令：{commands}")
 
     blob = "\n".join(_workflow_text_without_comments(f) for f in files)
     assert re.search(r"on:\s*\n(?:.*\n)*?\s+push:", blob), "CI 没有在 push 上触发"
     assert re.search(r"\bpull_request:", blob), "CI 没有在 PR 上触发"
     # N8：锁文件与最小权限
-    assert any("uv sync --locked" in st for st in steps), \
-        "CI 的 `run:` 步骤里没有 `uv sync --locked`（装了别的版本没人知道）"
     assert re.search(r"^permissions:", blob, re.M), "CI 没有声明最小 `permissions:`"
+
+
+def test_ci_gate_rejects_a_command_that_only_mentions_the_gates(tmp_path):
+    """R-105/V-19 的负样本：`run: echo "…dev_index.py --gates"` 不许再靠子串放绿。
+
+    第五轮把"整文件子串"改成了"`run:` 步骤里出现子串"，但 `echo "… --gates"` 仍然满足
+    子串 —— 12 passed（报告实测）。现在比对的是**整行相等**，这条负样本钉住它。
+    """
+    body = ("on:\n  push:\n  pull_request:\npermissions:\n  contents: read\n"
+            "jobs:\n  gates:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - name: Install\n"
+            "        run: uv sync --locked\n")
+    wf = tmp_path / "gates.yml"
+    # ① 只把门禁命令**放进 echo 的字符串里** ⇒ 不算（旧实现会放绿）
+    wf.write_text(body + '      - name: Gates\n'
+                         '        run: echo "uv run python tools/dev_index.py --gates"\n',
+                  encoding="utf-8")
+    commands = _workflow_commands(wf)
+    assert "uv sync --locked" in commands
+    assert "uv run python tools/dev_index.py --gates" not in commands, \
+        "被 echo 包住的命令不该算成'跑了门禁'"
+    # ② 真正写对时为真（负样本不许把门禁本身逼死）
+    wf.write_text(body + "      - name: Gates\n"
+                         "        run: uv run python tools/dev_index.py --gates\n",
+                  encoding="utf-8")
+    commands = _workflow_commands(wf)
+    for want in EXPECTED_CI_COMMANDS:
+        assert want in commands, want
 
 
 #: 期望的门禁清单（顺序无关）。加/删门禁必须同时改这里 —— 这就是"有意变更"的凭据。

@@ -135,12 +135,18 @@ def build_device_kernel(opt: BuildOptions) -> Section:
                            + (f"（{opt.peak_source}）" if opt.peak_source else ""),
                     note="等效带宽口径；与按字节/时间的口径略有差异", resolution="1 %",
                 ))
-        for key, name, unit in (("sm_clock_mean", "meas__sm_clock_mean_mhz", "MHz"),
-                                ("sm_clock_max", "meas__sm_clock_max_mhz", "MHz"),
-                                ("power_max", "meas__power_max_w", "W")):
+        for key, name, unit, note in (
+                ("sm_clock_mean", "meas__sm_clock_mean_mhz", "MHz",
+                 "窗口内**全部采样点**的均值：**含空闲点**，空闲降频不是问题。"
+                 "要与活跃口径比较时看 `meas__sm_clock_p50_mhz`（只在干活时统计，R-100②）"),
+                ("sm_clock_max", "meas__sm_clock_max_mhz", "MHz",
+                 "窗口内峰值：它是「曾经跑到过」，不代表一直在跑"),
+                ("power_max", "meas__power_max_w", "W",
+                 "窗口内峰值功率：与功耗墙一起读才知道有没有贴着上限")):
             if key in n:
                 s.add(Metric.measured(name, round(n[key], 1), unit,
                                       source="nvidia-smi / NVML（管理计数器，免 admin）",
+                                      note=note,
                                       resolution="1 MHz / 1 W（驱动报数粒度）"))
         if n.get("energy_j"):
             s.add(Metric.measured("meas__device_energy_j", round(n["energy_j"], 3), "J",
@@ -161,22 +167,42 @@ def build_device_kernel(opt: BuildOptions) -> Section:
                 resolution=f"{env.get('interval_s', 0.0)} s/采样点"))
         thr = env.get("throttle") or {}
         if thr:
-            reasons = "、".join(f"{k} {v:.0f}%" for k, v in (thr.get("reasons") or {}).items())
-            if reasons:
-                note = f"窗口内存在**性能受限**降频原因（按采样占比）：{reasons}"
+            reasons_map = thr.get("reasons") or {}
+            reasons = "、".join(f"{k} {v:.0f}%" for k, v in reasons_map.items())
+            fully_unknown = set(reasons_map) == {"unspecified"}
+            if fully_unknown:
+                # 位图**读不到**：这不是"没有降频"，也不是"100% 被限频"（两种都是编）。
+                # 报 unavailable + code，让决策包前提因此**不成立**（R-96①④）—— 而不是
+                # 印一个 measured 的 100.0% 让读者以为这台机器一直在掉频。
+                s.add(Metric.unavailable(
+                    "meas__throttle_limited_pct",
+                    "降频位图读不到（pynvml/nvidia-smi 都没给出可信读数）："
+                    "窗口内**可能有也可能没有**降频，我们不当成\"没有降频\"",
+                    source="clocks_throttle_reasons.active 位图（NVML 公开位名解码）",
+                    code=RefusalCode.ENV_READING_UNKNOWN,
+                    note="降频未知时，能效/时间类结论按未知降级；"
+                         "\"读不到\"与\"读到 0\"是两件事"))
             else:
-                note = "窗口内没有观察到性能受限降频（空闲位不算受限）"
-            s.add(Metric.measured(
-                "meas__throttle_limited_pct", round(thr["limited_pct"], 1), "%",
-                source="clocks_throttle_reasons.active 位图（NVML 公开位名解码）",
-                note=note + "。降频不改变「耗时是真实时间」这个事实，但会改变**它能说明什么**",
-                resolution="位图口径，按采样点占比"))
+                if reasons:
+                    note = f"窗口内存在**性能受限**降频原因（按采样占比）：{reasons}"
+                else:
+                    note = "窗口内没有观察到性能受限降频（空闲位不算受限）"
+                s.add(Metric.measured(
+                    "meas__throttle_limited_pct", round(thr["limited_pct"], 1), "%",
+                    source="clocks_throttle_reasons.active 位图（NVML 公开位名解码）",
+                    note=note + "。降频不改变「耗时是真实时间」这个事实，但会改变**它能说明什么**",
+                    resolution="位图口径，按采样点占比"))
             s.add(Metric.measured(
                 "meas__gpu_idle_pct", round(thr["idle_pct"], 1), "%",
-                source="clocks_throttle_reasons.active 的 gpu_idle 位",
+                source=("clocks_throttle_reasons.active 的 gpu_idle 位"
+                        if not fully_unknown else
+                        "位图读不到，暂用 SM 利用率为 0 的采样点判空闲（兜底口径）"),
                 note="窗口内 GPU 处于空闲的采样占比：越高说明窗口越被宿主间隙稀释，"
-                     "除以它的比值（如带宽/利用率）越不可信",
-                resolution="位图口径，按采样点占比"))
+                     "除以它的比值（如带宽/利用率）越不可信"
+                     + ("；**位图读不到**时这一行用的是 SM 利用率兜底，不是驱动位图"
+                        if fully_unknown else ""),
+                resolution="位图口径，按采样点占比"
+                           if not fully_unknown else "兜底口径（SM 利用率 0）"))
         if env.get("other_procs") is not None:
             others = int(env["other_procs"])
             note = ("采样期间同卡上**没有**其他计算进程，数字是独占环境下的"
@@ -187,6 +213,16 @@ def build_device_kernel(opt: BuildOptions) -> Section:
                 "meas__other_procs_on_gpu", float(others), "个",
                 source="NVML nvmlDeviceGetComputeRunningProcesses / nvidia-smi --query-compute-apps",
                 note=note, resolution="采样点最大值（每 5 个采样点探测一次）"))
+        elif env.get("other_procs_probe") == "failed":
+            # R-96④：探测**失败**不是"0 个别的租户"。包内必须能看出"这条没测"，
+            # 否则多租户这条前提会被静默当成成立。
+            s.add(Metric.unavailable(
+                "meas__other_procs_on_gpu",
+                "同卡其他计算进程这次没测到（NVML/nvidia-smi 探测失败）："
+                "多租户是**未知**，不等于独占",
+                source="NVML nvmlDeviceGetComputeRunningProcesses / "
+                       "nvidia-smi --query-compute-apps",
+                code=RefusalCode.ENV_READING_UNKNOWN))
     if not s.metrics:
         s.add(Metric.unavailable("meas__nvml_mem_busy_mean_pct",
                                  "没有 NVML 采样点：采样被关闭（--ks-no-nvml）、"

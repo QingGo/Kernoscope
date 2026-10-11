@@ -63,6 +63,10 @@ PREMISE_CODES: dict[str, RefusalCode] = {
     "kernel_share_of_total": RefusalCode.PREMISE_FAILED,
     "trace_vs_nvml_pct": RefusalCode.PREMISE_FAILED,
     "over_peak": RefusalCode.CALIBRATION_CALIBER_MISMATCH,
+    # 环境前提（第六轮 W-6：这三条此前不在两张表里 ⇒ 降级文案**直接印 id**）
+    "env_gpu_exclusive": RefusalCode.ENV_SHARED_GPU,
+    "env_gpu_busy_pct": RefusalCode.COVERAGE_TOO_LOW,   # 同义：窗口没被负载主导，只是观测量不同
+    "env_no_throttle_pct": RefusalCode.ENV_THROTTLED,
 }
 
 PREMISE_LABELS: dict[str, str] = {
@@ -73,9 +77,38 @@ PREMISE_LABELS: dict[str, str] = {
     "matched_kernel_kernel_share_pct": "被匹配 kernel 是否占窗口 kernel 时间 ≥95%",
     "trace_vs_nvml_pct": "轨迹口径 / NVML 口径",
     "over_peak": "达成值是否超过本机实测峰值",
+    # 环境前提：把"这钱是在什么环境下花的"变成前提，环境不干净时结论自动降级
+    "env_gpu_exclusive": "同卡有没有别的计算进程（多租户会把读数稀释）",
+    "env_gpu_busy_pct": "采样窗口里 GPU 有多少时间在干活（宿主间隙会稀释比值类口径）",
+    "env_no_throttle_pct": "窗口内降频时间占比（功率封顶/热降频会让能效读数偏乐观或偏保守）",
     # 成本账（C1）：结论的两个分母，必须随结论一起出现
     "window_energy_j": "窗口内实测能耗（NVML 功率积分/能量累加器）",
     "tokens_per_s": "窗口内吞吐（调用方给的 token 数 ÷ 窗口秒数）",
+}
+
+# 判词 → 它**会**挂上的前提（单一真源）。三方共用：
+#   * `tools/gen_agent_refs.py` 用它生成 `references/verdicts.md` 的「需要的前提」列；
+#   * 测试用它断言"代码实际发出的前提 ⊆ 文档列出的前提"（第六轮 W-6：生成文档此前读的是
+#     生成器自己的手写表，所以 `cost_per_token` 在文档里写着「无强制前提」，而代码会给它挂
+#     三条环境前提，`--gates` 却 9/9）；
+#   * 新增前提时改这里一处就够。
+VERDICT_PREMISES: dict[str, tuple[str, ...]] = {
+    "kernel_time": ("kernel_share_of_total", "kernel_time_pct_of_wall"),
+    # 成本判词：两个分母 + 三条环境前提（环境不干净时它必须降级，这是它存在的理由）
+    "cost_per_token": ("window_energy_j", "tokens_per_s", "env_gpu_exclusive",
+                       "env_gpu_busy_pct", "env_no_throttle_pct"),
+    "truth_vs_substitute": (),
+    "saving_estimate": (),
+    "dram_bytes": ("window_coverage_pct", "window_mem_busy_pct"),
+    "dram_bytes_per_launch": ("window_coverage_pct", "matched_kernel_kernel_share_pct"),
+    "dram_bytes_trace": ("trace_vs_nvml_pct",),
+    "ledger_verdict": (),          # 继承 `dram_bytes_per_launch` 的前提（见生成器的说明列）
+    "occupancy": (),
+    "roofline": (),
+    "issue_slot": (),
+    "l2_locality": (),
+    "over_peak": ("over_peak",),
+    "static_mix": (),
 }
 
 
@@ -131,6 +164,11 @@ class Verdict:
     next: str = ""
     metrics: tuple[str, ...] = ()
     claim: str = ""                         # 仅内存：视图侧重新生成，避免两处文案
+    # **不进包**的判词身份：这条判词属于哪个 kernel（未截断的名字）。
+    # 为什么不能复用 `facts["kernel"]`：那是 `_clip(name, 48)` 的**显示串**，而 C++ 模板实例化
+    # 名字前 48 字符撞车是常态（真机 A/B：两个不同 kernel 前 48 字相同）—— 于是一个便宜 kernel
+    # 的超峰会否掉另一个 kernel 合法的 91% roofline（第六轮 W-4）。截断只用于显示，不用于比较。
+    owner_key: str = field(default="", repr=False)
 
     @property
     def failed_premises(self) -> list[Premise]:
@@ -486,6 +524,7 @@ def _verdict_roofline(rep: Any) -> Verdict | None:
     return Verdict(
         id="roofline", question="离 roofline 多远、compute 还是 memory bound", status=SOFT,
         facts=facts, value=eff, unit="%", provenance="estimated",
+        owner_key=str(getattr(owner, "name", "") or "") if owner is not None else "",
         metrics=("est__bound", "est__roofline_efficiency_pct", "est__achieved_gbs"),
         next=nxt, claim="；".join(str(b) for b in bits))
 
@@ -532,6 +571,19 @@ def _verdict_l2(rep: Any) -> Verdict | None:
         claim="；".join(bits))
 
 
+# 环境前提的**门槛**（R-100③：此前是裸字面量 `0.0/80.0/5.0`，README 零提及）。
+# 改这三个数会改变"什么算环境干净"，所以它们是接口的一部分，不是魔法数字。
+ENV_OTHER_PROCS_MAX = 0.0     # 同卡其他计算进程数上限（0 = 必须独占）
+ENV_GPU_BUSY_MIN_PCT = 80.0   # 窗口里 GPU 干活时间占比下限
+ENV_NO_THROTTLE_MAX_PCT = 5.0  # 降频时间占比上限
+
+
+def _metric_unreadable(rep: Any, name: str) -> bool:
+    """这个指标**存在但读不到**（unavailable），与"这个指标根本没有"区分开（R-96④）。"""
+    m = find_metric(rep, name)
+    return m is not None and m.provenance is Provenance.UNAVAILABLE
+
+
 def _environment_premises(rep: Any) -> list[Premise]:
     """把"这钱是在什么环境下花的"变成前提（R-61 延伸）。
 
@@ -545,15 +597,24 @@ def _environment_premises(rep: Any) -> list[Premise]:
     out: list[Premise] = []
     others = metric_value(rep, "meas__other_procs_on_gpu")
     if others is not None:
-        out.append(Premise("env_gpu_exclusive", float(others), 0.0, float(others) <= 0.0, "个"))
+        out.append(Premise("env_gpu_exclusive", float(others), ENV_OTHER_PROCS_MAX,
+                           float(others) <= ENV_OTHER_PROCS_MAX, "个"))
+    elif _metric_unreadable(rep, "meas__other_procs_on_gpu"):
+        # 探测失败 ⇒ 前提"不成立"（不是缺席）。缺席会让 cost_per_token 回到 actionable=True，
+        # 那正是 R-96 要修的那种假绿。
+        out.append(Premise("env_gpu_exclusive", None, ENV_OTHER_PROCS_MAX, False, "个"))
     idle = metric_value(rep, "meas__gpu_idle_pct")
     if idle is not None:
-        out.append(Premise("env_gpu_busy_pct", round(100.0 - float(idle), 1), 80.0,
-                           (100.0 - float(idle)) >= 80.0, "%"))
+        out.append(Premise("env_gpu_busy_pct", round(100.0 - float(idle), 1),
+                           ENV_GPU_BUSY_MIN_PCT,
+                           (100.0 - float(idle)) >= ENV_GPU_BUSY_MIN_PCT, "%"))
     thr = metric_value(rep, "meas__throttle_limited_pct")
     if thr is not None:
-        out.append(Premise("env_no_throttle_pct", round(float(thr), 1), 5.0,
-                           float(thr) < 5.0, "%"))
+        out.append(Premise("env_no_throttle_pct", round(float(thr), 1),
+                           ENV_NO_THROTTLE_MAX_PCT,
+                           float(thr) < ENV_NO_THROTTLE_MAX_PCT, "%"))
+    elif _metric_unreadable(rep, "meas__throttle_limited_pct"):
+        out.append(Premise("env_no_throttle_pct", None, ENV_NO_THROTTLE_MAX_PCT, False, "%"))
     return out
 
 
@@ -733,12 +794,28 @@ def _verdict_over_peak(rep: Any) -> Verdict | None:
     owner = kernel_with(rep, "ks__over_peak_warning")
     warn = metric_value_in(owner, "ks__over_peak_warning") if owner is not None else None
     if not warn:
-        return None
+        # W-12：`kernel_with` 会跳过 `(device)` 伪 kernel。若这个警告只挂在设备级
+        # （`-i` 回读老报告时可达），旧实现会让 `over_peak` 判词**静默消失** —— 相对旧版
+        # `find_metric` 是回归。这里退回设备级读取（`find_metric` 不跳过 `(device)`）。
+        m = find_metric(rep, "ks__over_peak_warning")
+        if m is None or m.value is None:
+            return None
+        return Verdict(
+            id="over_peak", question="达成值是否超过标定峰值（物理上不可能）", status=REFUSED,
+            facts={"kernel": "(device)"},
+            owner_key=str(getattr(getattr(rep, "device", None), "name", "") or "(device)"),
+            premises=[Premise("over_peak", 1.0, None, False)],
+            refusal=Refusal(RefusalCode.CALIBRATION_CALIBER_MISMATCH,
+                            (m.note if m is not None else "") or "achieved > measured peak"),
+            metrics=("ks__over_peak_warning",),
+            next="重跑标定（tools/machine-profile.py），并确认 --ks-gemm/--ks-flops 的工作量正确",
+            claim="达成值超过本机实测峰值：本次的百分比不成立，先查标定与工作量输入")
     m = find_metric_in(owner, "ks__over_peak_warning")
     return Verdict(
         id="over_peak", question="达成值是否超过标定峰值（物理上不可能）", status=REFUSED,
         # V-6：超峰是**某个 kernel** 的事，必须点名，否则会被当成整份报告的结论
         facts={"kernel": _clip(str(getattr(owner, "name", "")), FACT_STR_LIMIT)},
+        owner_key=str(getattr(owner, "name", "") or ""),
         premises=[Premise("over_peak", 1.0, None, False)],
         refusal=Refusal(RefusalCode.CALIBRATION_CALIBER_MISMATCH,
                         (m.note if m is not None else "") or "achieved > measured peak"),
@@ -883,11 +960,11 @@ def _propagate_over_peak(verdicts: list[Verdict]) -> None:
     roof = next((v for v in verdicts if v.id == "roofline"), None)
     if op is None or op.status != REFUSED or roof is None or roof.status == REFUSED:
         return
-    # V-6：只有当超峰与 roofline 属于**同一个 kernel** 时才传播。判词的 facts 里都写了
-    # kernel 名（`_verdict_over_peak` / `_verdict_roofline`）；两边都拿不到名字时保守传播
-    # （宁可拒绝一个可疑的达成率，也不要放行一个物理不可能的）。
-    op_k = (op.facts or {}).get("kernel") or ""
-    roof_k = (roof.facts or {}).get("kernel") or ""
+    # V-6：只有当超峰与 roofline 属于**同一个 kernel** 时才传播。身份用 `owner_key`
+    # （未截断名，**不是** facts 里那个 48 字显示串 —— 见 Verdict.owner_key 的注释）；
+    # 两边都拿不到身份时保守传播（宁可拒绝一个可疑的达成率，也不要放行一个物理不可能的）。
+    op_k = op.owner_key or (op.facts or {}).get("kernel") or ""
+    roof_k = roof.owner_key or (roof.facts or {}).get("kernel") or ""
     if op_k and roof_k and op_k != roof_k:
         return
     if roof.value is not None:
@@ -919,8 +996,10 @@ def _downgrade_broken_premises(verdicts: list[Verdict]) -> None:
             continue
         main = failed[0]
         code = PREMISE_CODES.get(main.id, RefusalCode.PREMISE_FAILED)
-        msg = (f"前提不成立（{premise_label(main.id)}：实测 {main.observed}"
-               f"{main.unit}，门槛 {main.threshold}{main.unit}）⇒ 这个数字不可引用；"
+        obs = ("**读不到**（未知，不是 0）" if main.observed is None
+               else f"实测 {main.observed}{main.unit}")
+        msg = (f"前提不成立（{premise_label(main.id)}：{obs}"
+               f"，门槛 {main.threshold}{main.unit}）⇒ 这个数字不可引用；"
                f"数值 {v.value} {v.unit} 只作历史记录")
         facts = dict(v.facts)
         if v.value is not None:
@@ -1052,10 +1131,12 @@ def enforce_budget(packet: dict[str, Any],
     于是一屏出现「最耗时的是 ?（None ms）」—— 把"什么最贵/多少钱/先改哪里"裁没了，
     却留着 8 条拒绝的处置散文。结论比处置散文重要，所以结论的 facts 放到最后。
 
-    每一步都只删"能从完整报告里再取回来"的东西，并把步骤名写进 `cost.trimmed` ——
-    读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。丢掉的
-    拒绝 code 列在 `refusals_omitted` 里，丢掉的判词 id 列在 `verdicts_more.ids` 里
-    （V-1：结论不许静默消失），所以"少了什么"永远是可查的。
+    每一步都只删"能从完整报告里再取回来"的东西，并**只把真正改动了包的步骤**写进
+    `cost.trimmed`（R-110：旧实现连 no-op 步骤也记，"裁剪步骤"因此不等于"真的裁了什么"）。
+    条目级留痕有三个出口，所以"少了什么"永远可查：
+      * 丢掉的拒绝 code → `refusals_omitted.codes`；
+      * 丢掉的判词 id → `verdicts_more.ids`（保持原序；**先保结论四条**，见 `_cap_verdicts`）；
+      * 被裁掉 facts 的判词 id → `cost.trimmed_ids`（`"<步骤>:<id>"`，R-106）。
     """
     trimmed: list[str] = []
     # `cost.trimmed` 自己也是包的一部分，所以先放好空列表再量，之后每应用一步就把它
@@ -1155,22 +1236,64 @@ def enforce_budget(packet: dict[str, Any],
         `verdicts_more` 本来就是为"包里少了判词"而存在的字段；此前只有 `build()` 的
         `MAX_VERDICTS` 截断会写它，预算裁剪这一步不写 —— 于是一屏上少了 `occupancy`
         这种判词（还带着"物理不可能"守卫），读者与 agent 都无从知道。
-        这里把两处截断的 id 合并进同一个字段（`count` 是总数）。
+        这里把两处截断的 id 合并进同一个字段（`count` 是总数），并**按原序**输出。
         """
         ids = [i for i in dropped_ids if i]
         if not ids:
             return
         more = packet.get("verdicts_more") or {"count": 0, "ids": []}
         more["count"] = int(more.get("count") or 0) + len(ids)
-        more["ids"] = list(more.get("ids") or []) + ids
+        more["ids"] = sorted(list(more.get("ids") or []) + ids,
+                             key=lambda i: _rank.get(str(i), len(_rank)))
         packet["verdicts_more"] = more
 
+    # `verdicts_more.ids` 必须按**判词在包里出现过的原序**输出（R-110）。裁剪会分几轮
+    # （先 6 条、再 4 条），每轮各自"按当前顺序"记，合起来就不是原序了。所以先建一张排名表：
+    # `build()` 已经记下的 id 排在最前（它们的相对顺序本来就是原序），再排当前包里的顺序。
+    _rank: dict[str, int] = {}
+    for i, vid in enumerate((packet.get("verdicts_more") or {}).get("ids") or []):
+        _rank.setdefault(str(vid), i)
+    for i, v in enumerate(packet.get("verdicts") or [], start=len(_rank)):
+        _rank.setdefault(str(v.get("id") or ""), i)
+
+    def _record_trimmed_items(step: str, ids: list[str]) -> None:
+        """把**被裁掉的条目 id** 记进 `cost.trimmed_ids`（第六轮 R-106/R-110）。
+
+        为什么：`cost.trimmed` 只记步骤名，于是"facts 被裁"这件事知道**发生了**，却不知道
+        **是谁的 facts 没了**（集群②在 2400 个场景里命中 663 次 facts 被裁，全都只有步骤名）。
+        记成 `"<步骤>:<id>"` 的扁平列表：既省字节，又能直接 grep。
+        """
+        ids = [i for i in ids if i]
+        if not ids:
+            return
+        got = packet["cost"].setdefault("trimmed_ids", [])
+        got.extend(f"{step}:{i}" for i in ids)
+
+    def _drop_facts(predicate) -> None:
+        """按条件丢 facts，并**逐个记下 id**（不记的话"结论的数字没了"无从察觉）。"""
+        dropped = [v.get("id") for v in packet.get("verdicts") or []
+                   if v.get("facts") is not None and predicate(v)]
+        for v in packet.get("verdicts") or []:
+            if v.get("facts") is not None and predicate(v):
+                v.pop("facts", None)
+        return dropped
+
     def _cap_verdicts(n: int) -> None:
+        """按预算保留 n 条判词，**先保结论四条**（R-106）。
+
+        旧实现是 `vs[:n]` —— 靠位置，只因为 `BUILDERS` 的顺序恰好把结论排在前面才没丢；
+        集群②改一下顺序就构造出"结论四条整条掉出包"的红。这里改成按 `PRIMARY_FACT_IDS`
+        显式排序选留，而**输出顺序保持不变**（外部消费者看到的判词顺序不变）。
+        """
         vs = packet.get("verdicts") or []
         if len(vs) <= n:
             return
-        _record_dropped_verdicts([v.get("id") for v in vs[n:]])
-        packet["verdicts"] = vs[:n]
+        primary = [i for i, v in enumerate(vs) if v.get("id") in PRIMARY_FACT_IDS]
+        rest = [i for i, v in enumerate(vs) if v.get("id") not in PRIMARY_FACT_IDS]
+        keep = set((primary + rest)[:n])
+        # 丢掉的是"原来顺序里没被选中的"，所以 `verdicts_more.ids` 保持原序（R-110）
+        _record_dropped_verdicts([v.get("id") for i, v in enumerate(vs) if i not in keep])
+        packet["verdicts"] = [v for i, v in enumerate(vs) if i in keep]
 
     steps = [
         ("unmeasured_examples", lambda: [g.pop("examples", None) for g in packet["unmeasured"]]),
@@ -1190,8 +1313,9 @@ def enforce_budget(packet: dict[str, Any],
         # 这四条是"什么最贵、多少钱、先改哪里"的结论本身 —— 一屏上出现
         # "最耗时的是 ?（None ms）"就等于把结论裁没了。所以先只裁次要判词的 facts，
         # 到下一个更狠的级别才动这四条。
-        ("facts_secondary", lambda: [v.pop("facts", None) for v in packet["verdicts"]
-                                     if v.get("id") not in PRIMARY_FACT_IDS]),
+        ("facts_secondary", lambda: _record_trimmed_items(
+            "facts_secondary",
+            _drop_facts(lambda v: v.get("id") not in PRIMARY_FACT_IDS))),
         # V-1（第五轮 P0）：**拒绝散文先裁、判词最后裁**。
         # 旧顺序把 `verdicts` 排在 `refusal_entries`/`refusal_action_text` 之前，
         # 与函数自己的 docstring（"结论比处置散文重要"）相反：真机 9 条判词 → 包 6 条，
@@ -1208,11 +1332,17 @@ def enforce_budget(packet: dict[str, Any],
         ("verdicts_hard_cap", lambda: _cap_verdicts(VERDICT_KEEP_HARD)),
         # **最后一级**：到这一步才允许把"什么最贵/多少钱/先改哪里/真值偏差"的 facts 丢掉。
         # 读者仍然能拿到判词 id/status/value/unit 与全部拒绝码，只是细节要回完整报告看。
-        ("facts_primary", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),
+        ("facts_primary", lambda: _record_trimmed_items("facts_primary", _drop_facts(lambda v: True))),
     ]
     for name, fn in steps:
+        before = dumps(packet)
         fn()
-        packet["cost"]["trimmed"].append(name)
+        # `cost.trimmed` 的语义（R-110）：**实际改动了包的步骤**，按应用顺序。
+        # 旧实现把 no-op 步骤也记进去，"裁剪步骤"于是不等于"真的裁了什么"。
+        # 判据用内容比较而不是字节数：有一步（裁判词）会同时**删**判词、**加** `verdicts_more`
+        # 记账，净字节可能变大 —— 按字节数判会漏记。
+        if dumps(packet) != before:
+            packet["cost"]["trimmed"].append(name)
         if _size() <= limit:
             break
     if _size() > limit:

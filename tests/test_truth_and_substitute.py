@@ -2,6 +2,11 @@
 
 这一族功能的失败模式很特别：**它不会崩，它会很安静地骗人**。所以测试的重点是
 "什么时候必须拒绝给数"和"写进 `.ncu-rep` 的东西能不能被署名、会不会被误当计数器读数"。
+
+**真报告口径未验证**（R-107/R-90）：对拍那一半用的是与真实 dataclass 同构的**替身**
+（`tests/test_ncu_rep.py` 则用假 `ncu_report` 模块）—— 仓库里没有真 ncu 报告，
+所以这里验的是**包装逻辑**，不是真报告上的对拍结果。README/CHANGELOG 的措辞由
+`tests/test_claim_maturity.py` 钉住，别把它改回"已验证"。
 """
 
 from __future__ import annotations
@@ -151,12 +156,14 @@ def _kr_with(metrics, packet=None, launches=None):
     return kr
 
 
-def _m(name, value, prov=Provenance.DERIVED, reason=None):
+def _m(name, value, prov=Provenance.DERIVED, reason=None, unit=""):
+    """`unit` 必须给**真实**单位：R-110 之后空串不再被当成"按假设换算"，
+    所以夹具里给 `gpu__time_duration.sum` 这类同源行必须写 `"ms"`（与 `sections.py` 一致）。"""
     if prov is Provenance.UNAVAILABLE:
         from kernoscope.refusals import RefusalCode
 
         return Metric.unavailable(name, reason or "不给数", code=RefusalCode.NO_NVML)
-    return Metric(name, value, prov)
+    return Metric(name, value, prov, unit=unit)
 
 
 class _RawRow:
@@ -226,9 +233,9 @@ def test_same_source_ncu_rows_are_written_with_ncu_units_and_labels():
     assert labels["gpu__time_duration.sum"] == "Duration"
     assert labels["launch__registers_per_thread"] == "Registers Per Thread"
 
-    kr = _kr_with([_m("gpu__time_duration.sum", 0.089728, Provenance.EXACT),
+    kr = _kr_with([_m("gpu__time_duration.sum", 0.089728, Provenance.EXACT, unit="ms"),
                    _m("launch__registers_per_thread", 16.0, Provenance.EXACT),
-                   _m("ks__launch_time_mean", 0.089728)])
+                   _m("ks__launch_time_mean", 0.089728, unit="ms")])
     metrics, _, units, dropped, by_ns, _ = select_metrics(kr)
     by_name = {m.name: m for m in metrics}
     assert "gpu__time_duration.sum" in by_name and "gpu__time_duration.sum" not in by_ns
@@ -352,16 +359,109 @@ def _build_plan_for_sidecar():
         launches = [_L()]
         sections = [_Sec([_M("gpu__time_duration.sum", 4.755, "ms"),
                           _M("ks__launch_time_mean", 4.755, "ms"),
-                          _M("launch__local_mem_per_thread", 0.0, "B")])]
+                          _M("launch__local_mem_per_thread", 0.0, "B"),
+                          _M("launch__waves_per_multiprocessor", 1.0, "B"),
+                          _M("gpu__time_duration.avg", 2.0, "ms")])]
 
     return build_plan(_K(), packet={"verdicts": []}, tool_version="test")
 
 
+#: 这三条都必须被**命名空间规则**丢弃：它们不在 `NCU_ROWS` 白名单里，也不带自有前缀。
+#: （`gpu__time_duration.sum` 是白名单里的同源行，能写；`ks__launch_time_mean` 带自有前缀。）
+NAMESPACE_DROPPED = frozenset({"launch__local_mem_per_thread",
+                               "launch__waves_per_multiprocessor",
+                               "gpu__time_duration.avg"})
+
+
 def test_sidecar_names_a_value_that_can_actually_be_dropped():
-    """V-12：旧散文拿 `gpu__time_duration.sum` 当"被命名空间丢弃"的例子 —— 结构上不可能。"""
+    """V-12 + R-105/W-11：`by_namespace` 的**丢弃集合必须逐个相等**。
+
+    旧正向测试只断言"例子里那个名字在集合里"（`in`）。把 `select_metrics` 的过滤**窄化**
+    成只保护例子名（`if m.name != "launch__local_mem_per_thread"`）时，
+    `launch__waves_per_multiprocessor` / `gpu__time_duration.avg` 会**漏进** `.ncu-rep`
+    —— 而 `in` 断言照样绿（18 passed，报告实测）。所以这里改成集合相等 + 反向不泄漏。
+    """
     plan = _build_plan_for_sidecar()
+    assert set(plan.dropped_by_namespace) == set(NAMESPACE_DROPPED), (
+        "被命名空间规则丢弃的名字集合必须逐个相等（只含例子名说明过滤被窄化了）："
+        f"{sorted(plan.dropped_by_namespace)} vs {sorted(NAMESPACE_DROPPED)}")
+    # 同源行（白名单里的 exact）**不**该出现在丢弃集合里 —— 结构上不可能
     assert "gpu__time_duration.sum" not in plan.dropped_by_namespace
-    assert "launch__local_mem_per_thread" in plan.dropped_by_namespace
+    written = {m.name for m in plan.metrics}
+    assert not (written & NAMESPACE_DROPPED), (
+        f"命名空间名泄漏进了 .ncu-rep：{sorted(written & NAMESPACE_DROPPED)}")
+    assert written == {"gpu__time_duration.sum", "ks__launch_time_mean"}, sorted(written)
     from kernoscope.ncrep.substitute import render_sidecar
     text = render_sidecar(plan, ncu_rep_path="out.ncu-rep")
     assert "launch__local_mem_per_thread" in text
+
+
+# --------------------------------------------------------------------------- #
+# R-93③/R-108：署名表整数按整数印；署名文件名按自家约定 `<path>.ATTRIBUTION.txt`
+# --------------------------------------------------------------------------- #
+def test_sidecar_prints_integers_as_integers_not_scientific_notation():
+    """`1048576` 被 `{:.6g}` 印成 `1.04858e+06`（R-93③ / R-108 的原话）。
+
+    旧行为回来的话这条会红：整数（含同源行换算后的 ns）必须是整数写法，且与 details 页
+    共用**同一个**格式函数 —— 同一份产物里两种写法本身就是不自洽。
+    """
+    from kernoscope.ncrep import profile, substitute
+    from kernoscope.ncrep.substitute import render_sidecar
+
+    assert substitute.format_value is profile.format_value, (
+        "署名表与 details 页必须共用同一套数字格式（别各自抄一份 `:.6g`）")
+
+    kr = _kr_with([
+        _m("launch__thread_count", 1048576.0, Provenance.EXACT),    # 旧行为：1.04858e+06
+        _m("gpu__time_duration.sum", 22.5248, Provenance.EXACT, unit="ms"),  # ×1e6 → 22524800 ns
+    ])
+    plan = build_plan(kr, packet={"verdicts": []}, tool_version="test")
+    text = render_sidecar(plan, ncu_rep_path="out.ncu-rep")
+
+    assert "| `launch__thread_count` | 1,048,576 |" in text, text
+    assert "| `gpu__time_duration.sum` | 22,524,800" in text, text
+    assert "1.04858e+06" not in text and "2.25248e+07" not in text, (
+        "整数不许用科学计数法（同模块的 profile.format_value 早就这么写了）：\n" + text)
+    # 换算系数也是整数；`1e+06` 同样是指数记法
+    assert "× 1,000,000）" in text, text
+
+
+def test_sidecar_name_follows_the_path_attribution_convention(tmp_path):
+    """约定是 `<path>.ATTRIBUTION.txt`（`path` = 那份 `.ncu-rep` 的路径）。
+
+    R-108 记的错法是 `file.with_suffix(".ATTRIBUTION.txt")` ⇒ `rep.ATTRIBUTION.txt`：
+    读的人按约定去找 `rep.ncu-rep.ATTRIBUTION.txt` 会找不到（归档的 m6 证据现在就是这个错法）。
+    这条钉住"路径**原样拼接**"——改回 with_suffix、或让写法随路径后缀变化，都会红。
+    """
+    kr = _kr_with([_m("ks__cost_per_mtok", 12.5)])
+    out = tmp_path / "rep.ncu-rep"
+    res = write_substitute(kr, str(out), packet={"verdicts": []}, tool_version="test")
+    assert res.sidecar_path == str(out) + ".ATTRIBUTION.txt", res.sidecar_path
+    assert Path(res.sidecar_path).name == "rep.ncu-rep.ATTRIBUTION.txt"
+    assert Path(res.sidecar_path).exists()
+    assert not (tmp_path / "rep.ATTRIBUTION.txt").exists(), (
+        "不许把 `.ncu-rep` 后缀替换掉：署名文件名必须是 `<path>.ATTRIBUTION.txt`")
+    # 文件头的 `file:` 行要指向那份报告：归档时一改名就看不出它属于哪份报告了
+    assert f"file: {out}" in Path(res.sidecar_path).read_text(encoding="utf-8")
+
+
+def test_empty_unit_is_not_converted_by_assumption():
+    """R-110（第六轮 W-13）：工厂默认的 `unit=""` 不能被当成"按假设换算"。
+
+    修前 `select_metrics` 用 `m.unit or None` 把空串变成"调用方拿不到单位"，于是
+    `gpu__time_duration.sum` 会被无条件 ×1e6 写出去（端到端曾写出 9.51e11 ns）。
+    单位不明的量必须**不写**，并出现在"因命名空间/单位规则未写入"的名单里。
+    """
+    from kernoscope.ncrep.substitute import select_metrics
+
+    kr = _kr_with([
+        _m("gpu__time_duration.sum", 9.51, Provenance.EXACT),        # 单位缺失 ⇒ 不许换算
+        _m("launch__thread_count", 1048576.0, Provenance.EXACT),     # from_units 含 "" ⇒ 不受影响
+    ])
+    metrics, _, _, _, by_ns, _ = select_metrics(kr)
+    names = {m.name for m in metrics}
+    assert "gpu__time_duration.sum" not in names, \
+        "单位不明的同源行不许按假设换算后写出去"
+    assert "gpu__time_duration.sum" in by_ns, by_ns
+    assert "launch__thread_count" in names, \
+        "`from_units` 里本来就含空串的行不受影响（否则这条修复会误伤）"

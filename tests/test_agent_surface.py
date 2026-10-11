@@ -489,3 +489,50 @@ def test_skill_scripts_resolve_python_without_relying_on_path(tmp_path):
     r = subprocess.run(["bash", "-c", f'source "{ks}" && KS_PY=/bin/echo ks_python'],
                        capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.strip() == "/bin/echo", (r.stdout, r.stderr)
+
+
+# --------------------------------------------------------------------------
+# 第六轮 W-6：生成文档读的是生成器自己的**手写表**，于是 `cost_per_token` 在
+# `references/verdicts.md` 里写着「（无强制前提）」，而代码会给它挂三条环境前提，
+# `--gates` 却 9/9（agentrefs 只校验"生成物 == 生成器输出"）。这里补上另一半：
+# **代码实际发出的前提 ⊆ 文档列出的前提**。
+# --------------------------------------------------------------------------
+def test_every_premise_the_code_emits_is_documented():
+    from kernoscope.packet import PREMISE_LABELS, VERDICT_IDS, VERDICT_PREMISES
+
+    # ① 判词表覆盖全部判词 id，且每个前提都有可读标签
+    assert set(VERDICT_PREMISES) == set(VERDICT_IDS), (
+        f"前提表与判词表不一致：{sorted(set(VERDICT_PREMISES) ^ set(VERDICT_IDS))}")
+    for vid, pids in VERDICT_PREMISES.items():
+        for p in pids:
+            assert p in PREMISE_LABELS, f"{vid} 声明的前提 {p!r} 没有标签（文案会直接印 id）"
+
+    # ② 静态扫描：源码里出现的每个 `Premise("…")` 都必须在标签表里
+    emitted: set[str] = set()
+    for f in (ROOT / "src" / "kernoscope").rglob("*.py"):
+        emitted |= set(re.findall(r'Premise\(\s*"([a-z_0-9]+)"', f.read_text(encoding="utf-8")))
+    assert emitted, "一个 `Premise(\"…\")` 字面量都没扫到（扫描逻辑退化了？）"
+    missing = sorted(emitted - set(PREMISE_LABELS))
+    assert not missing, f"代码会发出这些前提，但文档/标签表里没有：{missing}"
+
+    # ③ 反向：标了标签的前提必须真的有人发（防止加了标签却没人用）
+    unused = sorted(set(PREMISE_LABELS) - emitted - {p for ps in VERDICT_PREMISES.values()
+                                                    for p in ps})
+    assert not unused, f"这些前提有标签但没有任何判词/代码会发它：{unused}"
+
+    # ④ 成本判词必须列出三条环境前提（旧文档在这里写「无强制前提」）
+    assert {"env_gpu_exclusive", "env_gpu_busy_pct", "env_no_throttle_pct"} <= set(
+        VERDICT_PREMISES["cost_per_token"]), VERDICT_PREMISES["cost_per_token"]
+
+
+def test_generated_verdicts_reference_lists_the_premises_from_code():
+    """生成的 `verdicts.md` 必须与 `VERDICT_PREMISES` 同源（标签要逐条出现在对应行里）。"""
+    from kernoscope.packet import PREMISE_LABELS, VERDICT_PREMISES
+
+    text = (ROOT / "skills" / "kernoscope" / "references" / "verdicts.md").read_text(
+        encoding="utf-8")
+    row = next((ln for ln in text.splitlines() if ln.startswith("| `cost_per_token`")), "")
+    assert row, "verdicts.md 里没有 cost_per_token 那一行"
+    for p in VERDICT_PREMISES["cost_per_token"]:
+        assert PREMISE_LABELS[p] in row, f"{p} 的标签没出现在 cost_per_token 行里：{row}"
+    assert "env_shared_gpu" in row and "env_throttled" in row, row

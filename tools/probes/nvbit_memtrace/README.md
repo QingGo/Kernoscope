@@ -31,15 +31,22 @@ A/B 把它推翻了：**同一份 app（`nvcc -O3 -arch=sm_89`，两个 kernel�
 > （版本 + 构建方式 + 产物布局），本环境唯一实测可用的组合就是上表第一行；
 > 换环境后要改这张表，得先在本机把 A/B 重做一遍（同一份 app、同一 `NO_EAGER_LOAD=0`、只换 `.so`）。
 
-配套的三条事实（都有门禁守着）：
+配套的事实（都有门禁守着）：
 
 * `collect.sh` **两种布局都找**（`tools/build/mem_trace/mem_trace.so` 与
   `tools/mem_trace/mem_trace.so`）；显式给了 `NVBIT_PATH`/`NVBIT_MEMTRACE_SO` 却找不到产物时
   **报错退出**（`exit 2`）并列出**实际找过的路径**，不再"静默跳过"、也不再让你重复指同一个变量。
 * 版本从**实物**里读（别处不许手抄）：`nvbit_version.sh` 先看 `$NVBIT_PATH/core/nvbit.h` 的
   `NVBIT_VERSION`，退化时看 `.so` 里的整行版本字符串。
-  `bench/artifacts/*/environment.txt` 现在同时记 `nvbit:`（路径）与 `nvbit_version:`（版本）
-  —— 这一整节的结论就建立在版本上，只记路径等于没记。
+  `bench/artifacts/*/environment.txt` 现在同时记**两处**（R-102）：
+  `nvbit:` + `nvbit_version:`（`NVBIT_PATH` 那棵树）与 `memtrace_so:` + `memtrace_so_version:`
+  （**这次真正被注入的那份 `.so`** 及其实物版本）。两者**可以不是同一棵树** —— `collect.sh`
+  优先用环境里预置的 `NVBIT_MEMTRACE_SO`（真机上 `NVBIT_PATH` 那棵树里 3 份 v1.8.1 全挂，
+  实际采到轨迹的是另一棵树里的构建）。所以"轨迹是哪份产物采的"看 `memtrace_so` 那两行，
+  不要拿 `nvbit_version` 去解释它；版本号本身只是**指认构建**的线索，能不能用要看实物 A/B。
+* `collect.sh --resolve-only` 是这两行的唯一来源：它只回答"这次会用哪份 `.so`、它是哪个版本"
+  （机器可读两行；读不出就写 `n/a`，绝不编），`bench/run.sh` 问它而不自己另抄一份候选路径 ——
+  发现顺序只有一处真源。
 * `tests/test_nvbit_smoke.py` 把本文件的矩阵**解析成结构化行**，与测试内写死的实测结论逐格比对
   （版本 ↔ 构建命令 ↔ 布局 ↔ 结论），并**按本文件的说明真采一段轨迹**。把 v1.8.1 那行的命令换回
   实测失败的老 Makefile 写法、把两行的结论对调、或删掉任一候选路径，门禁都会红；本机完全没有

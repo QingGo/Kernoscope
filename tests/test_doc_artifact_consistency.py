@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,6 +29,8 @@ from kernoscope import __version__
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "bench" / "artifacts"
+
+_M = sys.modules[__name__]
 
 
 def _artifact_dirs() -> list[Path]:
@@ -36,11 +40,74 @@ def _artifact_dirs() -> list[Path]:
                   key=lambda p: p.name)
 
 
+def _artifact_dirs_with_profile() -> list[Path]:
+    """带 `machine-profile.json` 的产物目录（按名字排序）。"""
+    return [d for d in _artifact_dirs() if (d / "machine-profile.json").exists()]
+
+
 def _newest() -> Path:
+    """「最新的产物」= 最后一个**含 `machine-profile.json`** 的目录。
+
+    唯一真源（W-10）：与 `tools/gen_calibration_excerpt.py:newest_profile()` 同一套判据。
+    旧实现这里是"名字排序最后一个"，于是两套定义可以各指一份产物而全绿 ——
+    定这份判据的人是 CALIBRATION 节选（它只能引用有 profile 的那一份）。
+    """
+    dirs = _artifact_dirs_with_profile()
+    if dirs:
+        return dirs[-1]
+    if not _artifact_dirs():
+        pytest.skip("bench/artifacts 下还没有产物目录")
+    pytest.fail("bench/artifacts 下没有一个含 machine-profile.json 的产物目录 —— "
+                "标定证据必须有 profile（否则 CALIBRATION 的节选没有可引用的产物）")
+
+
+def _newest_definition_conflict() -> str | None:
+    """两套「最新产物」定义是否互相矛盾（None = 一致）。W-10 的判据。
+
+    定义 A：按目录名排序的最后一个（产物名就是时间戳，读者会这么读）。
+    定义 B：最后一个**含 `machine-profile.json`** 的（`newest_profile()`，CALIBRATION
+    节选由它渲染）。新增一个不含 profile 的更新目录会让 A、B 指向两份不同的产物 ——
+    那时 `bench/artifacts/README.md` 的「现行」标签与 CALIBRATION 的引用互相打脸，
+    而旧门禁全绿（V-20 只修了标签那一半）。
+    """
     dirs = _artifact_dirs()
     if not dirs:
-        pytest.skip("bench/artifacts 下还没有产物目录")
-    return dirs[-1]
+        return None
+    by_name = dirs[-1]
+    by_profile = next((d for d in reversed(dirs)
+                       if (d / "machine-profile.json").exists()), None)
+    if by_profile is None:
+        return (f"最新产物 {by_name.name} 没有 machine-profile.json —— 没有 profile 的目录"
+                f"不能当标定证据（它进不了 CALIBRATION 节选）。")
+    if by_name.name != by_profile.name:
+        return (f"「最新产物」有两套定义且互相矛盾：按目录名排序是 {by_name.name}，"
+                f"按「最后一个含 machine-profile.json」是 {by_profile.name} —— "
+                f"`bench/artifacts/README.md` 的「现行」标签与 CALIBRATION 的节选会互相打脸。"
+                f"请让 {by_name.name} 也带 machine-profile.json（或把它移出产物登记）。")
+    return None
+
+
+def test_newest_artifact_has_one_definition(monkeypatch, tmp_path):
+    """W-10：`_newest()` 与 `gen_calibration_excerpt.newest_profile()` 不许各说各话。"""
+    conflict = _newest_definition_conflict()
+    assert conflict is None, conflict
+    # 两套实现在本仓库里必须指向同一份产物（现状全都有 profile，所以应当相等）
+    mod = _load_calib_excerpt()
+    assert _newest() == mod.newest_profile()[0], (
+        "本测试模块的 `_newest()` 与生成器的 `newest_profile()` 指向了不同的产物")
+
+    # 负样本：新增一个**不含 profile** 的、名字更新的产物目录 ⇒ 必须报冲突（旧实现全绿）
+    older = tmp_path / "20261011-140642"
+    older.mkdir()
+    (older / "machine-profile.json").write_text("{}", encoding="utf-8")
+    stray = tmp_path / "20261012-000000"
+    stray.mkdir()                                    # 比 older 新，但没有 profile
+    monkeypatch.setattr(_M, "_artifact_dirs", lambda: [older, stray])
+    bad = _newest_definition_conflict()
+    assert bad, "新增一个不含 profile 的更新产物目录后，两套「最新」定义没有报冲突"
+    assert stray.name in bad and older.name in bad, bad
+    # `_newest()` 本身也必须按 profile 判据走（而不是名字排序的那个 stray）
+    assert _newest() == older
 
 
 # --------------------------------------------------------------------------
@@ -518,42 +585,146 @@ def test_a_new_bench_run_forces_the_docs_to_follow():
         f"README 的「本次」误差带必须是 {band}"
 
 
+# CALIBRATION 散文允许点名、且必须与**现行产物**一致的那些字段（与
+# `tools/gen_calibration_excerpt.py` 的取值口径一致：标量 + 两侧峰值 + matmul 两读法）。
+# 逐字段登记的理由：散文既讲道理也会点名数字，点名时只能是现行产物的值；旧门禁只登记了
+# matmul 的 `tflops`/`caliber_spread_pct`，于是注入旧的 `copy_gbs 910.0` /
+# `l2_read_peak_gbs 2195.8` / 旧 `ts` 都无人拦（W-8/R-62）。
+def _calib_prose_needles(prof: dict) -> dict[str, set[str]]:
+    """`字段路径 -> 该产物在这个字段上的字面串集合`（只收散文可能引用的标量）。"""
+    out: dict[str, set[str]] = {}
+
+    def add(what: str, val: Any) -> None:
+        if val is None or isinstance(val, bool):
+            return
+        out.setdefault(what, set()).add(str(val))
+
+    add("ts", prof.get("ts"))
+    dram = prof.get("measured_dram") or {}
+    for k in ("copy_gbs", "read_gbs", "write_gbs"):
+        add(f"measured_dram.{k}", dram.get(k))
+    l2_peak = (prof.get("l2_info") or {}).get("l2_read_peak_gbs") or prof.get("l2_read_peak_gbs")
+    add("l2_read_peak_gbs", l2_peak)
+    for dtype, v in (prof.get("measured_matmul_tflops") or {}).items():
+        v = v or {}
+        add(f"{dtype}.tflops", v.get("tflops"))
+        pct = v.get("caliber_spread_pct")
+        if pct is not None:
+            add(f"{dtype}.caliber_spread_pct", f"{pct}%")
+            out.setdefault(f"{dtype}.caliber_spread_pct", set()).add(str(pct))
+    return out
+
+
+def _calibration_prose() -> str:
+    """`CALIBRATION.md` 去掉两个生成块之后的**散文**。"""
+    mod = _load_calib_excerpt()
+    text = (ROOT / "CALIBRATION.md").read_text(encoding="utf-8")
+    for b, e in ((mod.BEGIN, mod.END), (mod.CALIB_BEGIN, mod.CALIB_END)):
+        text = text[:text.index(b)] + text[text.index(e) + len(e):]
+    return text
+
+
+_NUM_NEEDLE_RE = re.compile(r"^\d+(?:\.\d+)?%?$")
+
+
+def _prose_cites(needle: str, prose: str) -> bool:
+    """散文里引用了这个字面值吗 —— **数字必须落在词边界上**。
+
+    反例（真实的假阳性）：旧产物的 `float32.caliber_spread_pct=2.6` 会匹配正文里规格表的
+    `82.6`；数字 needle 不做边界就只是"看起来像"。`2.6` 命中 `2.6`/`2.6%`，
+    但不命中 `82.6`、`2.65`。
+    """
+    if not _NUM_NEEDLE_RE.match(needle):
+        return needle in prose
+    body = re.escape(needle[:-1]) + "%" if needle.endswith("%") else re.escape(needle) + "%?"
+    return re.search(r"(?<![\d.])" + body + r"(?![\d.])", prose) is not None
+
+
+def _calibration_prose_offenders(prose: str, newest: dict,
+                                 others: list[tuple[str, dict]]) -> list[str]:
+    """散文里出现的、**非现行产物**的字段值（W-8/R-62）。
+
+    现行产物自己的值允许出现（它们本来就在生成块里）；某份**旧**产物的值出现在散文里
+    就是漂了的证据 —— 除非那个字面串恰好也是现行产物的值（那时无法区分，放过）。
+    """
+    allowed: set[str] = set()
+    for needles in _calib_prose_needles(newest).values():
+        allowed |= needles
+    offenders: list[str] = []
+    for name, prof in others:
+        for what, needles in _calib_prose_needles(prof).items():
+            for needle in sorted(needles):
+                if needle in allowed:
+                    continue
+                if _prose_cites(needle, prose):
+                    offenders.append(f"{name} {what}={needle!r}")
+    return offenders
+
+
+def _calibration_prose_problem(prose: str | None = None) -> str | None:
+    """非现行值出现在 CALIBRATION 散文里吗（None = 干净）。"""
+    mod = _load_calib_excerpt()
+    art, newest = mod.newest_profile()
+    others = [(d.name, json.loads((d / "machine-profile.json").read_text(encoding="utf-8")))
+              for d in _artifact_dirs()
+              if d.name != art.name and (d / "machine-profile.json").exists()]
+    text = _calibration_prose() if prose is None else prose
+    offenders = _calibration_prose_offenders(text, newest, others)
+    if offenders:
+        return ("CALIBRATION 散文里手抄了**非现行产物**的数字（它们必须由生成块渲染，"
+                "否则会像 P3/W-8 那样漂）：\n  - " + "\n  - ".join(offenders)
+                + f"\n现行产物是 {art.name}；要引用数字请引用生成块。")
+    return None
+
+
 def test_calibration_prose_does_not_hand_copy_artifact_numbers():
-    """R-62：CALIBRATION 的**散文**里不许再出现"属于某份产物的数字"。
+    """R-62/W-8：CALIBRATION 的**散文**里不许出现"属于某份旧产物"的数字。
 
     第四轮验收报告 P3 的原形：正文写 bf16 3.8%（可分辨）、fp16 13.2%、fp32 0.7%/54.5、
     头条 166.9 —— 全部来自 `20261008-235142`，而紧邻上方的生成节选来自新产物，两者
-    直接矛盾。现在所有这类数字都在生成块里，散文只讲道理。
+    直接矛盾。第五轮只登记了 matmul 的 `tflops`/`caliber_spread_pct`，于是
+    `copy_gbs`/`read_gbs`/`write_gbs`/`l2_read_peak_gbs`/`ts` 这五类旧值仍无人拦。
+    """
+    problem = _calibration_prose_problem()
+    assert problem is None, problem
+
+
+def test_calibration_prose_gate_goes_red_for_every_stale_field():
+    """W-8 的负样本：**每一类**被引产物字段的旧值注进散文，门禁都必须报出来。
+
+    （注入发生在内存里：`_calibration_prose_problem(prose)` 走的就是上面那条门禁用的
+    同一段判定逻辑，所以这里红 == 那条测试会红。）
     """
     mod = _load_calib_excerpt()
-    text = (ROOT / "CALIBRATION.md").read_text(encoding="utf-8")
-    # 去掉两个生成块，剩下的才是"散文"
-    for b, e in ((mod.BEGIN, mod.END), (mod.CALIB_BEGIN, mod.CALIB_END)):
-        text = text[:text.index(b)] + text[text.index(e) + len(e):]
-    newest = mod.newest_profile()[1]
-    newest_vals = set()
-    for v in (newest.get("measured_matmul_tflops") or {}).values():
-        for k in ("tflops", "caliber_spread_pct"):
-            if v.get(k) is not None:
-                newest_vals.add(str(v[k]))
-    offenders: list[str] = []
-    for art in _artifact_dirs():
-        p = art / "machine-profile.json"
-        if not p.exists():
-            continue
-        prof = json.loads(p.read_text(encoding="utf-8"))
-        for dtype, v in (prof.get("measured_matmul_tflops") or {}).items():
-            for k in ("caliber_spread_pct", "tflops"):
-                val = v.get(k)
-                if val is None:
-                    continue
-                needle = f"{val}%" if k == "caliber_spread_pct" else str(val)
-                if needle in newest_vals:
-                    continue          # 现行产物的数会出现在生成块里，散文里也允许（下面再查）
-                if needle in text:
-                    offenders.append(f"{art.name} {dtype}.{k}={needle}")
-    assert not offenders, ("CALIBRATION 散文里手抄了产物数字（它们必须由生成块渲染，"
-                           "否则会像 P3 那样漂）：\n  - " + "\n  - ".join(offenders))
+    art, newest = mod.newest_profile()
+    others = [(d.name, json.loads((d / "machine-profile.json").read_text(encoding="utf-8")))
+              for d in _artifact_dirs()
+              if d.name != art.name and (d / "machine-profile.json").exists()]
+    assert others, "至少要两份产物才能证明'旧值'会被抓到"
+    allowed: set[str] = set()
+    for needles in _calib_prose_needles(newest).values():
+        allowed |= needles
+    real = _calibration_prose()
+    stale: list[tuple[str, str]] = []
+    for name, prof in others:
+        for what, needles in _calib_prose_needles(prof).items():
+            for needle in sorted(needles):
+                if needle not in allowed:
+                    stale.append((f"{name} {what}", needle))
+    assert stale, "没有任何旧值可注入 —— 负样本退化了（历史产物都被删了？）"
+    miss: list[str] = []
+    fields: set[str] = set()
+    for what, needle in stale:
+        fields.add(what.split(" ", 1)[1])
+        problem = _calibration_prose_problem(f"{real}\n\n（正文补一句：本机 {needle}。）\n")
+        if not problem or needle not in problem:
+            miss.append(f"{what}={needle}")
+    assert not miss, ("这些旧值注入散文后门禁没有红（W-8 的字段没纳管）：\n  - "
+                      + "\n  - ".join(miss))
+    # 五类字段都要有负样本（copy/read/write/l2/ts），否则"每类字段"这句话是空的
+    for needed in ("measured_dram.copy_gbs", "measured_dram.read_gbs",
+                   "measured_dram.write_gbs", "l2_read_peak_gbs", "ts"):
+        assert needed in fields, f"没有 {needed} 的旧值负样本（历史产物缺这个字段？）"
 
 
 # --------------------------------------------------------------------------

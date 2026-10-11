@@ -26,7 +26,7 @@ from typing import Any, Sequence
 
 from ..provenance import COUNTER_NAMESPACES, OUR_PREFIXES, Provenance
 from .ncu_rows import convert, row_for, section_of, unit_ok
-from .profile import RepMetric, RepSource, build_report
+from .profile import RepMetric, RepSource, build_report, format_value
 from .writer import FILE_VERSION
 
 # 署名标记：下游/审计可以 grep 这个字符串判断"这份报告是不是替代口径产物"。
@@ -126,7 +126,9 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
                 continue
             # V-9：白名单里的行带换算系数，系数只在"我们的单位确实是 from_units 里那个"时成立。
             # 单位不符就**不写这一行**（而不是乘错一个 1000× 的数）。
-            if row_for(m.name) is not None and not unit_ok(m.name, m.unit or None):
+            # `m.unit or None` 会把空串悄悄变成"调用方拿不到单位"，于是**按假设换算**：
+            # 工厂默认的 `unit=""` 就这样写出过 9.51e11 ns（R-110）。空串必须按"不知道"处理。
+            if row_for(m.name) is not None and not unit_ok(m.name, m.unit):
                 by_namespace.append(m.name)
                 continue
             if m.name in refused:
@@ -264,10 +266,15 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
     for m in plan.metrics:
         row = row_for(m.name)
         where = "ncu（同源）" if row is not None else "raw/本工具"
+        # 这里**不传单位**是刻意的：`plan.metrics` 的值保持**我们的**单位、单位字段是空
+        # （见 `select_metrics` 末尾），而"我们的单位是否与换算系数匹配"已经在
+        # `select_metrics` 里用**真单位**校验过了（R-110：空串不再被当成"按假设换算"）。
         value = convert(m.name, m.value)[0] if row is not None else m.value
-        note = (f"（我们的值 {m.value:.6g} ms × {row.scale:g}）"
+        # R-93③/R-108：整数值按整数印（`{:.6g}` 会把 1048576 印成 `1.04858e+06`），
+        # 与 profile 的 details 文本用同一个 `format_value` —— 同一份产物里两种写法就是不一致。
+        note = (f"（我们的值 {format_value(m.value)} ms × {format_value(row.scale)}）"
                 if row is not None and row.scale != 1.0 else "")
-        lines.append(f"| `{m.name}` | {value:.6g}{note} | "
+        lines.append(f"| `{m.name}` | {format_value(value)}{note} | "
                      f"{plan.unit_by_name.get(m.name, '') or '—'} "
                      f"| {plan.provenance_by_name.get(m.name, '')} | {where} |")
     if plan.device_name or plan.compute_capability:

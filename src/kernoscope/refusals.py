@@ -53,6 +53,11 @@ class RefusalCode(str, Enum):
     MIXED_LAUNCH_CONFIG = "mixed_launch_config"  # 同名 kernel 有多组配置，单值会误导
     NO_CLOCK_READING = "no_clock_reading"     # 没有 SM 时钟读数（NVML 被关/不可用）
 
+    # ---- 环境前提不成立（第六轮 W-6：这三条以前只以 id 的形式出现在降级文案里）----
+    ENV_SHARED_GPU = "env_shared_gpu"         # 同卡还有别的计算进程：读数被他人负载稀释
+    ENV_THROTTLED = "env_throttled"           # 窗口内有降频（功率封顶/热降频）：能效读数被扰动
+    ENV_READING_UNKNOWN = "env_reading_unknown"  # 环境读数**读不到**（不是读到 0）：多租户/降频状态未知
+
     # ---- 前提不成立：数据源在，但口径不成立 ----
     NO_LAUNCH_ACTIVITY = "no_launch_activity"  # 采到了但没有任何 kernel 活动
     NO_KERNEL_MATCH = "no_kernel_match"        # -k 过滤后为空
@@ -111,6 +116,9 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NOT_APPLICABLE: "该指标在本设备上无定义",
     RefusalCode.MIXED_LAUNCH_CONFIG: "同名 kernel 有多组 launch 配置，单值会误导",
     RefusalCode.NO_CLOCK_READING: "没有 SM 时钟读数",
+    RefusalCode.ENV_SHARED_GPU: "同卡还有别的计算进程：读数被他人负载稀释",
+    RefusalCode.ENV_THROTTLED: "窗口内有降频（功率封顶/热降频）：能效读数被扰动",
+    RefusalCode.ENV_READING_UNKNOWN: "环境读数读不到（未知）：不能当成\"没有\"",
     RefusalCode.NO_LAUNCH_ACTIVITY: "没有采到任何 kernel 活动",
     RefusalCode.NO_KERNEL_MATCH: "过滤后没有匹配的 kernel",
     RefusalCode.NO_KERNELS: "报告里没有 kernel",
@@ -316,6 +324,20 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup）",
         command="kernoscope --ks-window auto -- python bench_loop.py", cost_s=20.0,
         then_answers=("dram_bytes",)),
+    RefusalCode.ENV_SHARED_GPU: Remedy(
+        "等到同卡其他进程结束，或换一张独占的卡再测：多租户下读数含他人负载，"
+        "比值类口径（每 token 成本、显存带宽达成率）会被系统性稀释；"
+        "拿不到独占环境时，结论按 env_gpu_exclusive 降级为不可引用",
+        cost_kind="manual"),
+    RefusalCode.ENV_READING_UNKNOWN: Remedy(
+        "环境读数读不到时我们不猜：确认 NVML/nvidia-smi 可用（`kernoscope doctor`）、"
+        "驱动在采样期间没有重启，或换一个能读到管理计数器的实例；"
+        "\"未知\"与\"零\"是两件事，结论按未知降级",
+        command="kernoscope doctor", cost_s=5.0),
+    RefusalCode.ENV_THROTTLED: Remedy(
+        "等降频结束再测（温度回落/功率回到上限内），或提高功耗上限/换散热更好的实例；"
+        "降频期间的时间与能耗数字仍然真实，但把它当作能效结论会偏乐观（同一份工作花了更多电）",
+        command="nvidia-smi -q -d PERFORMANCE", cost_s=30.0),
     RefusalCode.MEM_BUSY_ZERO: Remedy(
         "显存忙碌恒为 0：确认被测负载真的在搬显存（而不是 L2 命中），且采样周期"
         "（200 ms）没有整段错过忙碌期",

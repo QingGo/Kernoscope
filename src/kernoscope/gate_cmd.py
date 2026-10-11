@@ -15,7 +15,10 @@
                                  顺序 ok > soft > refused）。`status` 是闭集，写错即用法错误
   `--require-actionable <id>`   判词必须 `actionable=true`（v1.0 包没有这个字段时，
                                  回退到"不是 refused 且列出的前提全部成立"）
-  `--forbid-code <code>`        出现该拒绝码即失败（含判词的 refusal 与 refusals 索引）。
+  `--forbid-code <code>`        出现该拒绝码即失败（**包里任何位置**：判词的 refusal、
+                                 refusals 索引与 refusals_omitted / unmeasured /
+                                 environment_refusals(_more) / next / env.blocked_by …，
+                                 见 `_refusal_codes`）。
                                  `code` 必须是 `refusals.py` 闭集成员：拼错的 code 是
                                  **用法错误（rc=2）**，绝不静默放绿
   `--max-metric <name>=<v>` /   指标阈值，**逐 kernel** 判（任一个违反即失败）：只要至少一个真
@@ -49,6 +52,10 @@ _STATUS_RANK = {"ok": 2, "soft": 1, "refused": 0}
 # 拼错的 code 永远不会出现在任何包里 —— 如果当成"没命中"，`--forbid-code counters_denyed`
 # 就会放绿，把一个拼错的规则伪装成"规则通过"。所以未知 code 是用法错误（rc=2）。
 _VALID_CODES: frozenset[str] = frozenset(c.value for c in RefusalCode)
+
+# 包里"一串拒绝码"用的键名（`unmeasured` 是 `{code,count}`，不是这里）。
+# packet.py 的 `_cited_codes()` 用的也是这两个名字。
+_CODE_LIST_KEYS: frozenset[str] = frozenset({"codes", "blocked_by"})
 
 
 def valid_codes() -> list[str]:
@@ -98,13 +105,44 @@ def _find_verdict(packet: dict[str, Any], vid: str) -> dict[str, Any] | None:
 
 
 def _refusal_codes(packet: dict[str, Any]) -> set[str]:
-    out = {str((v.get("refusal") or {}).get("code")) for v in _verdicts(packet)
-           if v.get("refusal")}
-    out |= {str(k) for k in (packet.get("refusals") or {}).keys()}
-    for d in packet.get("environment_refusals") or []:
-        if d.get("code"):
-            out.add(str(d["code"]))
-    out.discard("None")
+    """包里**所有**位置出现过的拒绝码 —— `--forbid-code` 只认这个集合。
+
+    R-98/W-3：旧实现只认三处（`verdicts[].refusal.code` / `refusals{}` 的键 /
+    `environment_refusals[].code`），于是 code 被预算裁进 `refusals_omitted.codes`、
+    `unmeasured[].code` 或 `environment_refusals_more.codes` 时，拼对的 `--forbid-code`
+    也 **rc=0 放绿** —— 而"code 被挪进 *_omitted/*_more"正是受限机（十几个 code）的常态，
+    拿 gate 卡 CI 就会被骗。
+
+    所以不再逐个枚举今天的载体，而是**扫全树**：每个 `code` 键、每个 code 列表
+    （`codes` / `blocked_by`），外加 `refusals` 表的键（那是 code 做键的地方）。将来
+    packet.py 再添一个携带 code 的字段，只要它沿用这两个名字就自动跟上；用新名字
+    （例如 `foo_codes`）就要在 `_CODE_LIST_KEYS` 里加一条 —— 这是刻意的：宁可漏掉
+    一个全新的形状（测试里逐个载体点名守着），也不把任意字符串列表都当成拒绝码。
+    非 code 的附带值（`for`/`action`/remedy 文本、环境消息里的散文）即使被扫到，
+    也不在 `RefusalCode` 闭集里，不会被误判命中。
+    """
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                # `code` 是单个 code；`codes` / `blocked_by` 是 code 列表
+                # （refusals_omitted.codes / *_more.codes / env.blocked_by，
+                #  packet.py 的 `_cited_codes()` 也是这两个名字）。别的字段一律往下钻。
+                if k == "code" and isinstance(v, str):
+                    out.add(v)
+                elif k in _CODE_LIST_KEYS and isinstance(v, list):
+                    # 列表元素通常是字符串；万一是 `{code: ...}` 形状也一并钻下去。
+                    out.update(x for x in v if isinstance(x, str))
+                    walk([x for x in v if not isinstance(x, str)])
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    walk(packet)
+    out |= {str(k) for k in (packet.get("refusals") or {})}
     return out
 
 
@@ -127,12 +165,33 @@ def _kernel_metrics(report: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 
 def _is_actionable(v: dict[str, Any]) -> bool:
-    """v1.1 起包里有 `actionable`；更早的包按"不是 refused 且前提全成立"回退。"""
+    """v1.1 起包里有 `actionable`；更早的包按"不是 refused 且前提全成立"回退。
+
+    R-103/W-7：显式字段**只接受真布尔** —— 旧实现 `bool(v["actionable"])` 会把字符串
+    `"false"`（JSON 手写包的常见形态）强转成 True，`--require-actionable` 于是 rc=0 放绿。
+    类型不对是**规则没法判**（用法错误 rc=2），不是"判词不合格"；调用方负责报这个 usage
+    error（`_actionable_type_error`），不会静默把它当通过。
+    """
     if "actionable" in v:
-        return bool(v["actionable"])
+        return v["actionable"] is True
     if v.get("status") == "refused":
         return False
     return all(p.get("ok", True) for p in v.get("premises") or [])
+
+
+def _actionable_type_error(v: dict[str, Any]) -> str | None:
+    """`actionable` 不是真布尔就返回一句用法错误（rc=2），否则 None。
+
+    `bool("false") is True`：字符串冒充布尔是"规则没法判"，绝不能退化成判词通过。
+    """
+    if "actionable" not in v:
+        return None
+    got = v["actionable"]
+    if isinstance(got, bool):
+        return None
+    return (f"判词 `{v.get('id')}` 的 `actionable` 必须是布尔值，收到 "
+            f"{type(got).__name__} {got!r}（字符串 `\"false\"` 不是 false —— "
+            f"不接受会强转的写法，否则门禁会放绿）")
 
 
 def _parse_assign(text: str) -> tuple[str, float]:
@@ -233,6 +292,15 @@ def run_gate(packet: dict[str, Any], *, report: dict[str, Any] | None = None,
         if v is None:
             res.failures.append(Failure(f"require-actionable {vid}", "包里没有这条判词"))
             res.passed = False
+            continue
+        # R-103：先判类型（用法错误），再判值。顺序不能反 —— 字符串 `"false"` 若先走
+        # `_is_actionable` 就会因为"不是真布尔"而报成"判词不可作为依据"（rc=1），
+        # 掩盖了其实是包/规则写错（rc=2）。
+        type_err = _actionable_type_error(v)
+        if type_err is not None:
+            res.usage_errors.append(f"require-actionable {vid}: {type_err}")
+            res.failures.append(Failure(f"require-actionable {vid}", type_err))
+            res.passed = False
         elif not _is_actionable(v):
             res.failures.append(Failure(
                 f"require-actionable {vid}", "判词不可作为依据（false/前提不成立/被拒）",
@@ -259,13 +327,19 @@ def run_gate(packet: dict[str, Any], *, report: dict[str, Any] | None = None,
 
     for spec, op, better in [(s, "max", "≤") for s in (max_metric or [])] + \
                             [(s, "min", "≥") for s in (min_metric or [])]:
+        # R-103/W-7：规则**语法/数值**写错（`foo`、`X=abc`）是用法错误（rc=2），与未知
+        # code/status 同类；旧实现只记一条 Failure（rc=1），而且因为没进 `checked`，
+        # 后面还会追加一句假的"一条规则都没给"——把"规则写错"伪装成"没给规则"。
+        res.checked.append(f"{op}-metric {spec}")
         try:
             name, threshold = _parse_assign(spec)
         except ValueError as exc:
-            res.failures.append(Failure(f"{op}-metric {spec}", str(exc)))
+            # 规则写错也是"给了一条规则"：进 checked，才不会再吐那句假的"一条规则都没给"。
+            msg = str(exc)
+            res.usage_errors.append(f"{op}-metric {spec}: {msg}")
+            res.failures.append(Failure(f"{op}-metric {spec}", msg))
             res.passed = False
             continue
-        res.checked.append(f"{op}-metric {name}")
         _check_metric_rule(res, op=op, better=better, name=name, threshold=threshold,
                            report=report or {})
 
@@ -339,12 +413,20 @@ def gate_main(argv: list[str]) -> int:
                    max_metric=list(args.max_metric), min_metric=list(args.min_metric),
                    packet_path=str(args.packet))
     if res.usage_errors:
-        # 规则本身写错（未知 code / 未知 status）：与"文件读不了"同一类用法错误，
-        # 按项目惯例 rc=2 并把可用取值打出来。**绝不退 0**。
+        # 规则本身写错（未知 code / 未知 status / 指标规则语法错 / actionable 不是布尔）：
+        # 与"文件读不了"同一类用法错误，按项目惯例 rc=2 并把可用取值打出来。**绝不退 0**。
+        if args.json:
+            # R-103/W-7：用法错误 + `--json` 也必须吐机器可读的包 —— 旧实现只在
+            # stderr 打印，stdout 全空，agent 拿到的 `usage_errors` 字段永远不可达
+            # （它只能看到"命令没输出"，分不清是用法错还是工具崩了）。rc=2 保持不变，
+            # 所以 CI 依然会失败。
+            print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
+            return 2
         for msg in res.usage_errors:
             print(f"error: {msg}", file=sys.stderr)
         print("hint: 拒绝码是 `refusals.py` 里 RefusalCode 的闭集（上面已列出全部合法取值）；"
-              "别忘了 `--forbid-code` 只吃 `.value`（小写下划线形式）。", file=sys.stderr)
+              "指标规则要写 `NAME=VALUE`（VALUE 是数）；别忘了 `--forbid-code` 只吃 `.value`"
+              "（小写下划线形式）。", file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))

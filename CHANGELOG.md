@@ -171,6 +171,42 @@
   说明表 `SUBCOMMAND_HELP` 与 `SUBCOMMANDS` 由测试对拍（加了子命令不写一句说明就红）；
   不做 argparse subparsers 大改，避免动到 `--` 之后目标命令的语义。
 
+### 决策包：结论不许静默消失（第六轮 R-106/R-110 + W-4/W-6 收口）
+
+- **判词身份不再用"截断显示串"**（第六轮 **W-4**）：`over_peak` 与 `roofline` 判断
+  "是不是同一个 kernel"改用**未截断名**（`Verdict.owner_key`，不进包）。旧实现比较
+  `facts["kernel"]` —— 那是 `_clip(name, 48)` 的显示串，而 C++ 模板实例化名前 48 字撞车是常态，
+  于是一个便宜 kernel 的超峰会否掉另一个 kernel 合法的 91% roofline。
+- **判词硬上限改为"先保结论四条"**（`kernel_time`/`cost_per_token`/`saving_estimate`/
+  `truth_vs_substitute`）：旧实现是 `vs[:n]`，靠位置，只因 `BUILDERS` 的顺序恰好把结论排在
+  前面才没丢。同时 `verdicts_more.ids` 改为**按判词在包里的原序**输出（预算裁剪分两轮
+  6 条→4 条时，旧实现把两轮的顺序首尾相接，不再等于原序）。
+- **决策包新增 `cost.trimmed_ids`**（`"<步骤>:<判词 id>"`）：facts 被裁以前只有步骤名，
+  2400 个场景里 facts 被裁 663 次却不知道是谁的 facts 没了（**R-106**）。
+- **`cost.trimmed` 的语义收窄**：只记**真正改动了包**的步骤。旧实现连 no-op 步骤也记，
+  于是"裁剪步骤"不等于"真的裁了什么"；判据用内容比较而不是字节数 —— 因为"裁判词"那一步会
+  同时删判词、加 `verdicts_more` 记账，净字节可能变大。
+- **新拒绝码两个**（闭集扩大，外部消费者可分支）：`env_shared_gpu`（同卡还有别的计算进程：
+  读数被他人负载稀释）、`env_throttled`（窗口内有降频：能效读数被扰动）。三条环境前提
+  `env_gpu_exclusive` / `env_gpu_busy_pct` / `env_no_throttle_pct` 现在有可读标签与 code ——
+  此前降级文案**直接印 id**（第六轮 **W-6**）。
+- **生成物 `references/verdicts.md` 的「需要的前提」列**改为从 `packet.VERDICT_PREMISES`
+  单一真源生成（旧实现读生成器自己的手写表，于是 `cost_per_token` 在文档里写「无强制前提」
+  而代码给它挂三条环境前提，`--gates` 却 9/9）。新增门禁：代码里出现的每个
+  `Premise("…")` 都必须在标签表里，且标了标签的前提必须真的有人发。
+- **README §8.2 补齐两条判据的语义**：`--max-metric`/`--min-metric` 是**逐 kernel** 判
+  （缺项 / `n/a` 都算不通过），`--forbid-code` 搜索包里**任何**能携带 code 的位置。
+
+### 导出路径与设备级判词（第六轮 R-110 收尾）
+
+- **`unit=""` 不再被当成"按假设换算"**：`select_metrics` 此前用 `m.unit or None` 把空串
+  变成"调用方拿不到单位"，于是 `gpu__time_duration.sum` 会被无条件 ×1e6 写进 `.ncu-rep`
+  （端到端曾写出 `9.51e11` ns）。现在空串按"不知道"处理 ⇒ 这一行**不写**，并出现在
+  "因命名空间/单位规则未写入"的名单里；`from_units` 本来就含空串的行（`launch__*`）不受影响。
+- **设备级超峰判词不再静默消失**（W-12）：超峰警告只挂在 `(device)` 伪 kernel 上时
+  （`-i` 回读老报告可达），`kernel_with` 会跳过 `(device)` ⇒ 旧实现让 `over_peak` 判词消失。
+  现在退回设备级读取，照常产出 `refused` + `actionable=false` 的判词。
+
 ### 不做什么：从散文变成可机检的决策记录
 
 - 新增仓库根 **`NON-GOALS.md`**：13 条「不做」的**单一真源**，每条写全六件事
@@ -245,10 +281,10 @@
 - `capabilities --brief` 的 `next_layer.bytes` 现在等于**它自己命名的那个命令的真实输出
   字节数**（以前用紧凑序列化算，低估 35%）；新增 `blocked_by_unavailable`。
 - `capabilities --json` 的输出不再多一个换行。
-- 文档命令门禁：**全部**可检命令（当前 59 条）都交给**真实解析器**（10 个子命令各有自己的
+- 文档命令门禁：**全部**可检命令（当前 56 条）都交给**真实解析器**（10 个子命令各有自己的
   `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
-  其中**读者面 11 条**逐字执行并断言结论（比例 11/59，不是"每条都断言"）。
+  其中**读者面 11 条**逐字执行并断言结论（比例 11/56，不是"每条都断言"）。
   注：这三个数字随代码走动，若与 `tests/test_documented_commands.py` 的断言不一致，以测试为准。
 
 ### 访存轨迹口径（NVBit）
@@ -295,6 +331,73 @@
   不再引用一份不含该数字的 bench 产物。
 - 标定工具的口径变体改为**测量时刻的真实设置快照**（过去三个变体其实在同一套设置下测，
   记录的是字面量）。
+
+### 产物身份、真值口径与测试卫生（第六轮 R-102/R-107/R-108/R-109）
+
+- **`environment.txt` 现在同时记两处 NVBit 身份**（R-102）：`nvbit:` + `nvbit_version:`
+  （`NVBIT_PATH` 那棵树）与 `memtrace_so:` + `memtrace_so_version:`（**这次真正被注入的那份
+  `.so`** 及其实物版本）。二者可以不是同一棵树：`collect.sh` 优先用环境里预置的
+  `NVBIT_MEMTRACE_SO`，而旧版 `bench/run.sh` 记的版本取自 `NVBIT_PATH` —— 真机上那棵树里 3 份
+  v1.8.1 全挂、实际采到轨迹的却是另一棵树里的构建，产物因此解释不了自己的轨迹。
+  新增 `collect.sh --resolve-only` 作为"用哪份 .so + 它的版本"的**唯一真源**（`bench/run.sh`
+  问它，不再抄候选路径）；版本一律从实物读，读不出写 `n/a`（**不编**）。口径是**构建级**：
+  版本号只用来指认构建，能不能用要看实物 A/B。
+- **"真值对拍"降级为"包装逻辑已验；真报告口径未验证"**（R-107/R-90）：仓库里没有真 ncu 报告
+  （唯一那份 `.ncu-rep` 的头是 `kernoscope-substitute-v1`），采一份需要 `ncu` 能收集计数器的
+  机器。README §4.3/§5/§8/§11 同步改口，并新增测试钉住这句话不被静默改回。
+- **署名文件的两处对齐**（R-108/R-93③④）：署名表里的整数按整数印（`1048576` 不再是
+  `1.04858e+06`；与 details 页共用 `ncrep.profile.format_value`，换算系数也写 `1,000,000`）；
+  文件名固定为**原样拼接**的 `<path>.ATTRIBUTION.txt`（`out.ncu-rep` →
+  `out.ncu-rep.ATTRIBUTION.txt`），不再有 `with_suffix` 那类把 `.ncu-rep` 吃掉、让人按约定找不到的写法。
+- **测试卫生**（R-109）：`pyproject` 的 `[tool.pytest.ini_options]` 加 `pythonpath = ["src"]`
+  —— editable 的 `.pth` 钉的是"安装那一刻"的源码树，单跑某个测试文件可能 import 到**别的**
+  `src` 而假绿（第六轮一个复核集群在改 `src/` 的变异上就是这样被骗的）。新增
+  `tests/test_src_authority.py`：断言 `kernoscope.__file__` 落在本仓库 `src/` 下、且进程里
+  没有第二棵树进来的子模块。
+
+### `gate` 的门禁契约（第六轮 W-3/W-7，R-98/R-103）
+
+- **`--forbid-code` 的搜索范围扩到"包里任何能携带 code 的位置"**：旧实现只查判词的
+  `refusal.code`、`refusals` 索引的键、`environment_refusals[].code`，于是 code 被预算裁进
+  `unmeasured[].code` / `refusals_omitted.codes` / `environment_refusals_more.codes`
+  （受限机上十几个 code 时的**常态**）或是出现在 `next[].code` / `env.blocked_by` 时，
+  **拼对的 `--forbid-code` 也 rc=0 放绿**。现在覆盖这些位置（实现是扫全树，不枚举载体）。
+  闭集校验不变：未知 code 仍是用法错误 rc=2。
+- **指标规则写错 ⇒ rc=2（此前 rc=1）**：`--max-metric X=abc` / `--max-metric foo` 这类
+  **语法/数值错误**与未知 code / 未知 status 同类，退用法错误 rc=2；同时不再额外吐一句
+  假的失败「一条规则都没给」（真·没给规则时那句保留、仍 rc=1）。
+- **用法错误 + `--json` 现在有输出**：此前用法错误只往 stderr 打印、`return 2`，stdout **全空**，
+  agent 拿到的 `usage_errors` 字段永不可达。现在 `--json` 在用法错误时也输出
+  `{passed, packet, checked, usage_errors, failures}`，**rc 仍是 2**（CI 照样红）。
+- **`--require-actionable` 只接受真布尔**：包里的 `actionable` 若是字符串 `"false"`
+  （手写/外部 JSON 的常见形态），旧实现 `bool("false")` 强转成 True ⇒ **rc=0 放绿**。
+  现在类型不对是**用法错误 rc=2**（不是"判词不合格 rc=1"），绝不静默当通过。
+
+### 环境证据：读不到不许变成"干净"（W-1/W-5，P0；R-96/R-100）
+
+- **降频位图读不到 ⇒ 未知，不再写成"没有降频"**：pynvml 的
+  `nvmlDeviceGetCurrentClocksThrottleReasons` 抛异常、或 nvidia-smi 给 `n/a`/认不出的 token，
+  一律记 `THROTTLE_UNKNOWN`(-1)。修前"读不到"被吞成 `mask=0` ⇒
+  `meas__throttle_limited_pct=0.0 [measured]` ⇒ 前提 `env_no_throttle_pct observed=0.0 ok=True`
+  ⇒ `cost_per_token` 保持 `actionable=True`（假绿）。
+- **新增拒绝码 `env_reading_unknown`**：整段窗口的降频读数都读不到时，
+  `meas__throttle_limited_pct` 报 `unavailable` + 该 code —— **不再**印一个
+  `100.0 [measured]`（"未知"既不是"没有降频"、也不是"一直掉频"，两种都是编），
+  前提 `env_no_throttle_pct` 因此**不成立**，`cost_per_token` 被降级为 `refused`。
+- **`gpu_idle_pct` 加 `sm_util==0` 兜底**：位图拿不到时不再把真空闲报成 0.0%
+  （那条会给 `env_gpu_busy_pct observed=100.0 ok=True`）；兜底口径在 note 与 source 里写明。
+- **多租户探测有"未知"通道**（R-96④）：`Sampler.environment()` 新增 `other_procs_probe`
+  （`not_run`/`ok`/`failed`）；探测失败**不写** `other_procs`，section 改报
+  `meas__other_procs_on_gpu = unavailable` + `env_reading_unknown`，前提 `env_gpu_exclusive`
+  按**不成立**处理 —— "没测到"不再与"0 个别的租户"同形。
+- **`--query-compute-apps` 与两条 `--query-gpu` 都带 `--id=<本卡>`**：多卡机器不再把别的卡的进程
+  算成"同卡"，也不再因多行输出静默丢光所有采样；`Sampler` 新增 `device_index`（默认 0）。
+- **`decode_throttle(-1)` 不再死循环**；负数按"未知"返回 `unspecified`。
+- **环境前提的门槛变成具名常量**（R-100③）：`ENV_OTHER_PROCS_MAX=0.0`、
+  `ENV_GPU_BUSY_MIN_PCT=80.0`、`ENV_NO_THROTTLE_MAX_PCT=5.0`（README §9 已列出处与观测不足时的行为）。
+- **两条时钟指标互相说明**（R-100②）：`meas__sm_clock_mean_mhz`（含空闲）的 note 写清它与活跃口径
+  `meas__sm_clock_p50_mhz`（只在干活时统计）的差别；`meas__sm_clock_max_mhz` 写明"曾经跑到过"。
+- **降级文案不再印 `None`**：前提读不到时写「**读不到**（未知，不是 0）」。
 
 ## 0.2.0
 

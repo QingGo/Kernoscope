@@ -47,9 +47,22 @@ THROTTLE_BITS: tuple[tuple[int, str], ...] = (
 )
 IDLE_BIT = 0x1
 
+#: 「位图未知」通道（R-96①②）：驱动只说了 Active 而没给位图，或者这次查询**根本读不到**
+#: （pynvml 抛异常 / nvidia-smi 给 `n/a`）。**绝不允许**把它当成 0（＝"没有降频"）——
+#: 那正是第六轮 W-1 的假绿：`env_no_throttle_pct observed=0.0 ok=True` ⇒
+#: `cost_per_token` 保持 `actionable=True`。未知一律走这个负数，且要**计入受限**。
+THROTTLE_UNKNOWN = -1
+
 
 def decode_throttle(mask: int) -> list[str]:
-    """位图 → 原因名（**已知位**给名字；未知位照实给 `bitN`，不猜）。"""
+    """位图 → 原因名（**已知位**给名字；未知位照实给 `bitN`，不猜）。
+
+    负数是「未知」通道（`THROTTLE_UNKNOWN`）：没有位图可解，如实给 `unspecified`，
+    既不是"干净"（空列表）也不猜位名。**负数必须先挡住**：旧实现直接进位移循环，
+    `-1 >> 1` 永远是 `-1` ⇒ 死循环（第六轮 W-13，真机上够不到、但一次调用就挂死）。
+    """
+    if mask < 0:
+        return ["unspecified"]
     out = [name for bit, name in THROTTLE_BITS if mask & bit]
     known = 0
     for bit, _ in THROTTLE_BITS:
@@ -95,25 +108,27 @@ def parse_throttle_token(text: str) -> int:
     """``"0x0000000000000001"`` / ``"Not Active"`` / ``"Active"`` → 位图。
 
     驱动器版本不同，`--query-gpu` 对同一字段可能给十六进制位图也可能给 Active/Not Active；
-    两种都认。**解不出来的返回 0 并在调用方记成"未知"**（不当作"没降频"）。
+    两种都认。**读不到的一律返回 `THROTTLE_UNKNOWN`（-1）**，不返回 0：
+    R-96② —— `n/a` 过去被映射成 `0`（＝"没有降频"），于是"读不到"混进了"干净"。
+    只有驱动**明确说没有**（`Not Active`/`false`/`no`/`0`）才是 0。
     """
     t = (text or "").strip()
     if not t:
-        return 0
+        return THROTTLE_UNKNOWN           # 空 = 没读到，不是"没降频"
     low = t.lower()
     if low.startswith("0x"):
         try:
             return int(low, 16)
         except ValueError:
-            return 0
+            return THROTTLE_UNKNOWN
     if low in ("active", "true", "yes"):
-        return -1                      # -1 = "有降频，但驱动没给位图"
-    if low in ("not active", "false", "no", "n/a", "0"):
+        return THROTTLE_UNKNOWN           # 有降频，但驱动没给位图
+    if low in ("not active", "false", "no", "0"):
         return 0
     try:
         return int(low)
     except ValueError:
-        return 0
+        return THROTTLE_UNKNOWN           # 认不出来的 token：未知，不许降级成 0
 
 
 @dataclass
@@ -123,7 +138,8 @@ class DeviceSample:
     sm_util_pct: float
     sm_clock_mhz: float
     power_w: float
-    #: 降频原因位图（-1 = 驱动只说了"有降频"但没给位图；0 = 没降频）
+    #: 降频原因位图（`THROTTLE_UNKNOWN`(-1) = 位图未知：驱动只说"有降频"或这次读不到；
+    #: 0 = 驱动明确说没降频）
     throttle_mask: int = 0
 
 
@@ -136,6 +152,10 @@ class SamplerResult:
     #: 采样期间该卡上观测到的其他计算进程数（最大值）＋是否探测成功
     other_procs: int = 0
     other_procs_probed: bool = False
+    #: 同卡其他进程探测的**结果状态**（R-96④）：`not_run` / `ok` / `failed`。
+    #: 为什么不能只看 `other_procs_probed`：探测失败与"根本没测过"过去都是同一个
+    #: `False`，包里看不出"多租户这条没测"；而"没测"≠"0 个别的租户"。
+    other_procs_probe: str = "not_run"
     #: 设备标称最高 SM 时钟（nvidia-smi clocks.max.sm；拿不到就是 0）
     max_sm_clock_mhz: float = 0.0
 
@@ -190,9 +210,15 @@ class SamplerResult:
         limited = 0
         for s in self.samples:
             mask = s.throttle_mask
-            if mask < 0:                       # 驱动只说"有降频"
+            if mask < 0:                       # 位图未知（读不到 / 驱动只说 Active）
+                # **不许**把它当成"没有降频"（R-96①）：算进受限是保守方向 —— 前提
+                # `env_no_throttle_pct` 必须因此不成立，而不是 observed=0.0 ok=True。
                 reasons["unspecified"] = reasons.get("unspecified", 0) + 1
                 limited += 1
+                # 兜底（R-96③）：位图拿不到时用真实利用率判空闲。否则"真空闲"会被算成
+                # idle_pct=0.0 ⇒ `env_gpu_busy_pct observed=100.0 ok=True`（另一处假绿）。
+                if s.sm_util_pct <= 0.0:
+                    idle += 1
                 continue
             if mask & IDLE_BIT:
                 idle += 1
@@ -209,7 +235,11 @@ class SamplerResult:
         }
 
     def environment(self) -> dict[str, object]:
-        """窗口的环境证据（进 section 与决策包前提）。"""
+        """窗口的环境证据（进 section 与决策包前提）。
+
+        "这条没测"与"这条测到了 0"必须是两个样子（R-96④）：探测失败写
+        `other_procs_probe="failed"` 且**不写** `other_procs`，让下游能报"未知"而不是 0。
+        """
         out: dict[str, object] = {}
         res = self.clock_residency()
         thr = self.throttle_profile()
@@ -219,6 +249,10 @@ class SamplerResult:
             out["throttle"] = thr
         if self.other_procs_probed:
             out["other_procs"] = self.other_procs
+            out["other_procs_probe"] = "ok"
+        else:
+            # not_run / failed：两者都能与"0 个别的租户"区分开
+            out["other_procs_probe"] = self.other_procs_probe
         out["sampler"] = self.source
         out["interval_s"] = round(self.duration_s / max(1, len(self.samples)), 3) \
             if self.samples else 0.0
@@ -258,9 +292,11 @@ class Sampler:
     """后台采样设备级指标（context manager）。"""
 
     def __init__(self, interval_s: float = 0.2, enabled: bool = True,
-                 exclude_pids: set[int] | None = None):
+                 exclude_pids: set[int] | None = None, device_index: int = 0):
         self.interval_s = interval_s
         self.enabled = enabled
+        #: 采样哪张卡（pynvml 的 handle 与 nvidia-smi 的 `--id` 必须指同一个，R-96⑤）
+        self.device_index = device_index
         #: 额外要排除的进程（例如我们自己拉起的负载进程树）
         self.exclude_pids: set[int] = set(exclude_pids or ())
         self.result = SamplerResult()
@@ -276,7 +312,7 @@ class Sampler:
 
             pynvml.nvmlInit()
             self._pynvml = pynvml
-            self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
             self.result.source = "pynvml"
         except Exception:
             self._pynvml = None
@@ -296,7 +332,8 @@ class Sampler:
                     self._handle, self._pynvml.NVML_CLOCK_SM))
             except Exception:
                 pass
-        proc = subprocess.run([SMi, "--query-gpu=clocks.max.sm", "--format=csv,noheader,nounits"],
+        proc = subprocess.run([SMi, "--query-gpu=clocks.max.sm", "--format=csv,noheader,nounits",
+                               f"--id={self.device_index}"],
                               capture_output=True, text=True)
         try:
             return float(proc.stdout.strip().splitlines()[0])
@@ -308,6 +345,11 @@ class Sampler:
 
         注意要把**我们自己拉起的负载进程树**排除掉：否则 `kernoscope ... -- python bench.py`
         会把 bench.py 数成"另一个租户"（真机第一次跑就撞上：报了 1 个）。
+
+        R-96⑤：退回 `nvidia-smi` 时**必须带 `--id=<本卡>`**。不带 `--id` 的
+        `--query-compute-apps` 会把**别的卡**上的进程也算进来 —— note 却写"同卡"，
+        于是多卡机器上结论被静默误降级（方向保守，但不是我们声称的口径）。
+        pynvml 那条路本来就是 handle 级（`_handle`），天然同卡。
         """
         mine = {os.getpid(), os.getppid()} | set(self.exclude_pids)
         if self._pynvml:
@@ -317,7 +359,8 @@ class Sampler:
                 return sum(1 for p in pids if p and not _is_descendant(p, mine))
             except Exception:
                 pass
-        proc = subprocess.run([SMi, "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
+        proc = subprocess.run([SMi, "--query-compute-apps=pid", "--format=csv,noheader,nounits",
+                               f"--id={self.device_index}"],
                               capture_output=True, text=True)
         if proc.returncode != 0:
             return None
@@ -359,8 +402,14 @@ class Sampler:
             # 其他租户探测：每 5 个采样点一次（一次探测要 ~50 ms 子进程），取窗口内的最大值
             if n % 5 == 0:
                 others = self._other_procs()
-                if others is not None:
+                if others is None:
+                    # 探测失败 = **未知**（R-96④）：与"从没测过"分开记，也绝不冒充 0 个租户。
+                    # 之前成功过就保留成功状态（我们手里确实有数，没必要倒回去说"未知"）。
+                    if not self.result.other_procs_probed:
+                        self.result.other_procs_probe = "failed"
+                else:
                     self.result.other_procs_probed = True
+                    self.result.other_procs_probe = "ok"
                     self.result.other_procs = max(self.result.other_procs, others)
             n += 1
 
@@ -373,14 +422,23 @@ class Sampler:
                 try:
                     mask = int(self._pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(self._handle))
                 except Exception:
-                    mask = 0
+                    # R-96①（第六轮 W-1，P0）：读不到 ≠ 没有降频。旧写法 `mask = 0` 把
+                    # "查询抛异常"写成"窗口内没有降频"⇒ `env_no_throttle_pct observed=0.0
+                    # ok=True` ⇒ `cost_per_token` 保持 `actionable=True`。**这里不能丢样本**：
+                    # 丢掉会把本可读的利用率/时钟/功耗一起丢掉，环境前提整条消失，反而更绿。
+                    # 保留样本 + 位图记未知（-1），由 throttle_profile 计入"受限"。
+                    # nvidia-smi 分支对 `n/a` 走同一条未知通道（见 parse_throttle_token）。
+                    mask = THROTTLE_UNKNOWN
                 return DeviceSample(time.monotonic(), float(util.memory), float(util.gpu),
                                     float(clk), float(pwr), mask)
             except Exception:
                 return None
         q = ("utilization.memory,utilization.gpu,clocks.sm,power.draw,"
              "clocks_throttle_reasons.active")
-        proc = subprocess.run([SMi, f"--query-gpu={q}", "--format=csv,noheader,nounits"],
+        # `--id`：不带它时多卡机器会吐多行 → 解析失败 → **静默丢光所有采样**（与 pynvml 的
+        # `nvmlDeviceGetHandleByIndex(self.device_index)` 指同一张卡）。
+        proc = subprocess.run([SMi, f"--query-gpu={q}", "--format=csv,noheader,nounits",
+                               f"--id={self.device_index}"],
                               capture_output=True, text=True)
         if proc.returncode != 0 or not proc.stdout.strip():
             return None

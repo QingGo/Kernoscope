@@ -17,6 +17,10 @@
 #   * 两条都要求 `NO_EAGER_LOAD=0`：1.8 起默认懒加载会让插桩错过时机（程序跑完但零记录）。
 # 官方工具产出的是"一行 = 一条 warp 访存指令 + 全部 lane 地址"，粒度刚好够用。
 #
+# R-102：本脚本优先用环境里预置的 `NVBIT_MEMTRACE_SO`（其次才是 `NVBIT_PATH` 那棵树的两种布局）
+# —— 所以"用了哪份 .so"只有本脚本知道。`--resolve-only` 把这个答案（路径 + 实物版本）以机器
+# 可读的两行给出来，供 bench/run.sh 落进 `environment.txt`；发现顺序不在这里之外复制。
+#
 # 自动发现：$NVBIT_PATH 下的**两种布局都要找**（旧版把同一行写了两遍，
 # 于是 v1.7.7.3 的 `tools/mem_trace/` 永远没人找 —— 显式指了那棵树还静默跳过）。
 set -euo pipefail
@@ -78,6 +82,17 @@ if [ -n "${NV_V:-}" ]; then
   echo "工具: ${NVBIT_MEMTRACE_SO}（NVBit ${NV_V}）"
 else
   echo "工具: ${NVBIT_MEMTRACE_SO}（NVBit 版本读不出：core/nvbit.h 与 .so 字符串里都没有）"
+fi
+# R-102：`--resolve-only` —— 只回答"这次会用哪份 .so、它是哪个版本"，不采集。
+# 为什么要这个模式：bench/run.sh 记的版本取自 `NVBIT_PATH` 那棵树，而这里优先用环境里预置的
+# `NVBIT_MEMTRACE_SO` —— 两者**可以不是同一棵树**（真机上 NVBIT_PATH 那棵树里 3 份 v1.8.1
+# 全挂，实际采到轨迹的是另一棵树里的构建）。所以产物要同时记两处，而"这次用哪份"的发现顺序
+# 只能有一处真源：bench/run.sh 问它，而不是自己再写一份。
+# 输出固定两行、机器可读；版本读不出就写 n/a（**绝不编一个版本**）。
+if [ "${1:-}" = "--resolve-only" ] || [ "${KS_MEMTRACE_RESOLVE_ONLY:-0}" = "1" ]; then
+  printf 'memtrace_so: %s\n' "$NVBIT_MEMTRACE_SO"
+  printf 'memtrace_so_version: %s\n' "${NV_V:-n/a}"
+  exit 0
 fi
 # 工具"发现"了还不够：NVBit 的官方 mem_trace 在启动时直接 `exec` `cuobjdump`，
 # 而它按 **PATH** 找 —— 租用机上 CUDA 常常装了但不在 PATH（本机就是：nvcc/cuobjdump 都在

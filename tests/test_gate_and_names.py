@@ -107,6 +107,55 @@ def test_forbid_code_reads_verdicts_refusals_index_and_environment():
     assert not run_gate(env, forbid_codes=["nsys_missing"]).passed
 
 
+# W-3/R-98 的载体名 → 只往包里塞这一处载体，`refusals` 表**故意留空**。
+# 留空是关键：旧实现靠 refusals 表兜底，所以凡是表里没有的载体它都会放绿；
+# 这些用例在旧实现下全部 rc=0（会红）。`unmeasured_more` 今天只有计数、不带 code，
+# 列在这里是守着"它带上 code 时也不许漏"（此刻它的 code 由 `unmeasured[].code` 承载）。
+_ONLY_CARRIERS = {
+    "unmeasured": {"unmeasured": [{"code": "counters_denied", "count": 4}]},
+    "refusals_omitted": {"refusals_omitted": {"count": 43,
+                                              "codes": ["counters_denied", "no_nvtx"]}},
+    "environment_refusals_more": {"environment_refusals_more": {
+        "count": 9, "codes": ["counters_denied"]}},
+    "next": {"next": [{"for": "roofline", "code": "counters_denied"}]},
+    "env_blocked_by": {"env": {"counter_state": "denied", "blocked_by": ["counters_denied"]}},
+    "nested": {"cost": {"trimmed": [{"codes": [{"code": "counters_denied"}]}]}},
+    # 今天 `unmeasured_more` 只有计数、不带 code；这条守着"它哪天带上 code 也不许漏"
+    # （此刻它的 code 由 `unmeasured[].code` 承载）。
+    "unmeasured_more": {"unmeasured_more": {"groups": 2, "metrics": 9},
+                        "unmeasured": [{"code": "counters_denied", "count": 4}]},
+}
+
+
+def test_refusal_codes_covers_every_carrier_a_packet_can_use():
+    """R-98/W-3：`--forbid-code` 认的是"包里任何位置出现过的 code"，不是今天的三处。
+
+    旧实现只读 `verdicts[].refusal.code` / `refusals{}` 键 / `environment_refusals[].code`，
+    于是 code 被裁进 `refusals_omitted` / `unmeasured` / `environment_refusals_more` /
+    `next` / `env.blocked_by` 时拼对的 code 也放绿 —— 而"code 被挪进 *_omitted/*_more"
+    正是受限机（十几个 code）的常态。所以这里逐个载体验证，**并留一个 refusals 表为空的
+    陷阱**：一旦有人把实现改回"枚举三处 / 靠 refusals 兜底"，这些用例立刻变红。
+    """
+    for carrier, extra in _ONLY_CARRIERS.items():
+        p = _packet(**extra)
+        p["refusals"] = {}                      # 陷阱：表里没有这个 code
+        res = run_gate(p, forbid_codes=["counters_denied"])
+        assert not res.passed, f"code 只在 {carrier} 里也必须命中（旧实现会放绿）"
+        assert res.failures[0].check == "forbid-code counters_denied"
+        assert not res.usage_errors, "命中不是用法错误，rc 必须留在 1"
+    # 全树扫描不许把非 code 的字符串/别的 code 当成命中
+    clean = _packet(refusals={}, cost={"trimmed": ["next_pointers"], "counter_state": "denied"})
+    assert run_gate(clean, forbid_codes=["counters_denied"]).passed
+
+
+def test_refusal_codes_scan_does_not_widen_the_closed_set_rule():
+    """闭集校验一分没松：未知 code 仍是用法错误（rc=2），与"命中/没命中"无关。"""
+    p = _packet(unmeasured=[{"code": "counters_denied", "count": 4}])
+    p["refusals"] = {}
+    res = run_gate(p, forbid_codes=["counters_denyed"])
+    assert res.usage_errors and not res.passed
+
+
 def test_metric_thresholds_are_compared_and_na_never_passes():
     ok = run_gate(_packet(), report=_report(), max_metric=["gpu__time_duration.sum=20"])
     assert ok.passed
@@ -123,6 +172,40 @@ def test_missing_metric_and_bad_rule_are_failures_not_silent_passes():
     res = run_gate(_packet(), max_metric=["no-equals-sign"])
     assert not res.passed and "NAME=VALUE" in res.failures[0].reason
     assert not run_gate(_packet(), require=["kernel_time=bogus"]).passed
+
+
+def test_metric_rule_syntax_error_is_a_usage_error_not_a_missing_rule():
+    """R-103/W-7：`--max-metric X=abc` / `--max-metric foo` 是**用法错误**（rc=2）。
+
+    旧实现只记一条 Failure（CLI 退 1），而且因为解析失败的规则没进 `checked`，还会顺手
+    追加一句假的"一条规则都没给" —— 把"规则写错"伪装成"没给规则"。
+    """
+    for spec in ("X=abc", "foo"):
+        res = run_gate(_packet(), max_metric=[spec])
+        assert res.usage_errors, f"{spec!r} 必须是用法错误（CLI 才会退 2）"
+        assert not res.passed
+        assert not any("一条规则都没给" in f.reason for f in res.failures), \
+            "规则写错不等于没给规则：不许吐那句假失败"
+    # 真的一条都没给时，那句仍然要在（这条边界不能被顺手删掉）
+    empty = run_gate(_packet())
+    assert not empty.passed and "一条规则都没给" in empty.failures[0].reason
+
+
+def test_actionable_string_is_a_usage_error_and_never_passes():
+    """R-103/W-7：`actionable` 只接受真布尔。
+
+    `bool("false") is True` —— 旧实现把字符串强转成 True，`--require-actionable` 于是
+    rc=0 放绿。字符串是"规则没法判"，要退 rc=2，绝不能退化成"判词通过"。
+    """
+    for bad in ("false", "true", 0, None):
+        p = _packet(verdicts=[{"id": "kernel_time", "status": "ok", "actionable": bad}])
+        res = run_gate(p, require_actionable=["kernel_time"])
+        assert res.usage_errors and not res.passed, f"actionable={bad!r} 必须 rc=2，不是放绿"
+    # 真布尔照旧：true 过、false 红
+    assert run_gate(_packet(), require_actionable=["kernel_time"]).passed
+    p = _packet(verdicts=[{"id": "kernel_time", "status": "ok", "actionable": False}])
+    res = run_gate(p, require_actionable=["kernel_time"])
+    assert not res.passed and not res.usage_errors, "真 false 是判词不合格（rc=1），不是用法错"
 
 
 def test_max_metric_evaluates_every_kernel_and_names_the_violator():
@@ -283,6 +366,113 @@ def test_gate_cli_rejects_an_unknown_require_status_as_a_usage_error(tmp_path, c
                         "--require", "kernel_time=bogus")
     assert rc == 2 and "门禁通过" not in out
     assert "ok/soft/refused" in err
+
+
+def test_gate_cli_forbid_code_sees_a_real_packet_that_omitted_refusal_entries(tmp_path, capsys):
+    """W-3/R-98 的"真包"面：`build()` 真触发 `refusals_omitted` 时，**每个**被省掉的 code
+    都必须还能被 `--forbid-code` 命中（rc=1）。
+
+    受限机（45 个 code）正是这条路径的常态：`refusals` 表只留 8 条，其余列在
+    `refusals_omitted.codes` 里。旧实现只读 `refusals` 的键 ⇒ 这些 code 全部放绿。
+    """
+    from kernoscope.packet import build
+    from kernoscope.provenance import Metric, Section
+    from kernoscope.refusals import DEFAULT_REMEDIES, RefusalCode
+    from kernoscope.report import DeviceInfo, KernelReport, Report
+
+    codes = [c for c in RefusalCode if c in DEFAULT_REMEDIES]
+    rep = Report(device=DeviceInfo(name="RTX 4090", compute_capability="8.9", sm_count=128))
+    k = KernelReport("big_gemm", launch_count=1)
+    sec = Section("受限环境下的未测项")
+    for i, c in enumerate(codes):
+        sec.add(Metric.unavailable(f"est__blocked_{i}", "本机拿不到这个数据源", code=c))
+    k.sections = [sec]
+    rep.kernels = [k]
+    p = build(rep)
+    omitted = p.get("refusals_omitted") or {}
+    assert omitted.get("codes"), "这个 fixture 必须真触发条目省略（否则用例就没在测 W-3）"
+    f = tmp_path / "locked-down.packet.json"
+    f.write_text(json.dumps(p), encoding="utf-8")
+    for code in omitted["codes"]:
+        rc, out, err = _run(capsys, "gate", "--packet", str(f), "--forbid-code", code)
+        assert rc == 1, f"code {code!r} 被裁进 refusals_omitted，仍必须命中（旧实现 rc=0）"
+        assert "出现了被禁止的拒绝码" in out
+
+
+def test_gate_cli_forbid_code_sees_a_code_that_only_lives_in_a_trimmed_field(tmp_path, capsys):
+    """W-3/R-98 的 CLI 面：真包 + 抑制预算保留的载体 → `--forbid-code` 必须 rc=1。
+
+    `refusals` 表被清空、code 只留在 `unmeasured[].code` / `refusals_omitted.codes` /
+    `environment_refusals_more.codes` 里 —— 受限机上"code 被挪进 *_omitted/*_more"是常态。
+    旧实现在这三种形状下都是 rc=0 放绿（这条用例就是给那个回归准备的）。
+    """
+    packet, _ = _pipeline(tmp_path, capsys)
+    base = json.loads(Path(packet).read_text(encoding="utf-8"))
+    shapes = {
+        "unmeasured": {"refusals": {}, "unmeasured": [{"code": "counters_denied",
+                                                       "count": 4}]},
+        "refusals_omitted": {"refusals": {}, "unmeasured": [],
+                             "refusals_omitted": {"count": 43,
+                                                  "codes": ["counters_denied"]}},
+        "environment_refusals_more": {"refusals": {}, "unmeasured": [],
+                                      "environment_refusals_more": {
+                                          "count": 9, "codes": ["counters_denied"]}},
+    }
+    for name, over in shapes.items():
+        p = dict(base, **over)
+        f = tmp_path / f"{name}.packet.json"
+        f.write_text(json.dumps(p), encoding="utf-8")
+        rc, out, err = _run(capsys, "gate", "--packet", str(f),
+                            "--forbid-code", "counters_denied")
+        assert rc == 1, f"{name}：code 就在包里，绝不能放绿（旧实现 rc=0）；err={err}"
+        assert "出现了被禁止的拒绝码" in out
+    # 闭集校验没被放宽
+    rc, _, err = _run(capsys, "gate", "--packet", str(tmp_path / "unmeasured.packet.json"),
+                      "--forbid-code", "counters_denyed")
+    assert rc == 2 and "闭集" in err
+
+
+def test_gate_cli_metric_rule_syntax_error_is_rc2_without_the_bogus_failure(tmp_path, capsys):
+    """R-103/W-7：指标规则语法/数值错 = 用法错误（rc=2），且不许吐假失败"一条规则都没给"。"""
+    packet, _ = _pipeline(tmp_path, capsys)
+    for spec in ("X=abc", "foo"):
+        rc, out, err = _run(capsys, "gate", "--packet", packet, "--max-metric", spec)
+        assert rc == 2, f"--max-metric {spec} 是用法错误（旧实现 rc=1）"
+        assert "一条规则都没给" not in out and "一条规则都没给" not in err
+        assert "error:" in err
+    # 真的一条都没给时仍然 rc=1 + 那句提示（这条边界不能被顺手删掉）
+    rc, out, _ = _run(capsys, "gate", "--packet", packet)
+    assert rc == 1 and "一条规则都没给" in out
+
+
+def test_gate_cli_json_usage_errors_are_still_emitted(tmp_path, capsys):
+    """R-103/W-7：用法错误 + `--json` 必须有机器可读输出（`usage_errors` 才可达）。
+
+    旧实现先 return 2（只往 stderr 打印），stdout 全空 —— agent 无从知道是用法错。
+    rc 仍然是 2（CI 照样红）。
+    """
+    packet, _ = _pipeline(tmp_path, capsys)
+    cases = [["--forbid-code", "counters_denyed"],
+             ["--require", "kernel_time=bogus"],
+             ["--max-metric", "foo"]]
+    for argv in cases:
+        rc, out, _ = _run(capsys, "gate", "--packet", packet, *argv, "--json")
+        assert rc == 2, f"{argv} 用法错误必须 rc=2"
+        doc = json.loads(out)                       # stdout 不许再是空的
+        assert doc["usage_errors"], f"{argv} 的 usage_errors 必须可见"
+
+
+def test_gate_cli_actionable_string_is_a_usage_error(tmp_path, capsys):
+    """R-103/W-7 的 CLI 面：`actionable:"false"` 不得被 `bool()` 强转成通过。"""
+    packet, _ = _pipeline(tmp_path, capsys)
+    p = json.loads(Path(packet).read_text(encoding="utf-8"))
+    vid = p["verdicts"][0]["id"]
+    p["verdicts"][0]["actionable"] = "false"
+    f = tmp_path / "str-bool.packet.json"
+    f.write_text(json.dumps(p), encoding="utf-8")
+    rc, out, err = _run(capsys, "gate", "--packet", str(f), "--require-actionable", vid)
+    assert rc == 2, '字符串 "false" 不是 false，必须 rc=2（旧实现 rc=0 放绿）'
+    assert "门禁通过" not in out and "布尔" in err
 
 
 # --------------------------------------------------------------------------

@@ -182,7 +182,11 @@ def test_refusals_are_trimmable_so_the_budget_holds_in_a_locked_down_env():
     size = packet_bytes(p)
     assert size <= PACKET_SIZE_BUDGET_BYTES, f"{size} B 超预算（拒绝条目必须可裁剪）"
     assert "over_budget" not in p["cost"]
-    assert "refusal_actions" in p["cost"]["trimmed"]
+    # R-110：`cost.trimmed` 现在只记**真正改动了包**的步骤（旧实现连 no-op 也记，于是
+    # "裁剪步骤"不等于"真的裁了什么"）。所以这里断言"拒绝侧确实被裁过"，而不是钉住
+    # 某个在这个 fixture 里可能恰好是 no-op 的步骤名。
+    assert {"refusal_entries", "refusal_action_text"} & set(p["cost"]["trimmed"]), \
+        f"拒绝条目/处置文本必须被裁过：{p['cost']['trimmed']}"
     omitted = p.get("refusals_omitted") or {}
     assert omitted.get("count", 0) > 0, "丢掉的 code 必须计数"
     assert omitted.get("codes"), "至少要列出丢掉的 code（列表过长时标 codes_truncated）"
@@ -882,13 +886,19 @@ class _KRep:
             yield from k.sections
 
 
-def _two_kernel_report(*, cheap_over_peak: bool, top_over_peak: bool):
-    cheap = _KK("cheap_kernel", 1_000_000, [_KSec("SpeedOfLight", [
+def _two_kernel_report(*, cheap_over_peak: bool, top_over_peak: bool,
+                       same_prefix: bool = False):
+    # 第六轮 W-4 的构造：两个**不同** kernel 的名字前 48 字相同（C++ 模板实例化名的常态）。
+    # `_clip(name, 48)` 的显示串因此完全一样 —— 用显示串当身份就会互相污染。
+    prefix = "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_"
+    cheap_name = f"{prefix}cheap" if same_prefix else "cheap_kernel"
+    top_name = f"{prefix}top" if same_prefix else "top_kernel"
+    cheap = _KK(cheap_name, 1_000_000, [_KSec("SpeedOfLight", [
         _KM("gpu__time_duration.sum", 1.0, "ms", "exact"),
         _KM("est__roofline_efficiency_pct", 20.0, "%", "estimated"),
         *([_KM("ks__over_peak_warning", 1.0, "", "derived")] if cheap_over_peak else []),
     ])])
-    top = _KK("top_kernel", 9_000_000, [_KSec("SpeedOfLight", [
+    top = _KK(top_name, 9_000_000, [_KSec("SpeedOfLight", [
         _KM("gpu__time_duration.sum", 9.0, "ms", "exact"),
         _KM("est__bound", "memory", "", "estimated"),
         _KM("est__roofline_efficiency_pct", 91.0, "%", "estimated"),
@@ -919,3 +929,95 @@ def test_same_kernel_over_peak_still_poisons_its_own_roofline():
     assert by_id["roofline"]["status"] == "refused"
     assert by_id["roofline"].get("value") is None
     assert by_id["roofline"]["facts"]["uncitable_value"] == 91.0
+
+
+def test_over_peak_identity_is_not_the_truncated_display_string():
+    """第六轮 W-4：判词身份不能用 `facts["kernel"]` —— 那是 `_clip(name, 48)` 的**显示串**。
+
+    真机 A/B：两个不同 kernel 名前 48 字相同（`void cutlass::Kernel2<…>…` 这类模板实例化名
+    极易撞车）⇒ 便宜 kernel 的超峰把另一个 kernel 合法的 91% roofline 打成
+    `refused/actionable=False`；把前缀改成不同 ⇒ `soft/actionable=True/91.0`。
+    这里先断言夹具真的让两个显示串相同（否则测试就是假的），再断言 roofline 没被否决。
+    """
+    from kernoscope.packet import build
+
+    p = build(_two_kernel_report(cheap_over_peak=True, top_over_peak=False, same_prefix=True))
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["facts"]["kernel"] == by_id["roofline"]["facts"]["kernel"], \
+        "夹具没生效：两个 kernel 的**显示串**必须相同（这正是被击穿的地方）"
+    assert by_id["roofline"]["status"] != "refused", by_id["roofline"]
+    assert by_id["roofline"]["facts"]["efficiency_pct"] == 91.0
+
+
+def test_same_prefix_over_peak_still_poisons_its_own_kernel():
+    """反面对照：同一个 kernel（同一前缀、同一个 owner_key）的超峰仍必须打掉它自己的 roofline。"""
+    from kernoscope.packet import build
+
+    p = build(_two_kernel_report(cheap_over_peak=False, top_over_peak=True, same_prefix=True))
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["facts"]["kernel"] == by_id["roofline"]["facts"]["kernel"]
+    assert by_id["roofline"]["status"] == "refused", by_id["roofline"]
+
+
+def test_hard_cap_keeps_the_four_conclusion_verdicts_even_when_they_come_last():
+    """第六轮 R-106：`_cap_verdicts` 旧实现是 `vs[:n]` —— **靠位置**，只因为 `BUILDERS`
+    的顺序恰好把结论排在前面才没丢；集群②改一下顺序就构造出"结论四条整条掉出包"的红。
+
+    这里把结论四条**放在最后**，断言任何预算下它们都不消失，且 `verdicts_more.ids` 保持原序。
+    """
+    from kernoscope.packet import PRIMARY_FACT_IDS, enforce_budget
+
+    ids = [f"extra_{i}" for i in range(6)] + list(PRIMARY_FACT_IDS)
+    packet = {"verdicts": [{"id": i, "status": "ok"} for i in ids],
+              "unmeasured": [], "refusals": {}, "cost": {}}
+    enforce_budget(packet, limit=260)
+    kept = [v["id"] for v in packet["verdicts"]]
+    missing = [i for i in PRIMARY_FACT_IDS if i not in kept]
+    assert not missing, f"结论判词被静默裁掉：{missing}（留下的：{kept}）"
+    dropped = (packet.get("verdicts_more") or {}).get("ids") or []
+    assert dropped == [i for i in ids if i not in kept], \
+        f"verdicts_more.ids 必须是**原序**里被丢掉的那些：{dropped}"
+
+
+def test_trimmed_facts_are_recorded_by_item_id():
+    """第六轮 R-106：facts 被裁以前只有步骤名（`facts_primary`），没有条目级留痕 ——
+    2400 个场景里 facts 被裁 663 次，全都不知道是谁的 facts 没了。"""
+    from kernoscope.packet import enforce_budget
+
+    packet = _budget_fixture()
+    enforce_budget(packet, limit=2600)
+    got = packet["cost"].get("trimmed_ids") or []
+    assert any(s.startswith("facts_secondary:") for s in got), \
+        f"被裁 facts 的判词 id 必须有留痕：{packet['cost'].get('trimmed')}"
+    live_ids = {v["id"] for v in packet["verdicts"]}
+    for s in got:
+        step, _, vid = s.partition(":")
+        assert step and vid, f"留痕格式应为 `<步骤>:<判词 id>`：{s!r}"
+        assert vid in live_ids, f"记了一个包里不存在的判词 id：{s!r}"
+
+
+def test_trimmed_only_records_steps_that_actually_changed_the_packet():
+    """R-110：`cost.trimmed` 的语义是"真的改动了包的步骤"，不是"走到了哪一步"（旧实现连
+    no-op 也记）。用一个人造包：所有裁剪步骤都无处可裁 ⇒ `trimmed` 必须是空的。"""
+    from kernoscope.packet import enforce_budget
+
+    packet = {"verdicts": [], "unmeasured": [], "refusals": {}, "cost": {},
+              "refusals_omitted": {}}
+    trimmed = enforce_budget(packet, limit=1)          # 逼它把所有步骤都走完
+    assert trimmed == [], f"没有东西可裁时不该记任何步骤：{trimmed}"
+
+
+def test_device_level_over_peak_verdict_does_not_silently_disappear():
+    """第六轮 W-12：超峰警告只挂在 `(device)` 伪 kernel 上时（`-i` 回读老报告可达），
+    `kernel_with` 会**跳过** `(device)` ⇒ 旧实现让 `over_peak` 判词静默消失
+    （相对更早的 `find_metric` 行为是回归）。这里退回设备级读取。"""
+    from kernoscope.packet import build
+
+    dev = _KK("(device)", 1_000_000, [_KSec("SpeedOfLight", [
+        _KM("ks__over_peak_warning", 1.0, "", "derived"),
+    ])])
+    p = build(_KRep([dev]))
+    ids = [v["id"] for v in p["verdicts"]]
+    assert "over_peak" in ids, f"设备级超峰警告必须变成判词，而不是消失：{ids}"
+    op = next(v for v in p["verdicts"] if v["id"] == "over_peak")
+    assert op["status"] == "refused" and op["actionable"] is False

@@ -58,7 +58,7 @@ $ ncu --set basic -- python train.py
 | 窗口/设备级能耗与功率 | NVML 能量累加器 / 窗口内功率积分（ncu 没有这个指标） | `measured` |
 | **每 kernel** 能耗与成本 | 窗口能耗 × **该 kernel 窗口时间占比**（代理口径，假设窗口内功率大致均匀） | `estimated` |
 | **每百万 token 多少钱、先改哪里** | 实测能耗 + 你给的 token 数与价格 + 实测峰值头寸 | `measured`/`derived`/`estimated` |
-| 真值校准我们的替代口径 | 导入一份 `.ncu-rep`（官方只读 API）逐条对拍 | `exact` / `derived` |
+| 真值校准我们的替代口径 | 导入一份 `.ncu-rep`（官方只读 API）逐条对拍 —— **包装逻辑已验；真报告口径未验证**（见 §4.3） | `exact` / `derived` |
 | 让已有 ncu 工作流继续能用 | 导出**带署名**的替代口径 `.ncu-rep` | `estimated` / `derived` |
 | L2/DRAM 精确字节、命中率、warp stall 细分 | **不给数字**，报 `n/a` + 原因 | `unavailable` |
 
@@ -75,7 +75,7 @@ $ ncu --set basic -- python train.py
 | 不做 | 保护什么 | 已经改成的形态 |
 |---|---|---|
 | **kernel 级计数重放**（为 multiplex 计数器反复跑被测 kernel） | 不引入特权控制面、不扰动同机他人；耗时是 nsys 时间戳里的**真实时间** | `--ks-warmup` / `--ks-window-s` 只统计稳态段（重放的弱形式） |
-| **默认锁频**（不改设备时钟） | 时钟是**设备级**状态，锁了会影响同机所有进程 | 记录时钟驻留与降频原因（公开位名解码，未知位照实写 `bitN`）作为环境证据 |
+| **默认锁频**（不改设备时钟） | 时钟是**设备级**状态，锁了会影响同机所有进程 | 记录时钟驻留与降频原因（公开位名解码，未知位照实写 `bitN`）作为环境证据；**读不到一律记未知（`unspecified` / `env_reading_unknown`），不当作"没有降频"** |
 | **绕过计数器权限** | 计数器是 host-wide 观测面，能泄露同机租户；平台锁它有正当理由 | 报 `counters_denied` + 物理原因（策略/capability），并给替代口径 |
 | **冒充计数器语义** | 可审计性是唯一不可让渡的资产 | 同源量按 ncu 同名同单位写（`gpu__time_duration.sum`：ms × 10⁶ = ns；单位不符就不写）；代理/模型/成本量只进 `ks__`/`est__`/`meas__`；每份文件带署名 |
 | **向被测进程注入我们的指令** | 不产生观察者效应、不需要用户改代码 | 复用厂商通道；NVBit 插桩由 `tools/probes/nvbit_memtrace/collect.sh` 在你调用它时执行，本工具只读它产出的文件 |
@@ -252,6 +252,14 @@ alias ncu=kernoscope          # 或 ln -s $(which kernoscope) ~/bin/ncu
   供下游脚本翻译（它是**声明**，不是数据替换）。
 
 ### 4.3 导入真值：校准我们的替代口径（只读）
+
+> ⚠ **状态：包装逻辑已验；真报告口径未验证。** 这条路径的**代码与契约**有测试守着
+> （`tests/test_ncu_rep.py` 用假 `ncu_report` 模块把包装逻辑跑一遍、`tests/test_truth_and_substitute.py`
+> 用与真实 dataclass 同构的替身跑对拍算术），但本仓库里**没有一份真 ncu 报告**：
+> 唯一入库的 `.ncu-rep` 是**我们自己写的替代口径**（头是 `kernoscope-substitute-v1`）。
+> 采一份真报告需要一台 `ncu` 能收集计数器的机器 —— 那正是本项目要绕开的前提
+> （验收方在受限机上实测 `ERR_NVGPUCTRPERM`）。所以下面表里那些对拍行**一次都没在真报告上出现过**：
+> "真值对拍"目前只能按"包装逻辑已验"读，等有脱敏的真报告可入库时再升级这句话。
 
 ```bash
 kernoscope --ks-ncu-rep other.ncu-rep --ks-synthetic --set basic -o rep
@@ -632,12 +640,13 @@ kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
 | 判据 | 语义 |
 |---|---|
 | `--require ID[=ok\|soft\|refused]` | 判词必须存在且状态达标（默认 `ok`）；不存在即失败（被尺寸预算裁掉也算） |
-| `--require-actionable ID` | 判词可作为行动依据（`actionable=true`；v1.0 包回退到"不是 refused 且前提全成立"） |
-| `--forbid-code CODE` | 出现该拒绝码即失败（含判词、拒绝索引与环境拒绝） |
-| `--max-metric NAME=V` / `--min-metric NAME=V` | 指标阈值；**`n/a` 一律算不通过**（"没有数"不是"没超阈值"） |
+| `--require-actionable ID` | 判词可作为行动依据（`actionable=true`；v1.0 包回退到"不是 refused 且前提全成立"）。包里的 `actionable` 必须是**真布尔**：字符串 `"false"` 是**用法错误 rc=2**，绝不被强转成通过 |
+| `--forbid-code CODE` | 出现该拒绝码即失败。搜索范围是**包里任何能携带 code 的位置**：判词、`refusals` 索引、`unmeasured`、`refusals_omitted`、环境拒绝与 `environment_refusals_more`（只查其中一处会让门禁在受限机上静默放绿） |
+| `--max-metric NAME=V` / `--min-metric NAME=V` | 指标阈值，**逐 kernel** 判：只要一个真 kernel 带该指标，每个真 kernel 都必须带且达标；缺项 / `n/a` / 超限一律不通过（"没有数"不是"没超阈值"）。只有 `(device)` 伪 kernel 带的指标（如 `ks__cost_per_mtok`）按设备级判 |
 
 退出码 `0` 通过 / `1` 不通过 / `2` 用法错误；**一条规则都没给时失败** ——
-门禁凭空绿灯是它最坏的失败模式。`--json` 给出逐条失败原因。门禁只消费已经产出的包与报告，
+门禁凭空绿灯是它最坏的失败模式。指标规则写错（`--max-metric X=abc`）也退 `2`；
+用法错误配 `--json` 时 stdout 仍给 `usage_errors`（rc 不变）。`--json` 给出逐条失败原因。门禁只消费已经产出的包与报告，
 不跑测量（要新数据先跑一次采集，再对新的包重跑门禁）。
 
 ---
@@ -655,10 +664,21 @@ kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
 | Perfetto trace | `-o rep` → `rep.perfetto.json` | 丢进 <https://ui.perfetto.dev> 看时间线，零安装 |
 | 逐 launch CSV | `--launch-csv`（配 `-o` 时写 `rep.launches.csv`） | 每次 launch 的 grid/block/时长/配置键 |
 | **案件目录** | `-o rep` → `rep.case/` | 跨会话/交接：`manifest.json`（任务与输入指纹）、`journal.jsonl`（追加式调用日志）、`next.md`（下一步）、`env.json` |
-| 真值对照 | `--ks-ncu-rep …` + `-o rep` | `rep.ncu-truth.json`：真值、对拍偏差、每条不可比的 reason |
+| 真值对照（**包装逻辑已验；真报告口径未验证**，见 §4.3） | `--ks-ncu-rep …` + `-o rep` | `rep.ncu-truth.json`：真值、对拍偏差、每条不可比的 reason |
 
 一屏的顺序是稳定接口（`结论：` → `-- 发现（判词与前提）--` → `-- 路径（下一步…）--` →
-`本次代价：`），便于人和 agent 直接解析。「路径」段的排序是确定的：**先列被拒的判词**
+`本次代价：`），便于人和 agent 直接解析。
+
+决策包里还有**三条环境前提**（它们决定"这次的数字在什么环境下成立"）与它们的门槛：
+
+| 前提 | 门槛（`packet.py` 的具名常量） | 观测不足时的行为 |
+|---|---|---|
+| `env_gpu_exclusive` | `ENV_OTHER_PROCS_MAX = 0` 个其他计算进程 | 探测**失败**时报 `meas__other_procs_on_gpu = unavailable` + `env_reading_unknown`，前提按**不成立**处理（"没测到"≠"0 个别的租户"） |
+| `env_gpu_busy_pct` | `ENV_GPU_BUSY_MIN_PCT = 80 %` | 位图读不到时用 SM 利用率兜底判空闲，并在 note/source 里写明是兜底口径 |
+| `env_no_throttle_pct` | `ENV_NO_THROTTLE_MAX_PCT = 5 %` 降频时间 | 整段读数都读不到时报 `unavailable` + `env_reading_unknown`，前提**不成立**（不印 `100 %`） |
+
+任一前提不成立 ⇒ 依赖它的判词降级为 `refused` 并带着对应 code（`cost_per_token` 因此不会在
+环境不干净时还保持 `actionable`）。「路径」段的排序是确定的：**先列被拒的判词**
 （它们挡住了决策），再列成立判词自带的提示，最后列未测到的组。
 
 案件目录解决的是"一次优化要跨会话做"：`next.md` 说下一步做什么，`journal.jsonl` 留下
@@ -862,7 +882,7 @@ bash bench/run.sh --quick       # 快速版
 | occupancy 探针两组读数 | `bench/artifacts/*/occupancy.json`、`occupancy-smem32k.json` |
 | 报告体积对比 | `bench/artifacts/*/size-comparison.csv` |
 | 发射槽利用率与两个方向的判词 | `bench/artifacts/*/rep-issue-*.txt` |
-| 轨迹口径对拍与 L2 命中率 | `bench/artifacts/*/rep-tracebasis.txt`、`memtrace.json` |
+| 轨迹口径对拍与 L2 命中率（**是哪份 `mem_trace.so` 采的**看 `environment.txt` 的 `memtrace_so` / `memtrace_so_version`，别拿 `nvbit_version` 猜） | `bench/artifacts/*/rep-tracebasis.txt`、`memtrace.json`、`environment.txt` |
 | doctor 的 ncu 四态结论 | `bench/artifacts/*/doctor.json`、`doctor-path-stripped.json` |
 | 自检误差带与 MDD（含跨进程复测） | `bench/artifacts/*/machine-selfcheck.json` |
 | 同协议两次运行的三态判词 | `bench/artifacts/*/diff-same-protocol.json` |
@@ -872,6 +892,12 @@ bash bench/run.sh --quick       # 快速版
 本轮新增功能（成本/处方/`.ncu-rep` 双向/`gate`/报告/skill）的真机验证在 RTX 4090 +
 Nsight Compute 2025.3.1 上做过，但**没有作为产物入库**：它们的数字不要当作登记过的证据引用，
 要引用就在你的机器上自己跑一遍（工具会给出同样的口径与拒绝条件）。
+
+**哪些证据不入库、因而不构成可复核证据**：本地工作目录下的 `acceptance/` 一整套 m6 真机证据
+（`acceptance/m6-real-gemm.ncu-rep` 与它的 `.ATTRIBUTION.txt` 署名、`m6-raw.txt`、`m6-details.txt`、
+`m6-api.txt`、ncu-ui 截图）**克隆者与 CI 都看不到，也不参与任何门禁** —— 它们只能当"当时跑过"
+的本地记录，不能当可复核证据；要复核请在自己的机器上按同一条命令重采。
+（原因：工作目录**整目录**在 `.gitignore` 里被忽略，`tests/test_repo_hygiene.py` 守着"不许有取反行"。）
 
 ---
 
@@ -916,7 +942,7 @@ Nsight Compute 2025.3.1 上做过，但**没有作为产物入库**：它们的�
 - ✅ **v1.9**：`route`（先路由再动手）、三段式一屏与案件目录、
   **单位成本与处方**（能耗实测 + 你给的量与价格 → ¥/Mtoken 与排序后的头寸）、
   **`--plan` 副作用账**、**`gate` CI 门禁**、
-  **`.ncu-rep` 双向**（导入真值对拍 / 导出带署名的替代口径）、
+  **`.ncu-rep` 双向**（导入真值对拍 —— **包装逻辑已验；真报告口径未验证** / 导出带署名的替代口径）、
   **NVTX 阶段归因**、`--report-md` per-kernel 报告、`kernoscope skill` 安装。
 - 🚧 v1 剩余：访存轨迹的输入侧复用分析（locality/复用距离）、`cuobjdump -sass` 静态指令混合
   细化到 per-kernel、真机 nsys 导出上的 NVTX 归因验证。

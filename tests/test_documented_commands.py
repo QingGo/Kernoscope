@@ -14,11 +14,15 @@ R-55 的三处修正（旧门禁的声明比能力大得多）：
    子命令表来自 `cli.SUBCOMMANDS`（单一真源），开关集合来自各子命令自己的 `--help`。
 3. **逐字执行 + 断言结论**：以前**0 条**文档命令被真的跑过。现在两件事分开算清楚：
 
-   * **全部**可检命令（当前 34 条）都交给真实解析器 —— 保证"照抄不会因为开关/子命令写错
+   * **全部**可检命令（当前 56 条）都交给真实解析器 —— 保证"照抄不会因为开关/子命令写错
      而失败"；
-   * 其中**读者面**的 9 条（医生自检 / 合成首跑 / 入口层 / E4-6 per-launch / 参考层 packet /
+   * 其中读者面那 **11 条**（医生自检 / 合成首跑 / 入口层 / E4-6 per-launch / 参考层 packet /
      strict 卡门 / metrics / 轨迹口径 / occupancy / diff 对拍）**逐字执行并断言它承诺的
-     结论**（`DOC_VERBATIM`）。比例是 9/34 —— 不写成"每条命令的结论都被断言"。
+     结论**（`DOC_VERBATIM`）。比例是 **11/56** —— 不写成"每条命令的结论都被断言"。
+
+   这两个数字**由测试现算并断言**（`test_prose_counts_match_the_scan` /
+   `test_changelog_command_counts_match_the_scan`）：写死在散文里的旧版本漂到过
+   "docstring 34/9、CHANGELOG 59"，而没有任何断言管它们（W-9/R-104）。
 
 规则表 `DOC_VERBATIM` 每条是：(文档, 文档里那一行的片段, 断言函数, 适配函数, 为什么)。
 **适配函数只做一件事**：把文档里的占位符/外部文件换成夹具（`<每次 launch 的 MB>` → 数值、
@@ -31,6 +35,10 @@ R-55 的三处修正（旧门禁的声明比能力大得多）：
   并把"围栏里明显不是命令的东西"（JSON/别的语言/整块输出）**逐条写清**地排除掉，
   而不是静默丢弃。取词仍然**只在围栏内 + 行首**：报告里验收方自己写散文扫描时产生过
   10 条假阳性（把 `入口命令：kernoscope …` 这种半截命令当成命令）。
+* **标签穷尽（W-11/R-105）**：白名单之外的标签此前被**静默**当成"非命令围栏"，于是
+  ```output / ```shellsession / ```terminal 里的编造开关全绿。现在 `output` / `shellsession` /
+  `terminal` 进了命令白名单（里面的坏命令必须被抓到），而**任何没被显式分类**的标签都会被
+  `_fence_tag_problem()` 报出来要求二选一（扫 or 写清理由豁免）—— 静默跳过这条路没有了。
 * **空输入集（V-24）**：旧实现在没有 `.git` 时把整族测试 `skipif` 掉，于是导出的源码树里
   「文档命令门禁」静默失效（23 passed / 6 skipped，看起来全绿）。现在空输入集**失败**并
   说清原因，唯一出口是显式 `KS_ALLOW_EMPTY_DOC_SCAN=1`（接受这次降级 ⇒ skip，不是假绿）。
@@ -88,17 +96,38 @@ LONG_FLAG_RE = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]+")
 # 这种"命令列表写成散文"的行，正是报告里 10 条假阳性的形状。
 PROSE_PUNCT_RE = re.compile(r"[。，、；：！？（）【】「」『』〈〉《》→←…—]")
 
-# **命令围栏**的标签白名单（V-23）：读者真会照抄的那几种 + 无标签。
-#   旧实现只认 ```bash / ```sh，于是往 ```console / ```text / 无标签围栏里注入一条
-#   编造的开关，门禁全绿（报告实测）。
+# **命令围栏**的标签白名单（V-23 + W-11）：读者真会照抄的那几种 + 无标签 + 会贴命令的
+#   "会话/输出" 类标签。旧实现只认 ```bash / ```sh，于是往 ```console / ```text / 无标签
+#   围栏里注入一条编造的开关，门禁全绿；W-11 又把 ```output / ```shellsession / ```terminal
+#   这几个**白名单外**的标签静默当成"非命令围栏" —— 编造的开关同样全绿。
 COMMAND_FENCE_TAGS = frozenset({"", "bash", "sh", "shell", "zsh", "console", "text", "txt",
-                                "shell-session"})
-# **明确排除**的围栏标签（逐条写清理由，不静默丢）：
+                                "shell-session", "shellsession", "terminal", "output"})
+# **明确排除**的围栏标签 → 理由（逐条写清，不静默丢）。这张表是**穷尽**的：
+#   没被登记的标签会被 `_fence_tag_problem()` 报出来，而不是被静默跳过（W-11 的修法）。
 #   json/jsonc/yaml/toml/csv… 是**数据**；python/c/cuda 是**别的语言的代码**；
 #   powershell 是**别的 shell**（这里只保证 POSIX shell 的取词规则）。
-DATA_FENCE_TAGS = frozenset({"json", "jsonc", "json5", "yaml", "yml", "toml", "ini", "csv",
-                             "tsv", "xml", "html", "python", "py", "c", "cpp", "cc", "cuda",
-                             "powershell", "ps1", "diff"})
+NON_COMMAND_FENCE_REASONS: dict[str, str] = {
+    "json": "数据（机器可读 JSON 输出）",
+    "jsonc": "数据（带注释的 JSON 输出）",
+    "json5": "数据（JSON5 输出）",
+    "yaml": "数据（YAML 配置/输出）",
+    "yml": "数据（YAML 配置/输出）",
+    "toml": "数据（TOML 配置）",
+    "ini": "数据（INI 配置）",
+    "csv": "数据（CSV 表格）",
+    "tsv": "数据（TSV 表格）",
+    "xml": "数据（XML 输出）",
+    "html": "数据/标记（HTML）",
+    "python": "别的语言的代码（Python）",
+    "py": "别的语言的代码（Python）",
+    "c": "别的语言的代码（C）",
+    "cpp": "别的语言的代码（C++）",
+    "cc": "别的语言的代码（C++）",
+    "cuda": "别的语言的代码（CUDA C++）",
+    "powershell": "别的 shell（PowerShell，这里只保证 POSIX shell 的取词规则）",
+    "ps1": "别的 shell（PowerShell）",
+    "diff": "差异输出（不是可执行命令）",
+}
 
 # 有意展示的**反面教材**：文档里那些"agent 凭印象编出来的命令"是**证据**，不是承诺。
 # 逐条登记（文件、那些行的特征、为什么）。豁免是**逐行**的：同一个围栏里再多出别的坏
@@ -224,36 +253,24 @@ def _is_data_block(content: str) -> bool:
     return True
 
 
-def _fenced_blocks(path: Path, langs: frozenset[str] | None = None) -> list[tuple[int, str]]:
-    """**命令围栏**（`(起始行号, 内容)`；V-23 起不再只认 ```bash/```sh）。
+def _iter_fences(path: Path):
+    """文件里**每一个**围栏：`(标签, 起始行号, 内容)`（标签已小写；无标签是 `""`）。
 
-    扫描范围 = COMMAND_FENCE_TAGS 里的围栏，再减掉两类**明确**排除的内容：
-
-      * 标签排除：`DATA_FENCE_TAGS`（JSON/YAML/Python/CUDA/PowerShell… 是数据或别的语言）；
-      * 整块形状排除：`_is_data_block`（整块以 `{`/`[` 开头的当输出/数据）。
-
-    （第三类排除 —— 文档有意展示的反面教材 —— 是**逐行**做的，在 `_scan_lines` 里；
-    这样同一个围栏里再多出别的坏命令照样会被查到。）
-
-    行首取词（命令必须出现在行首）不在这里做，而在 `kernoscope_argv` 里 —— 于是
-    "围栏里的散文行"自然不产生命令，而"围栏里的坏命令"一条都跑不掉。
+    唯一一处解析 ```` ``` ```` 的逻辑 —— `_fenced_blocks()`（取命令）与
+    `_all_fence_tags()`（查"标签有没有被显式分类"，W-11）都从这里派生，
+    于是不会出现"一个函数认这个标签、另一个函数不认"的分叉。
     """
-    langs = COMMAND_FENCE_TAGS if langs is None else langs
     if not path.exists():
-        return []
-    out: list[tuple[int, str]] = []
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return
     inside = False
     buf: list[str] = []
     tag = ""
     start = 0
-    for i, line in enumerate(lines, 1):
+    for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         st = line.strip()
         if st.startswith("```"):
             if inside:
-                content = "\n".join(buf)
-                if tag in langs and not _is_data_block(content):
-                    out.append((start, content))
+                yield tag, start, "\n".join(buf)
                 inside, buf = False, []
             else:
                 inside = True
@@ -264,12 +281,66 @@ def _fenced_blocks(path: Path, langs: frozenset[str] | None = None) -> list[tupl
             continue
         if inside:
             buf.append(line)
-    return out
+
+
+def _fenced_blocks(path: Path, langs: frozenset[str] | None = None) -> list[tuple[int, str]]:
+    """**命令围栏**（`(起始行号, 内容)`；V-23 起不再只认 ```bash/```sh）。
+
+    扫描范围 = COMMAND_FENCE_TAGS 里的围栏，再减掉两类**明确**排除的内容：
+
+      * 标签排除：`NON_COMMAND_FENCE_REASONS`（JSON/YAML/Python/CUDA/PowerShell… 是数据或
+        别的语言，逐条写了理由）；
+      * 整块形状排除：`_is_data_block`（整块以 `{`/`[` 开头的当输出/数据）。
+
+    **白名单外的标签不是"排除"，是"没分类"**：`_fence_tag_problem()` 会把它们报出来
+    （W-11 之前是静默跳过 —— 往 ```output 里塞编造的开关，门禁全绿）。
+
+    （第三类排除 —— 文档有意展示的反面教材 —— 是**逐行**做的，在 `_scan_lines` 里；
+    这样同一个围栏里再多出别的坏命令照样会被查到。）
+
+    行首取词（命令必须出现在行首）不在这里做，而在 `kernoscope_argv` 里 —— 于是
+    "围栏里的散文行"自然不产生命令，而"围栏里的坏命令"一条都跑不掉。
+    """
+    langs = COMMAND_FENCE_TAGS if langs is None else langs
+    return [(start, content) for tag, start, content in _iter_fences(path)
+            if tag in langs and not _is_data_block(content)]
+
+
+def _all_fence_tags(path: Path) -> list[str]:
+    """文档里用过的**全部**围栏标签（按出现顺序，含重复；用于穷尽性检查）。"""
+    return [tag for tag, _start, _content in _iter_fences(path)]
+
+
+def _fence_tag_problem(tag: str) -> str | None:
+    """这个围栏标签有没有被**显式**分类（None = 有）。
+
+    被分类 = 在 `COMMAND_FENCE_TAGS`（会被当命令扫）或 `NON_COMMAND_FENCE_REASONS`
+    （有理由的豁免）。**没分类的标签不再是"静默跳过"**：`unknown` 会被报出来，
+    要求作者二选一（W-11/R-105）。
+    """
+    if tag in COMMAND_FENCE_TAGS:
+        return None
+    if NON_COMMAND_FENCE_REASONS.get(tag, "").strip():
+        return None
+    return (f"未分类的围栏标签 ```{tag}：它既不在 COMMAND_FENCE_TAGS（会被当命令扫），"
+            f"也不在 NON_COMMAND_FENCE_REASONS（有理由的豁免）里。白名单外的标签不许"
+            f"被静默跳过 —— 请二选一：① 里面可能贴命令 ⇒ 加进 COMMAND_FENCE_TAGS；"
+            f"② 它是数据/别的语言/纯输出 ⇒ 加进 NON_COMMAND_FENCE_REASONS 并写清理由。")
 
 
 def _total_command_blocks() -> int:
     """全部被跟踪文档里的命令围栏总数（V-24 的"扫不到任何围栏"判据）。"""
     return sum(len(_fenced_blocks(doc)) for doc in DOCS)
+
+
+def _scanned_command_count() -> int:
+    """真正被送进解析器的文档命令条数 —— **计数类断言的唯一真源**（R-104/W-9）。
+
+    任何写在散文里的数字（本文件模块 docstring、`CHANGELOG.md`）都要跟这个函数现算的值
+    对得上：手写的 34/9 与 59 都漂过，而没有任何断言管它们。
+    """
+    return sum(1 for doc in DOCS for _lineno, line in _scan_lines(doc)
+               if kernoscope_argv(line) is not None)
 
 
 def _logical_lines(block: str) -> list[str]:
@@ -646,6 +717,68 @@ def test_fence_scanner_takes_console_text_and_untagged_blocks(tmp_path):
     prompt.write_text("```console\n$ kernoscope capabilities --brief\n```\n", encoding="utf-8")
     blocks = _fenced_blocks(prompt)
     assert kernoscope_argv(_logical_lines(blocks[0][1])[0]) == ["capabilities", "--brief"]
+
+
+def test_unknown_fence_tags_are_not_silently_skipped(tmp_path):
+    """W-11/R-105 的负样本：白名单外的标签不许被静默当成"非命令围栏"。
+
+    第五轮 V-23 把命令围栏扩到 `console`/`text`/无标签，但 ```output / ```shellsession /
+    ```terminal 这些**白名单外**的标签仍然被静默跳过 —— 报告实测：同一条编造的 `--smoke`
+    塞进去，门禁全绿。这里把两半都钉死：
+
+      ① `output`/`shellsession`/`terminal` 进了命令白名单 ⇒ 里面的坏命令必须被抓到；
+      ② 真没分类的标签（```rust/```mermaid…）不许静默跳过，而是**报出来**要求二选一。
+    """
+    sub_flags = _subcommand_flags()
+    main_flags = _main_flags()
+    bad = "kernoscope --set basic --smoke -- x.py"
+    for tag in ("output", "shellsession", "terminal", "shell-session"):
+        doc = tmp_path / f"fence-{tag}.md"
+        doc.write_text(f"```{tag}\n{bad}\n```\n", encoding="utf-8")
+        assert _all_fence_tags(doc) == [tag]
+        blocks = _fenced_blocks(doc)
+        assert len(blocks) == 1, (tag, blocks)
+        argv = kernoscope_argv(_logical_lines(blocks[0][1])[0])
+        assert argv is not None, tag
+        assert _parse_problem(argv, sub_flags, main_flags), f"{tag} 围栏里的坏命令被放行了"
+    # ② 没分类的标签：不是"跳过"，是"报错"。旧实现的 `_fenced_blocks` 会安静地返回 []。
+    for tag in ("rust", "mermaid", "output-text"):
+        problem = _fence_tag_problem(tag)
+        assert problem, f"```{tag} 没被分类，却没有任何报错（静默跳过还在）"
+        assert tag in problem and "静默" in problem
+        doc = tmp_path / f"unknown-{tag}.md"
+        doc.write_text(f"```{tag}\n{bad}\n```\n", encoding="utf-8")
+        assert _all_fence_tags(doc) == [tag]      # 标签被看见了，只是没被分类
+
+
+def test_fence_exemption_registry_is_explicit(tmp_path):
+    """豁免表本身也要能被查：两张表不许重叠、每条豁免必须写理由、且真的被排除。"""
+    assert not (COMMAND_FENCE_TAGS & set(NON_COMMAND_FENCE_REASONS)), \
+        "同一个标签不许既当命令围栏又被豁免"
+    for tag, why in NON_COMMAND_FENCE_REASONS.items():
+        assert why.strip(), f"```{tag} 的豁免没写理由"
+        assert _fence_tag_problem(tag) is None
+    for tag in ("json", "jsonc", "yaml", "python", "cuda", "powershell"):
+        assert tag in NON_COMMAND_FENCE_REASONS, f"```{tag} 是数据/别的语言，必须有理由地豁免"
+        doc = tmp_path / f"data-{tag}.md"
+        doc.write_text('```%s\n{"cmd": "kernoscope --smoke"}\n```\n' % tag, encoding="utf-8")
+        assert _fenced_blocks(doc) == [], tag
+
+
+@needs_doc_scan_inputs
+def test_every_fence_tag_in_the_docs_is_explicitly_classified():
+    """W-11 的正面门禁：被跟踪文档里**每一个**围栏标签都必须被显式分类。
+
+    这条是"穷尽性"本身：新增一个没分类的标签（无论有意还是无意）都会红，
+    而不是像旧实现那样安静地不扫它。
+    """
+    bad: list[str] = []
+    for doc in DOCS:
+        for tag in dict.fromkeys(_all_fence_tags(doc)):     # 去重、保序
+            problem = _fence_tag_problem(tag)
+            if problem:
+                bad.append(f"{doc.relative_to(ROOT)}: {problem}")
+    assert not bad, "\n  - ".join(bad)
 
 
 def test_registered_negative_examples_are_really_unparseable():
@@ -1040,13 +1173,77 @@ def test_registered_commands_are_executed_verbatim(monkeypatch, tmp_path):
 @needs_doc_scan_inputs
 def test_every_doc_command_is_either_parsed_or_asserted():
     """把"覆盖率"写成事实而不是印象：每条命令都过解析器，其中读者面那几条断言结论。"""
-    parsed = 0
-    for doc in DOCS:
-        for _lineno, line in _scan_lines(doc):
-            if kernoscope_argv(line) is not None:
-                parsed += 1
+    parsed = _scanned_command_count()
     assert parsed >= 30, f"只扫到 {parsed} 条可检命令"
     assert len(DOC_VERBATIM) < parsed, "登记数不该超过可检命令数（那是重复计数）"
+
+
+@needs_doc_scan_inputs
+def test_prose_counts_match_the_scan():
+    """R-104/W-9：本文件 docstring 里的计数必须是**现算**的，不是手写的。
+
+    旧 docstring 写 "34 条 / 9 条 / 比例 9/34"，而扫描器实测 56/11 —— 两处都手写、
+    无断言绑定，于是各自漂。这条把散文里的数字绑到 `_scanned_command_count()` 与
+    `len(DOC_VERBATIM)` 上：写错了会在这里红，并且直接告诉你活值。
+    """
+    parsed = _scanned_command_count()
+    verbatim = len(DOC_VERBATIM)
+    doc = __doc__ or ""
+    want = {
+        f"当前 {parsed} 条": "可检命令数",
+        f"读者面那 **{verbatim} 条**": "读者面逐字执行条数",
+        f"比例是 **{verbatim}/{parsed}**": "逐字执行比例",
+    }
+    missing = [f"{what}：docstring 里找不到 {needle!r}" for needle, what in want.items()
+               if needle not in doc]
+    assert not missing, (
+        "文档命令门禁的计数是手写的、已经漂了（W-9/R-104）：\n  - " + "\n  - ".join(missing)
+        + f"\n现算值：可检命令 {parsed} 条、读者面逐字执行 {verbatim} 条、比例 {verbatim}/{parsed}。"
+        + "\n请按现算值改 tests/test_documented_commands.py 的模块 docstring —— "
+          "数字由这条测试守，不许手写。")
+
+
+@needs_doc_scan_inputs
+def test_changelog_command_counts_match_the_scan():
+    """R-104/W-9：`CHANGELOG.md` 里的命令计数必须与扫描器现算的值一致。
+
+    旧 CHANGELOG 写"（当前 59 条）… 比例 11/59"，实测是 **56**（读者面 11 条没漂，
+    分母漂了）。CHANGELOG 不许手改数字 —— 这条给出**可以直接粘贴**的正确句子。
+    """
+    parsed = _scanned_command_count()
+    verbatim = len(DOC_VERBATIM)
+    subs = len(cli.SUBCOMMANDS)
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    # 只在**「文档命令门禁」那一段**里找这些数字：R-88④ 的教训是"整文件子串匹配"会被
+    # 文件里任何一处（甚至注释）满足 —— 数字写在该在的那一段才算数。
+    lines = changelog.splitlines()
+    idx = next((i for i, l in enumerate(lines) if "文档命令门禁" in l), None)
+    assert idx is not None, "CHANGELOG 里找不到「文档命令门禁」那一段（登记表过期？）"
+    block: list[str] = []
+    for l in lines[idx:]:
+        if block and (l.startswith("- ") or l.startswith("#") or not l.strip()):
+            break
+        block.append(l)
+    para = "\n".join(block)
+    needles = {
+        f"（当前 {parsed} 条）": "可检命令总数",
+        f"读者面 {verbatim} 条": "读者面逐字执行条数",
+        f"比例 {verbatim}/{parsed}": "逐字执行比例",
+        f"{subs} 个子命令": "子命令数量",
+    }
+    missing = [f"{what}：CHANGELOG「文档命令门禁」段里找不到 {needle!r}"
+               for needle, what in needles.items() if needle not in para]
+    assert not missing, (
+        "CHANGELOG 的文档命令计数与扫描器现算值不一致（W-9/R-104）：\n  - "
+        + "\n  - ".join(missing)
+        + f"\n现算值：可检命令 {parsed} 条、读者面逐字执行 {verbatim} 条、比例 {verbatim}/{parsed}、"
+          f"子命令 {subs} 个（子命令数来自 `cli.SUBCOMMANDS`）。"
+        + "\n请把 CHANGELOG「文档命令门禁」那段的前两行**整体替换**为：\n"
+        + "- 文档命令门禁：**全部**可检命令（当前 %d 条）都交给**真实解析器**（%d 个子命令各有自己的\n"
+          "  `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、\n"
+          "  `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；\n"
+          "  其中**读者面 %d 条**逐字执行并断言结论（比例 %d/%d，不是\"每条都断言\"）。"
+        % (parsed, subs, verbatim, verbatim, parsed))
 
 
 # --------------------------------------------------------------------------

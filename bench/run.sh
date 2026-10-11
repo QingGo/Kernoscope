@@ -73,7 +73,41 @@ if [[ -n "${NVBIT_PATH:-}" ]]; then
   export NVBIT_PATH
   echo "[bench] NVBit: ${NVBIT_PATH}（${NVBIT_VERSION}）"
 else
-  echo "[bench] warn: 没找到 NVBit（可选依赖）—— 步骤 8/9 会跳过"
+  if [[ -n "${NVBIT_MEMTRACE_SO:-}" ]]; then
+    # 只给了 .so 没给树：不是"这台机器没有 NVBit"（R-102 的场景之一），如实说清
+    echo "[bench] 注: 没设 NVBIT_PATH，但给了 NVBIT_MEMTRACE_SO —— 轨迹照采，步骤 9 跳过"
+  else
+    echo "[bench] warn: 没找到 NVBit（可选依赖）—— 步骤 8/9 会跳过"
+  fi
+fi
+
+# R-102：只记 `NVBIT_PATH` 那棵树的版本**不够**。真正的采集由 collect.sh 做，而它优先用环境里
+# 预置的 `NVBIT_MEMTRACE_SO` —— 两者可以不是同一棵树（真机：NVBIT_PATH 那棵树里 3 份 v1.8.1
+# 全挂，实际采到轨迹的是另一棵树里的构建）。所以 environment.txt 两样都记：
+#   * `nvbit` / `nvbit_version`      —— NVBIT_PATH 这棵树（步骤 9 之类按它找工具）
+#   * `memtrace_so` / `memtrace_so_version` —— **这次真正被注入的那份 .so** 与它实物里的版本
+# 发现顺序只有 collect.sh 一处真源：这里问它的 `--resolve-only`，不自己抄一份候选路径，
+# 也不自己编版本（读不出就如实写 n/a —— 编一个版本会让整段"哪个构建能用"的结论失去依据）。
+MEMTRACE_SO="n/a"
+MEMTRACE_SO_VERSION="n/a"
+if [[ ( -n "${NVBIT_PATH:-}" || -n "${NVBIT_MEMTRACE_SO:-}" ) \
+      && -f tools/probes/nvbit_memtrace/collect.sh ]]; then
+  RESOLVED="$(NVBIT_PATH="${NVBIT_PATH:-}" NVBIT_MEMTRACE_SO="${NVBIT_MEMTRACE_SO:-}" \
+              bash tools/probes/nvbit_memtrace/collect.sh --resolve-only 2>/dev/null || true)"
+  MEMTRACE_SO="$(printf '%s\n' "$RESOLVED" | sed -n 's/^memtrace_so: //p' | head -1)"
+  MEMTRACE_SO_VERSION="$(printf '%s\n' "$RESOLVED" | sed -n 's/^memtrace_so_version: //p' | head -1)"
+  MEMTRACE_SO="${MEMTRACE_SO:-n/a}"
+  MEMTRACE_SO_VERSION="${MEMTRACE_SO_VERSION:-n/a}"
+  if [[ "$MEMTRACE_SO" == "n/a" ]]; then
+    echo "[bench] warn: 没有可用的 mem_trace.so（NVBIT_PATH=${NVBIT_PATH:-未设}）" \
+         "—— 步骤 8 会失败，产物里 memtrace_so 记 n/a"
+  else
+    echo "[bench] mem_trace.so: ${MEMTRACE_SO}（NVBit ${MEMTRACE_SO_VERSION}）"
+    if [[ -n "${NVBIT_PATH:-}" && "$MEMTRACE_SO" != "$NVBIT_PATH"/* ]]; then
+      # 这正是 R-102 要防的情形：版本号取自 NVBIT_PATH 会指向**另一份构建**。
+      echo "[bench] 注: 实际注入的 .so 不在 NVBIT_PATH 那棵树里 —— environment.txt 两处都记了，引用轨迹证据时看 memtrace_so"
+    fi
+  fi
 fi
 command -v nvcc >/dev/null 2>&1 || echo "[bench] warn: PATH 里仍然没有 nvcc —— probes 会编译失败"
 command -v cuobjdump >/dev/null 2>&1 || echo "[bench] warn: PATH 里没有 cuobjdump —— NVBit mem_trace 会失败"
@@ -140,6 +174,10 @@ KS_VERSION="$(KSC --version 2>/dev/null || echo 'n/a')"
   echo "nvidia-smi: $(nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null)"
   echo "nvbit: ${NVBIT_PATH:-n/a}"
   echo "nvbit_version: ${NVBIT_VERSION:-n/a}"
+  # R-102：实际注入的那份 .so 与它的实物版本。只记 NVBIT_PATH 那一行时，"轨迹是哪份构建采的"
+  # 在产物里查不到（真机就是两棵树）。轨迹证据引用者看这两行，不要看 nvbit_version 猜。
+  echo "memtrace_so: ${MEMTRACE_SO:-n/a}"
+  echo "memtrace_so_version: ${MEMTRACE_SO_VERSION:-n/a}"
 } > "$HOSTDIR/environment.txt" 2>&1
 cat "$HOSTDIR/environment.txt"
 if [[ "$REVISION_SOURCE" == "none" ]]; then
@@ -348,7 +386,10 @@ if [[ -f tools/probes/Makefile ]]; then
 fi
 
 # ------------------------------------------------- 8) NVBit 访存轨迹（可选外部依赖）
-if [[ -n "${NVBIT_PATH:-}" && -f tools/probes/nvbit_memtrace/collect.sh ]]; then
+# R-102：条件里也要认 `NVBIT_MEMTRACE_SO` —— 只给了 .so（没给树）时旧版会**静默跳过**整步，
+# 而 collect.sh 明明能采；产物于是既没有轨迹也没有 memtrace_so 的证据。
+if [[ ( -n "${NVBIT_PATH:-}" || -n "${NVBIT_MEMTRACE_SO:-}" ) \
+      && -f tools/probes/nvbit_memtrace/collect.sh ]]; then
   echo "== 8) NVBit 官方 mem_trace → 轨迹口径账本对拍 =="
   # L2 容量：优先 torch（nvidia-smi 的 l2CacheSize 字段并非所有驱动都有）
   L2="$("$PY" -c 'import torch;print(int(torch.cuda.get_device_properties(0).L2_cache_size))' 2>/dev/null || echo 0)"
@@ -358,7 +399,8 @@ if [[ -n "${NVBIT_PATH:-}" && -f tools/probes/nvbit_memtrace/collect.sh ]]; then
   # 一个 80 MB 工作集 + 默认 50 次预热曾写出 10 GB 文本（真事）。小工作集（1 MB）常驻 L2，
   # 这恰好演示"换口径不是为了凑数，而是换一个前提成立的问法"：轨迹口径会告诉你
   # "这份 DRAM 账本对不上，因为流量根本没出 L2"。
-  KS_MEMTRACE_OUT="$HOSTDIR/memtrace-official.txt" NVBIT_PATH="$NVBIT_PATH" \
+  KS_MEMTRACE_OUT="$HOSTDIR/memtrace-official.txt" NVBIT_PATH="${NVBIT_PATH:-}" \
+      NVBIT_MEMTRACE_SO="${NVBIT_MEMTRACE_SO:-}" \
       bash tools/probes/nvbit_memtrace/collect.sh -- \
       "$PROBE" --kernel copy --mb 1 --iters 1 --warmup 2 --grid 16 --block 128 \
       > "$HOSTDIR/nvbit-collect.log" 2>&1

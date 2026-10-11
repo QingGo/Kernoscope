@@ -9,7 +9,7 @@
 | 判词 id | 问的是什么 | 方向（diff 用） | 需要的前提 | 被拒时的 code 来源 |
 |---|---|---|---|---|
 | `kernel_time` | 哪个 kernel 最耗时、每次跑多久 | 越低越好 | 该 kernel 占全部 kernel 时间的比例、kernel 时间占进程 wall 的比例 | `premise_failed` |
-| `cost_per_token` | cost_per_token | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
+| `cost_per_token` | cost_per_token | 不判方向（只给差值） | 窗口内实测能耗（NVML 功率积分/能量累加器）、窗口内吞吐（调用方给的 token 数 ÷ 窗口秒数）、同卡有没有别的计算进程（多租户会把读数稀释）、采样窗口里 GPU 有多少时间在干活（宿主间隙会稀释比值类口径）、窗口内降频时间占比（功率封顶/热降频会让能效读数偏乐观或偏保守） | `coverage_too_low`, `env_shared_gpu`, `env_throttled` |
 | `truth_vs_substitute` | truth_vs_substitute | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
 | `saving_estimate` | saving_estimate | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
 | `dram_bytes` | DRAM 搬了多少字节 / 是不是 DRAM bound | 越低越好 | 窗口是否被被测负载主导、参与积分的窗口内显存忙碌均值 | `coverage_too_low` |
