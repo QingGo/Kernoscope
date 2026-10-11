@@ -65,6 +65,27 @@ git status --porcelain                       # 期望为空（发布物必须来
 - **NVBit 不可再分发**：仓库里只有我们自己的探针源码，构建产物（`*.so`）在 `.gitignore` 里；
   发布物不得包含它。`NOTICE` 里有"与 NVIDIA 无关联"与第三方声明。
 
+## 3.5 发布预演与发布后验证（同一条命令，两种来源）
+
+```bash
+bash bench/release-dry-run.sh                 # 发布前：现场构建 + 元数据 + **从本地 wheel 隔离安装** + 首用三连
+bash bench/release-dry-run.sh --from-pypi     # 发布后：从 **PyPI** 装 kernoscope==<版本> 再跑同一组断言
+bash bench/release-dry-run.sh --metadata-only # 最快：只构建 + 检查元数据（名字/版本/许可/Alpha/Python 下限/入口点/不含测试）
+```
+
+为什么要有它：README §2 的三条安装路径里，`uv tool install kernoscope` **只有在包真的发上去之后
+才可用**（第七轮 X-21：发布前实测 404，而文档已经宣布同日发布）。所以"能不能装"不能只写在散文里
+—— 它是**能跑的命令**，发布前后各跑一次：
+
+* 发布前 `--metadata-only` / 无参数：证明"这一刻的产物装出来能跑、首屏在预算内"；
+* 发布后 `--from-pypi`：证明"用户按 README 复制粘贴的那条命令真的能用"。
+
+两种模式共用**同一段断言**（隔离安装 + `capabilities --brief` ≤1.5 KB 且带 `next[]` +
+`doctor --no-probe` rc=0 + 一屏 ≤8192 B / ≤60 行），所以不存在"发布前一套清单、发布后另一套"。
+
+发布后如果它报"隔离安装失败"，最可能的原因是 **PyPI 上还没有这个版本**或 tag 与 `pyproject`
+的 version 不一致；脚本会直接把这两条提示打出来。
+
 ## 4 发布之后要看什么
 
 | 信号 | 为什么 | 在哪看 |

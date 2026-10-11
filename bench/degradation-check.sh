@@ -52,7 +52,7 @@ EOF
 
 if [[ "$MOVE" == "1" ]]; then
   mv "$NSYS" "$OFF"
-  echo "== 环境 B：有 GPU、没有 nsys（临时移开 $NSYS）=="
+  echo "== 环境 B：有 GPU、没有 nsys（临时移开 ${NSYS}）=="
 else
   echo "== 环境 B：这台机器本来没有 nsys =="
 fi

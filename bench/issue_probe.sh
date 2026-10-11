@@ -21,7 +21,7 @@ if [[ -z "${NVBIT_PATH:-}" ]]; then
 fi
 HIST_SO="$NVBIT_PATH/tools/build/opcode_hist/opcode_hist.so"
 if [[ ! -f "$HIST_SO" ]]; then
-  echo "！找不到 $HIST_SO；先在 NVBit 目录里构建：make -C tools/opcode_hist" >&2
+  echo "！找不到 ${HIST_SO}；先在 NVBit 目录里构建：make -C tools/opcode_hist" >&2
   exit 2
 fi
 if [[ ! -x "$PROBE" ]]; then

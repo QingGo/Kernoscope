@@ -109,7 +109,7 @@ if [ -f "$WORK/step-6.out" ]; then
 fi
 
 if [ "$FAIL" != 0 ]; then
-  say "PREFLIGHT FAIL（临时目录保留在 $WORK，或用 --keep 重跑）"
+  say "PREFLIGHT FAIL（临时目录保留在 ${WORK}，或用 --keep 重跑）"
   exit 1
 fi
 say "PREFLIGHT OK 6/6（陌生首跑路径：每一步 rc=0、产出非空；第一步就带 next[]；一屏在预算内）"

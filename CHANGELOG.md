@@ -719,6 +719,25 @@ kernoscope mcp --stdio
 - 两条测试对夹：不同行的超峰**不许**污染别人的 roofline；同一行的超峰**必须**照样否掉自己的
   roofline（防止把它修成"一律不传播"）。
 
+### 发布预演 / 发布后验证：`bench/release-dry-run.sh`（X-21 的可验证面）
+
+- 新增一条命令，**发布前后各跑一次、断言同一组东西**：
+  ① `--metadata-only`：现场构建 + 检查产物元数据（名字 / 版本 / Apache-2.0 / Alpha 分类器 /
+  Python ≥3.10 / console script 入口点 / **测试目录没被打进包**）；
+  ② 无参数（预演）：把 wheel 装进**隔离**的 tool 目录（`UV_TOOL_DIR` 指到临时目录，不碰你现有的
+  安装），在中性工作目录下跑首用三连：`capabilities --brief`（rc=0、≤1.5 KB、**带 `next[]`**）、
+  `doctor --no-probe`（rc=0）、一屏（rc=0、≤8192 B / ≤60 行）；
+  ③ `--from-pypi`（发布后）：把 ① 的来源换成 `kernoscope==<版本>`，其余断言一模一样。
+- 实测：预演在本机全绿（wheel 518 KB、隔离安装出 `kernoscope` + `ksc`、一屏 4854 B / 42 行）；
+  `--from-pypi` 此刻**预期红**（PyPI 还没有这个版本），并打出"先按 RELEASING §1 发布"的提示
+  —— 这正是 X-21 的可验证形式。
+- **顺手抓到一整类真实的可移植性 bug**：脚本里 `$VAR` 后面紧跟中文字符时
+  （`say "…$VERSION（模式：$MODE）"`），在**非 UTF-8 locale**（`LC_ALL=C`、极简容器、部分 CI
+  镜像）下 bash 会把多字节字符的首字节吞进变量名 ⇒ `VERSION\xef: unbound variable`，脚本当场死。
+  本机 locale 是 UTF-8 所以"看起来没问题"。已修 `release-dry-run.sh` / `preflight-first-run.sh` /
+  `degradation-check.sh` / `issue_probe.sh` 共 9 处，并加两条门禁：静态扫描（**任何** shell 脚本里
+  `$VAR` 紧跟非 ASCII ⇒ 红）＋ 在 `LC_ALL=C` 下逐个 `bash -n`。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。
