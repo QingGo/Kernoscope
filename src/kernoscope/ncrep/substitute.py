@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..provenance import COUNTER_NAMESPACES, OUR_PREFIXES, Provenance
-from .ncu_rows import convert, row_for, section_of
+from .ncu_rows import convert, row_for, section_of, unit_ok
 from .profile import RepMetric, RepSource, build_report
 from .writer import FILE_VERSION
 
@@ -109,7 +109,7 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
       * 被拒判词引用过的不写（前提不成立）；
       * 值不是数字的不写（字符串型判词无法进 `.ncu-rep` 的 double 通道）。
     返回 (metrics, 名字→出处, 名字→写进文件的单位, 因前提不成立被丢弃的名字,
-    因命名空间规则被丢弃的名字, 因超上限被丢弃的条数)。
+    因命名空间/单位规则被丢弃的名字, 因超上限被丢弃的条数)。
     """
     refused = _refused_metric_names(packet)
     picked: list[tuple[Provenance, str, float, str, str]] = []
@@ -122,6 +122,11 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
             if _is_counter_name(m.name):
                 continue
             if not m.name.startswith(OUR_PREFIXES) and row_for(m.name) is None:
+                by_namespace.append(m.name)
+                continue
+            # V-9：白名单里的行带换算系数，系数只在"我们的单位确实是 from_units 里那个"时成立。
+            # 单位不符就**不写这一行**（而不是乘错一个 1000× 的数）。
+            if row_for(m.name) is not None and not unit_ok(m.name, m.unit or None):
                 by_namespace.append(m.name)
                 continue
             if m.name in refused:
@@ -227,8 +232,8 @@ def render_comment(plan: SubstitutePlan, *, tool_version: str = "") -> str:
         lines.append("omitted (their own premises failed, so we refuse to publish them): "
                      + ", ".join(plan.dropped_by_refusal[:8]))
     if plan.dropped_by_namespace:
-        lines.append("omitted (not our own metric namespace: a .ncu-rep reader would assume "
-                     "ncu's unit convention for these names, e.g. ns vs our ms): "
+        lines.append("omitted (they live in ncu's namespace but we have no same-source row "
+                     "definition for them, or the unit does not match the conversion table): "
                      + ", ".join(plan.dropped_by_namespace[:8]))
     if plan.dropped_over_cap:
         lines.append(f"omitted by size cap: {plan.dropped_over_cap} more values "
@@ -271,19 +276,21 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
                      "我们写不出，所以那一行会显示 `Device 255, CC 0.0`；真实设备信息以这里为准）"
                      .format(plan.device_name or "unknown", plan.compute_capability or "unknown"))
     lines.append("")
-    lines.append("同源行（`launch__*` / `gpu__time_duration.sum`）会出现在 `ncu --import "
-                 "--page details` 的 LaunchStats / SpeedOfLight 表里，单位已按 ncu 换算"
-                 "（例如 Duration：我们的 ms × 1e6 = ncu 的 ns）。替代口径（`ks__`/`est__`/"
-                 "`meas__`）不会出现在那些表里 —— ncu 的节表只认它自己的指标；它们在这里、"
-                 "在 `--page raw`、在 Python API 与文件内的 RuleResult 文本里可见。")
+    lines.append("同源行（`launch__*` / `gpu__time_duration.sum`，单位已按 ncu 换算："
+                 "Duration 我们的 ms × 1e6 = ncu 的 ns）在 `ncu --import --page details` 里以"
+                 "**节标题 + `INF/WRN` 规则文本**出现；**表格行不会渲染** —— ncu 的表格只在"
+                 "报告的指标集完整到能被它自己的节定义解析时才出（替代口径报告做不到，"
+                 "也不该靠编造计数器行去做）。完整数值在 `--page raw`、Python API、"
+                 "本文件与文件内的 RuleResult 文本里。")
     if plan.dropped_by_namespace:
         lines.append("")
         lines.append("## 因命名空间规则而未写入的值")
         lines.append("")
-        lines.append("这些名字属于 ncu 的命名空间，但两边的**单位语义不确定**"
-                     "（例如 `gpu__time_duration.sum`：我们是 ms，ncu 是 ns）。"
-                     "写进 `.ncu-rep` 会被按 ncu 的单位理解，所以宁可不写："
-                     + ", ".join(f"`{n}`" for n in plan.dropped_by_namespace))
+        lines.append("这些名字落在 ncu 的命名空间里，但我们没有它们的**同源行定义**"
+                     "（`ncrep/ncu_rows.py` 的白名单里没有），或者单位与换算系数不匹配。"
+                     "写进 `.ncu-rep` 会被按 ncu 的单位与语义理解，所以宁可不写"
+                     "（例：" + ", ".join(f"`{n}`" for n in plan.dropped_by_namespace[:3])
+                     + ("…" if len(plan.dropped_by_namespace) > 3 else "") + "）。")
     if plan.dropped_by_refusal:
         lines.append("")
         lines.append("## 因前提不成立而未写入的值")

@@ -20,7 +20,7 @@
 | `nvbit_missing` | 未配置 NVBit：指令级/访存轨迹不可得 | 自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH |  | 需人工 |
 | `no_memtrace` | 没有提供访存轨迹文件 | 加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响 | `kernoscope --ks-memtrace ks-memtrace.txt ...` | ≈10min |
 | `no_instr_hist` | 没有提供指令直方图 | 加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界 | `kernoscope --ks-instr-hist opcode_hist.txt ...` | ≈10min |
-| `no_occupancy_probe` | 没跑 occupancy 探针 | 跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit） | `kernoscope occupancy --records <probe-records> -o occ.json` | ≈10min |
+| `no_occupancy_probe` | 没跑 occupancy 探针 | 跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit） | `kernoscope occupancy --from <probe-records> --write-json occ.json` | ≈10min |
 | `no_sass_source` | SASS/源码逐行对照未实现 | SASS/源码逐行对照需要 --import-source，本项目不实现：改用 cuobjdump -sass 自行对照 |  | 需人工 |
 | `counters_denied` | 硬件计数器被权限/驱动策略拒绝 | 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu |  | 本机不可行 |
 | `counters_unknown` | 无法判定计数器是否可用（不等于被拒绝） | 装 ncu 后重跑 `kernoscope doctor --json` 才能判定计数器是否可用 | `kernoscope doctor --json` | 需人工 |
@@ -38,7 +38,7 @@
 | `coverage_too_low` | 采样窗口没被被测负载主导 | 把稳态循环跑长（建议 ≥20 秒），或加 --ks-window auto 只统计稳态段；覆盖率不足时窗口里大部分时间是空闲，忙碌时段是否饱和无从确认 | `kernoscope --ks-window auto -- python bench_loop.py` | ≈20s |
 | `share_too_low` | 被匹配的 kernel 不是窗口主角 | 份额按整段运行的 launch 表算，缩采样窗口改不动它。三条有效路径：① 让被测区间里只有这一个 kernel（改 bench 脚本单独跑它）；② 改走整窗口口径 --ks-ledger-total-mb（不要求归因）；③ 加 --ks-memtrace 换轨迹口径（只测被追踪的那个 kernel，不受窗口影响） |  | ≈20s |
 | `share_unknown` | 逐 launch 时长为空，份额无法判定 | 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库 | `kernoscope --ks-sqlite kernels.sqlite` | ≈5s |
-| `window_launch_unaligned` | 窗口内的 launch 数没法和采样窗口对齐 | per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；窗口被裁过、而 launch 时间戳与采样时钟又对不上时，分母不可信，所以不给这个数。把窗口放开（--ks-window full；代价是启动/JIT 会稀释覆盖率，可能被 coverage_too_low 挡），或改走整窗口口径 --ks-ledger-total-mb / 轨迹口径 --ks-memtrace —— 后两条不需要这个分母 | `kernoscope --ks-window full -- python bench_loop.py` | ≈20s |
+| `window_launch_unaligned` | 窗口内的 launch 数没法和采样窗口对齐 | per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；窗口被裁过、或忙碌段里混了不在 launch 表里的工作（斜率离 1 超出锚点不确定度）时，分母不可信，所以不给这个数。两条不需要这个分母的替代口径：整窗口口径 --ks-ledger-total-mb（对拍总量）或轨迹口径 --ks-memtrace（只测被追踪的 kernel）。要让 per-launch 口径本身成立：让采样窗口覆盖整段运行（别用 --ks-window-s 切得比 launch 表还短）并给出逐 launch 时间戳（--ks-sqlite）——**不是**把窗口切来切去（`--ks-window full` 只是换了窗口，分母口径不变，第五轮 V-32 之前这里恰恰推荐错了方向） | `kernoscope --ks-ledger-total-mb 440000 -- python bench_loop.py` | ≈20s |
 | `below_resolution` | 读数低于仪器分辨率下限 | 让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成 0；把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup） | `kernoscope --ks-window auto -- python bench_loop.py` | ≈20s |
 | `mem_busy_zero` | 显存忙碌恒为 0 | 显存忙碌恒为 0：确认被测负载真的在搬显存（而不是 L2 命中），且采样周期（200 ms）没有整段错过忙碌期 |  | ≈20s |
 | `trace_unavailable` | 访存轨迹给不出字节数 | 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel |  | ≈20s |

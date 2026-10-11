@@ -25,6 +25,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from ..backends.memtrace import SECTOR_BYTES, MemTrace
+from ..refusals import RefusalCode
 
 L1_BYTES_DEFAULT = 128 * 1024
 # 建模粒度 = 32B sector，而不是 128B cache line。
@@ -35,6 +36,74 @@ LINE_BYTES_DEFAULT = 32
 L1_WAYS_DEFAULT = 4
 L2_WAYS_DEFAULT = 16
 MAX_ACCESSES_DEFAULT = 4_000_000
+
+# 「0 不是测到 0」（R-78 根因②）：全局口径**一条记录都没有**时，所有从全局记录算出来的
+# 指标（sectors/request、合并效率、工作集、L2 命中率…）**没有定义** —— 报 `0.0 [measured]`
+# 是把"什么都没算"伪装成"测到 0"。这些行必须走 `unavailable` + 闭集里的 code。
+#
+# 拒绝信息编码进 note 的第一段（与 `sections._split_unavailable` 同一约定：`to_metrics`
+# 的返回元组只有五格，装不下结构化拒绝）。**不新增 code**：复用 TRACE_UNAVAILABLE。
+UNAVAILABLE_NOTE_PREFIX = "unavailable: code="
+
+# 只有在"全局口径有记录"时才成立的那些指标（其余指标，例如全部记录数，仍是实测值）。
+GLOBAL_SCOPE_METRICS: frozenset[str] = frozenset({
+    "meas__sectors_per_request",
+    "meas__coalescing_efficiency_pct",
+    "meas__trace_working_set_mb",
+    "meas__trace_records_global",
+    "est__l2_hit_rate_l2only_pct",
+    "est__l2_hit_rate_with_l1_pct",
+    "est__dram_bytes_per_launch_trace",
+    "est__dram_bytes_per_launch_trace_bounds",
+})
+
+
+def unavailable_note(code: RefusalCode, reason: str) -> str:
+    """把结构化拒绝编码进 note 第一段（`unavailable: code=<code> | <原因>`）。"""
+    return f"{UNAVAILABLE_NOTE_PREFIX}{code.value} | {reason}"
+
+
+def split_unavailable_note(note: str) -> tuple[RefusalCode, str]:
+    """从 note 第一段拆出 `(code, 原因)`；拆不出来时退回 PREMISE_FAILED。
+
+    （有 code 总比散文式拒绝强：R1/W3 要求 n/a 行必须带 code。）
+    """
+    if note.startswith(UNAVAILABLE_NOTE_PREFIX):
+        rest = note[len(UNAVAILABLE_NOTE_PREFIX):]
+        code, _, why = rest.partition(" | ")
+        try:
+            return RefusalCode(code.strip()), (why.strip() or "口径不成立")
+        except ValueError:
+            return RefusalCode.PREMISE_FAILED, (why.strip() or "口径不成立")
+    return RefusalCode.PREMISE_FAILED, (note or "口径不成立")
+
+
+def kind_census(st: "MemTraceStats") -> str:
+    """按访存类型的记录数普查（报告里要能解释"为什么全局口径只有 N 条"）。"""
+    parts = [f"{k} {v}" for k, v in sorted(st.kind_counts.items())]
+    return "、".join(parts) if parts else "无"
+
+
+def opcode_census(st: "MemTraceStats", limit: int = 6) -> str:
+    """出现最多的 opcode 形态（分类缺口要靠它一眼看出来）。"""
+    top = sorted(st.op_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return "、".join(f"{op}×{n}" for op, n in top) if top else "无"
+
+
+def global_scope_unavailable(st: "MemTraceStats") -> tuple[RefusalCode, str] | None:
+    """全局口径 0 条记录 → 一串指标没有定义（**不是 0**）。返回拒绝的 (code, 原因)。
+
+    复用闭集里已有的 `TRACE_UNAVAILABLE`（"访存轨迹给不出字节数"）：轨迹确实在，
+    但它给不出**全局口径**的数。原因里带上类型普查与 opcode 普查，让"分类缺口"
+    （该算全局的形态没被认出来）一眼可见。
+    """
+    if st.records_global:
+        return None
+    why = (f"轨迹里**全局口径的记录数是 0**（共 {st.records} 条：{kind_census(st)}；"
+           f"opcode: {opcode_census(st)}）—— 没有一条记录可用于全局口径，这个数因此"
+           f"**不存在，而不是 0**。若上面的 opcode 里有本该算作全局访存的形态，"
+           f"那是分类缺口：请把 opcode 原文连同这条轨迹报成 issue")
+    return RefusalCode.TRACE_UNAVAILABLE, why
 
 
 class SetAssocLRU:
@@ -178,14 +247,30 @@ def analyze_memtrace(trace: MemTrace, l2_bytes: int | None = None,
             l2_filtered.access(addr)
         st.l2_hit_rate_with_l1_pct = l2_filtered.hit_rate_pct
 
-    # ---- 3) DRAM 字节（模型 + 采样放大；截断时拒绝给数）----
+    # ---- 3) DRAM 字节（模型 + 采样放大；前提不成立时拒绝给数）----
+    # 拒绝理由必须指向**真正缺失/不成立的前提**（第五轮验收：用户明明给了 --l2-bytes，
+    # 旧实现却因为"全局记录 0 条 ⇒ 分析器一次访问都没走到"而报"缺少 l2_bytes"—— 张冠李戴）。
+    # 所以这里把所有不成立的前提**逐条**列出来，而不是取第一个能触发的分支。
+    premises: list[str] = []
     if st.truncated:
-        st.dram_bytes_unavailable_reason = (
+        premises.append(
             "轨迹被截断（truncated=1）：算出来的总量只是**下界**，不是实测值 —— 按本项目的"
             "纪律不给出数字。请提高 --max-records 或减小采样范围后重跑")
-    elif l2_filtered is None or l2_filtered.total == 0:
-        st.dram_bytes_unavailable_reason = (
-            "轨迹头部缺少 l2_bytes（缓存模型无法定容）；请用 --ks-l2-bytes 指定")
+    if st.records_global == 0:
+        premises.append(
+            f"全局口径 0 条记录（共 {st.records} 条：{kind_census(st)}；"
+            f"opcode: {opcode_census(st)}）—— 缓存模型没有输入，"
+            f"这不是『测到 0 字节』")
+    elif st.accesses == 0:
+        premises.append(
+            f"全局口径有 {st.records_global} 条记录，但**没有一个 sector 地址**"
+            f"（addrs 全空）—— 缓存模型没有可分析的访问，这不是『测到 0 字节』")
+    if not st.l2_bytes:
+        premises.append(
+            "缓存模型无法定容：轨迹头部没有 l2_bytes，命令行也没给 --l2-bytes"
+            "（主报告路径是 --ks-l2-bytes）")
+    if premises:
+        st.dram_bytes_unavailable_reason = "；".join(premises)
     elif analyzed < st.accesses:
         need = int(st.accesses)
         st.dram_bytes_unavailable_reason = (
@@ -229,7 +314,8 @@ def to_metrics(st: MemTraceStats) -> list[tuple[str, float | None, str, str, str
                  "unknown": "轨迹**没有结束标记** ⇒ 无法确认没被 ulimit/磁盘写满截断"
                             "（自己采集请用 tools/probes/nvbit_memtrace/collect.sh，它会写标记）"}[st.trace_complete]
     identity = f"轨迹指纹 {st.trace_sha256}（{comp_note}）" if st.trace_sha256 else comp_note
-    scope = (f"{identity}；全局口径只用 LDG/STG（{st.records_global}/{st.records} 条）；"
+    scope = (f"{identity}；全局口径 = LDG/STG + 全局原子/归约（ATOMG/RED/REDG/CAS 等）"
+             f"（{st.records_global}/{st.records} 条）；"
              + ("其余为 " + "、".join(f"{k} {v}" for k, v in excluded.items())
                 if excluded else "没有被排除的记录")
              + "。共享/本地访存与 L2↔DRAM 无关，混进来会把合并效率算成 >100%")
@@ -246,7 +332,7 @@ def to_metrics(st: MemTraceStats) -> list[tuple[str, float | None, str, str, str
         ("meas__trace_records", float(st.records), "",
          "轨迹里的 warp 级访存指令执行记录数（**全部**访存类型）", sample_note),
         ("meas__trace_records_global", float(st.records_global), "",
-         "其中属于全局口径（LDG/STG）的记录数 —— DRAM/L2 统计的分母",
+         "其中属于全局口径（LDG/STG + 全局原子）的记录数 —— DRAM/L2 统计的分母",
          scope + ("；⚠ 本次合并效率被夹到 100%（原始算式 >100%，说明输入仍不干净）"
                   if st.coalescing_clamped else "")),
     ]
@@ -280,4 +366,13 @@ def to_metrics(st: MemTraceStats) -> list[tuple[str, float | None, str, str, str
                 f"~ 上界（完全不复用 {st.dram_bytes_upper / 1e6:.3f} MB）",
                 "同一份轨迹的**模型影响范围**：真实值一定落在两者之间；"
                 "界很宽说明结论对缓存模型敏感，要换口径或加约束（例如把工作集压到 L2 以内）"))
+
+    # R-78 根因②：全局口径 0 条记录时，上面这些**全局口径**的指标没有定义 —— 一律
+    # 改成 unavailable + code，绝不输出 `0.0 [measured]`。"0 不是测到 0"。
+    refusal = global_scope_unavailable(st)
+    if refusal is not None:
+        code, why = refusal
+        note = unavailable_note(code, why)
+        out = [(n, None, u, s, note) if n in GLOBAL_SCOPE_METRICS else (n, v, u, s, nt)
+               for n, v, u, s, nt in out]
     return out

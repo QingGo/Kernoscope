@@ -3,12 +3,21 @@
 真机证据（B3）：同一台机器，默认 PATH 下 doctor 说"未安装 ncu"、`cuobjdump 未找到（可选）`，
 而后端 `find_cuobjdump()` 却返回 `/usr/local/cuda-13.0/bin/cuobjdump`，`os.path.exists(ncu)`
 为 True —— 两个结论互相矛盾，而且"未安装"这个词会被复制进别处指标的 n/a 原因里。
+
+**第五轮 §4.6 的教训**：这些用例只有在"工具不在 PATH"的机器上才绿 —— 验收方那台机器上
+`cuobjdump`/`nvcc` 都在 PATH 里，`discover()` 按文档（PATH 优先）直接返回 PATH 命中，
+于是断言全红。测试必须**自己构造前提**（把 PATH 命中屏蔽掉），否则测的是"这台机器装了什么"。
 """
 
 import os
 import stat
 
 from kernoscope import toolchain as T
+
+
+def _off_path(monkeypatch):
+    """让 `shutil.which` 返回 None：模拟"这个工具不在 PATH 上"（与文档的 PATH 优先不冲突）。"""
+    monkeypatch.setattr(T.shutil, "which", lambda name: None)
 
 
 def _mkexe(path, name):
@@ -23,6 +32,7 @@ def test_finds_tool_in_explicit_search_dirs(tmp_path, monkeypatch):
     d.mkdir(parents=True)
     exe = _mkexe(d, "cuobjdump")
     monkeypatch.setenv("KS_TOOL_SEARCH_DIRS", str(d))
+    _off_path(monkeypatch)          # 真机装了 cuobjdump 也要走"非 PATH"这条路径
     disc = T.discover("cuobjdump")
     assert disc.found and str(exe) == disc.path
     assert disc.found_but_not_in_path, "它确实不在 PATH 上（这正是旧实现的盲区）"
@@ -48,6 +58,7 @@ def test_cuda_home_and_versioned_dirs_are_searched(tmp_path, monkeypatch):
     dirs = T.cuda_bin_dirs()
     assert str(home / "bin") in dirs
     assert "/usr/local/cuda/bin" in dirs
+    _off_path(monkeypatch)
     disc = T.discover("nvcc")
     # 只有当我们注入的目录在搜索列表里、且真实存在该文件时才会命中
     assert disc.found
@@ -68,5 +79,20 @@ def test_existing_executables_are_not_shadowed_by_missing_ones(tmp_path, monkeyp
     (d2 / "bin").mkdir(parents=True)
     _mkexe(d2 / "bin", "nsys")
     monkeypatch.setenv("KS_TOOL_SEARCH_DIRS", f"{d1}{os.pathsep}{d2 / 'bin'}")
+    _off_path(monkeypatch)
     disc = T.discover("nsys")
     assert disc.path == str(d2 / "bin" / "nsys")
+
+
+def test_path_hit_wins_over_search_dirs_because_docs_say_so(monkeypatch, tmp_path):
+    """文档契约：PATH 命中优先于搜索目录（`discover()` 的 docstring 第 1 条）。
+
+    第五轮那三条用例在真机上变红，正是因为这条契约没被显式钉住：它们默认"工具不在 PATH"。
+    """
+    d = tmp_path / "elsewhere" / "bin"
+    d.mkdir(parents=True)
+    _mkexe(d, "cuobjdump")
+    monkeypatch.setenv("KS_TOOL_SEARCH_DIRS", str(d))
+    monkeypatch.setattr(T.shutil, "which", lambda name: "/usr/bin/cuobjdump")
+    disc = T.discover("cuobjdump")
+    assert disc.path == "/usr/bin/cuobjdump" and disc.in_path

@@ -217,7 +217,7 @@
         "threshold": {},
         "remedy": {
           "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
-          "command": "kernoscope occupancy --records <probe-records> -o occ.json",
+          "command": "kernoscope occupancy --from <probe-records> --write-json occ.json",
           "cost_s": 600.0,
           "cost_kind": "wall_seconds",
           "then_answers": [
@@ -490,7 +490,7 @@
     {
       "code": "no_occupancy_probe",
       "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
-      "command": "kernoscope occupancy --records <probe-records> -o occ.json",
+      "command": "kernoscope occupancy --from <probe-records> --write-json occ.json",
       "cost_kind": "wall_seconds",
       "cost_s": 600.0,
       "unlocks": [
@@ -575,7 +575,7 @@
       "threshold": {},
       "remedy": {
         "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
-        "command": "kernoscope occupancy --records <probe-records> -o occ.json",
+        "command": "kernoscope occupancy --from <probe-records> --write-json occ.json",
         "cost_s": 600.0,
         "cost_kind": "wall_seconds",
         "then_answers": [

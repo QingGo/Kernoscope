@@ -309,7 +309,9 @@ class CapabilityReport:
         }
         if len(matrix) != len(self.answers):  # pragma: no cover - 防御性
             raise ValueError("matrix 与 answers 不一致")
-        return summary
+        return _enforce_brief_budget(summary)
+
+    # ---- 一屏（人视图；与 --json 同一模型）----
 
     # ---- 一屏（人视图；与 --json 同一模型）----
     def render(self) -> str:
@@ -597,3 +599,60 @@ def render_matrix(report: CapabilityReport) -> str:
 __all__ = ["Answer", "CAPABILITIES_SCHEMA_VERSION", "CapabilityReport", "Env",
            "Question", "QUESTIONS", "TIERS", "Tier", "env_from_doctor", "evaluate",
            "probe", "render_matrix", "STATES"]
+
+
+#: 入口层（`capabilities --brief`）的硬预算。真机教训：**无 GPU 的机器 1058 B、
+#: 有 GPU 的机器 1301 B**（多出来的 "能答什么" 更多），而门禁钉的是 ≤1300 —— 于是
+#: CI（无 CUDA）永远绿、真机红 1 B。尺寸不能只靠测试兜，必须由代码自己执行。
+BRIEF_BUDGET_BYTES = 1300
+
+
+def _brief_size(summary: dict[str, Any]) -> int:
+    return len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _enforce_brief_budget(summary: dict[str, Any],
+                          budget: int = BRIEF_BUDGET_BYTES) -> dict[str, Any]:
+    """把入口层压进预算，并**记下裁了什么**（与决策包的 `cost.trimmed` 同一纪律）。
+
+    顺序：先去掉最"能再生成"的东西（命令字符串 → 不可行依赖 → 弱项列表 → 列表尾部），
+    每一步都只在还超预算时执行。裁掉的步骤名进 `trimmed`，读者仍然知道这是摘要、
+    完整信息在 `capabilities --json`（`next_layer` 已经把它的字节数标出来了）。
+    """
+    trimmed: list[str] = []
+
+    def _drop_next_cmds() -> None:
+        for d in summary.get("next") or []:
+            d.pop("cmd", None)
+
+    def _drop_unavailable() -> None:
+        summary.pop("blocked_by_unavailable", None)
+
+    def _drop_weak() -> None:
+        summary.pop("weak", None)
+
+    def _cap_list(key: str, n: int) -> None:
+        items = summary.get(key) or []
+        if len(items) > n:
+            summary[key] = items[:n]
+
+    steps = [
+        ("next_cmds", _drop_next_cmds),
+        ("blocked_by_unavailable", _drop_unavailable),
+        ("weak", _drop_weak),
+        ("next_tail", lambda: _cap_list("next", 2)),
+        ("cannot_answer_tail", lambda: _cap_list("cannot_answer", 8)),
+        ("can_answer_tail", lambda: _cap_list("can_answer", 8)),
+    ]
+    for name, fn in steps:
+        if _brief_size(summary) <= budget:
+            break
+        fn()
+        trimmed.append(name)
+    if _brief_size(summary) > budget and "next_layer" in summary:
+        # 最后一招：价格标签可以按命令名重算，不必留在这一层
+        summary.pop("next_layer", None)
+        trimmed.append("next_layer")
+    if trimmed:
+        summary["trimmed"] = trimmed
+    return summary

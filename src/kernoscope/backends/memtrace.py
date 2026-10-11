@@ -85,8 +85,34 @@ def size_from_opcode(op: str) -> int:
 # R-73 根因①：共享/本地访存被当成全局访存喂进 L2 模型与合并效率 —— 而 Triton 的 `tl.dot`
 # 会产生海量共享内存指令（一个 FlashAttention 轨迹里 1,282,048 条记录只有 8,192 条是全局的）。
 # 所以每条记录带一个 kind，全局口径只用 global。
+#
+# R-78 根因（第五轮验收 V-5）：**全局原子/归约也是全局访存**。真机（RTX 4090 / sm_89，
+# NVBit 1.7.x）采到的 `atomicAdd` 是 `RED.E.ADD.F32.FTZ.RN.STRONG.GPU`，它不带 `LDG/STG`
+# 前缀 —— 旧实现一律落到 unknown 后被剔除，于是一个纯原子 kernel 的全局记录数成了 0，
+# sectors/request 报 0.0（看起来像"测到 0"，其实一条都没算）。
+#
+# 各架构实测的原子形态（`cuobjdump -sass`，nvcc 13.0）：
+#   sm_75                : RED.E.ADD.F32.FTZ.RN.STRONG.GPU / RED.E.ADD.STRONG.GPU /
+#                          ATOMG.E.CAS.STRONG.GPU / ATOMS.ADD（共享）
+#   sm_80/86/89          : 同上，共享原子是 ATOMS.POPC.INC.32
+#   sm_90a/sm_100        : 归约变成 REDG.E.ADD...（带 G 后缀）
+# 判据（顺序即优先级：先状态空间前缀、再状态空间词、最后才是助记符族）：
+#   1. `LDS/STS/LDSM`、`LDL/STL`、`LDG/STG`：SASS 把状态空间写在助记符首字母里
+#   2. `.GLOBAL`/`.SHARED`/`.LOCAL` 状态空间词：PTX 与 SASS 都会写
+#   3. `ATOMS`/`REDS`（S 后缀 = 共享）→ shared
+#   4. `ATOMG`/`REDG`/`ATOM`/`RED`/`CAS` → global。裸形态（无 G/S 字母、无状态空间词）
+#      按**设备内存**算：实测全局归约就是裸 `RED`，而共享变体要么带 `S`（ATOMS）、
+#      要么带 `.shared`（已被第 2 步拦下）。PTX 的 `atom.global.*`/`red.global.*` 同理。
+#   5. 其余判不出的（裸 `LD/ST` 泛型访存、`MULTIMEM` 多播）**仍然归 unknown**，不并入
+#      全局口径 —— 宁可少算并在报告里列出 opcode 形态，也不猜。
+_SHARED_ATOMIC_PREFIXES = ("ATOMS", "REDS")
+_GLOBAL_ATOMIC_PREFIXES = ("ATOMG", "REDG", "ATOM", "RED", "CAS")
+
+
 def access_kind(op: str) -> str:
-    """`LDG/STG` → global；`LDS/STS/LDSM` → shared；`LDL/STL` → local；其余按状态空间词判定。"""
+    """`LDG/STG` 与**全局原子/归约**（`ATOMG`/`RED`/`REDG`/`CAS` 等）→ global；
+    `LDS/STS/LDSM`、`ATOMS`/`REDS` → shared；`LDL/STL` → local；其余按状态空间词判定，
+    判不出的归 unknown（**不并入全局口径**）。"""
     o = op.upper()
     if o.startswith(("LDS", "STS")) or "LDSM" in o:
         return "shared"
@@ -100,7 +126,11 @@ def access_kind(op: str) -> str:
         return "shared"
     if "LOCAL" in o:
         return "local"
-    if o.startswith(("LD", "ST", "ATOM", "RED", "CAS", "MULTIMEM")):
+    if o.startswith(_SHARED_ATOMIC_PREFIXES):
+        return "shared"
+    if o.startswith(_GLOBAL_ATOMIC_PREFIXES):
+        return "global"
+    if o.startswith(("LD", "ST", "MULTIMEM")):
         return "unknown"        # 没有状态空间信息：**不并入全局口径**，而是计数报出来
     return "other"
 

@@ -205,6 +205,37 @@ def find_metric(rep: Any, name: str) -> Metric | None:
     return None
 
 
+def find_metric_in(kernel: Any, name: str) -> Metric | None:
+    """只在**指定 kernel** 里找指标（V-6：跨 kernel 传染的根治手段）。"""
+    for s in getattr(kernel, "sections", []):
+        for m in s.metrics:
+            if m.name == name:
+                return m
+    return None
+
+
+def kernel_with(rep: Any, name: str, *, prefer: Any = None) -> Any | None:
+    """哪个 kernel 有这个指标（`prefer` 命中就优先）；没有返回 None。
+
+    判词必须绑在**具体 kernel** 上：同一份报告里 `ks__over_peak_warning` 可能只属于
+    某个便宜 kernel，而 roofline 属于真正耗时的那个 —— 全局"找到第一个"会把前者的问题
+    传染给后者（第五轮 V-6）。
+    """
+    if prefer is not None and find_metric_in(prefer, name) is not None:
+        return prefer
+    for k in getattr(rep, "kernels", []):
+        if getattr(k, "name", "") == "(device)":
+            continue
+        if find_metric_in(k, name) is not None:
+            return k
+    return None
+
+
+def metric_value_in(kernel: Any, name: str) -> float | int | None:
+    m = find_metric_in(kernel, name)
+    return None if m is None or m.value is None else m.value
+
+
 def metric_value(rep: Any, name: str) -> float | int | None:
     m = find_metric(rep, name)
     if m is None or m.value is None:
@@ -237,6 +268,13 @@ def _ms(ns: float) -> float:
 # --------------------------------------------------------------------------
 # 判词构造：每条只在数据支持时出现（不造空结论）
 # --------------------------------------------------------------------------
+def _top_kernel(rep: Any) -> Any | None:
+    """耗时最大的真 kernel（判词的默认主体）。"""
+    ks = [k for k in getattr(rep, "kernels", [])
+          if getattr(k, "name", "") != "(device)" and getattr(k, "total_ns", 0)]
+    return max(ks, key=lambda k: k.total_ns) if ks else None
+
+
 def _verdict_kernel_time(rep: Any) -> Verdict | None:
     kernels = [k for k in getattr(rep, "kernels", []) if k.name != "(device)" and k.total_ns]
     if not kernels:
@@ -406,12 +444,21 @@ def _verdict_occupancy(rep: Any) -> Verdict | None:
 
 
 def _verdict_roofline(rep: Any) -> Verdict | None:
-    bound = metric_value(rep, "est__bound")
-    eff = metric_value(rep, "est__roofline_efficiency_pct")
-    gbs = metric_value(rep, "est__achieved_gbs")
+    # V-6：roofline 必须绑在**它自己那个 kernel** 上。全局"第一个 est__roofline_efficiency_pct"
+    # 会把别的 kernel 的超峰传染进来（真机可达：一个便宜 kernel 超峰 → 另一个 kernel 合法的
+    # 91% roofline 被判 refused）。
+    top = _top_kernel(rep)
+    owner = (kernel_with(rep, "est__roofline_efficiency_pct", prefer=top)
+             or kernel_with(rep, "est__bound", prefer=top)
+             or top)
+    bound = metric_value_in(owner, "est__bound") if owner is not None else None
+    eff = metric_value_in(owner, "est__roofline_efficiency_pct") if owner is not None else None
+    gbs = metric_value_in(owner, "est__achieved_gbs") if owner is not None else None
     if bound is None and eff is None:
         return None
     facts: dict[str, Any] = {}
+    if owner is not None and getattr(owner, "name", ""):
+        facts["kernel"] = _clip(str(owner.name), FACT_STR_LIMIT)
     if bound is not None:
         facts["bound"] = _clip(str(bound), FACT_STR_LIMIT)
     if eff is not None:
@@ -683,12 +730,15 @@ def _verdict_saving(rep: Any) -> Verdict | None:
 
 
 def _verdict_over_peak(rep: Any) -> Verdict | None:
-    warn = metric_value(rep, "ks__over_peak_warning")
+    owner = kernel_with(rep, "ks__over_peak_warning")
+    warn = metric_value_in(owner, "ks__over_peak_warning") if owner is not None else None
     if not warn:
         return None
-    m = find_metric(rep, "ks__over_peak_warning")
+    m = find_metric_in(owner, "ks__over_peak_warning")
     return Verdict(
         id="over_peak", question="达成值是否超过标定峰值（物理上不可能）", status=REFUSED,
+        # V-6：超峰是**某个 kernel** 的事，必须点名，否则会被当成整份报告的结论
+        facts={"kernel": _clip(str(getattr(owner, "name", "")), FACT_STR_LIMIT)},
         premises=[Premise("over_peak", 1.0, None, False)],
         refusal=Refusal(RefusalCode.CALIBRATION_CALIBER_MISMATCH,
                         (m.note if m is not None else "") or "achieved > measured peak"),
@@ -814,6 +864,13 @@ def _propagate_over_peak(verdicts: list[Verdict]) -> None:
     op = next((v for v in verdicts if v.id == "over_peak"), None)
     roof = next((v for v in verdicts if v.id == "roofline"), None)
     if op is None or op.status != REFUSED or roof is None or roof.status == REFUSED:
+        return
+    # V-6：只有当超峰与 roofline 属于**同一个 kernel** 时才传播。判词的 facts 里都写了
+    # kernel 名（`_verdict_over_peak` / `_verdict_roofline`）；两边都拿不到名字时保守传播
+    # （宁可拒绝一个可疑的达成率，也不要放行一个物理不可能的）。
+    op_k = (op.facts or {}).get("kernel") or ""
+    roof_k = (roof.facts or {}).get("kernel") or ""
+    if op_k and roof_k and op_k != roof_k:
         return
     if roof.value is not None:
         roof.facts = {**roof.facts, "uncitable_value": roof.value}
@@ -965,17 +1022,18 @@ def enforce_budget(packet: dict[str, Any],
     下面 `steps` 里的顺序**就是**实际顺序（这条注释与实现逐字一致，改一处就改两处）：
 
         未测到的例子 > 判词的指标名 > 下一步指针 > 未测到归组数 > 成立的前提 >
-        remedy 命令 > 处置文本 > 判词条数 > **次要判词的 facts** > 拒绝条目数 >
-        拒绝处置散文 > 判词硬上限 > 环境降级诊断的 message > 环境降级诊断条目数 >
-        **结论四条的 facts（最后一级）**
+        remedy 命令 > 处置文本截短 > **次要判词的 facts** > 拒绝条目数 >
+        拒绝处置散文 > 环境降级诊断的 message > 环境降级诊断条目数 >
+        **判词条数** > **判词硬上限** > **结论四条的 facts（最后一级）**
 
     最后一级的顺序是真机教出来的：8 个拒绝码的机器上，facts 早于拒绝条目被裁掉，
     于是一屏出现「最耗时的是 ?（None ms）」—— 把"什么最贵/多少钱/先改哪里"裁没了，
     却留着 8 条拒绝的处置散文。结论比处置散文重要，所以结论的 facts 放到最后。
 
     每一步都只删"能从完整报告里再取回来"的东西，并把步骤名写进 `cost.trimmed` ——
-    读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。最后一级丢掉的
-    拒绝 code 会列在 `refusals_omitted` 里，所以"少了什么"也是可查的。
+    读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。丢掉的
+    拒绝 code 列在 `refusals_omitted` 里，丢掉的判词 id 列在 `verdicts_more.ids` 里
+    （V-1：结论不许静默消失），所以"少了什么"永远是可查的。
     """
     trimmed: list[str] = []
     # `cost.trimmed` 自己也是包的一部分，所以先放好空列表再量，之后每应用一步就把它
@@ -1069,8 +1127,28 @@ def enforce_budget(packet: dict[str, Any],
         if len(dropped) > REFUSAL_LIST_CODES:
             packet["environment_refusals_more"]["codes_truncated"] = True
 
-    def _cap_verdicts_hard() -> None:
-        packet["verdicts"] = (packet.get("verdicts") or [])[:VERDICT_KEEP_HARD]
+    def _record_dropped_verdicts(dropped_ids: list[str]) -> None:
+        """把预算裁掉的判词**记下来**（V-1：结论不许静默消失）。
+
+        `verdicts_more` 本来就是为"包里少了判词"而存在的字段；此前只有 `build()` 的
+        `MAX_VERDICTS` 截断会写它，预算裁剪这一步不写 —— 于是一屏上少了 `occupancy`
+        这种判词（还带着"物理不可能"守卫），读者与 agent 都无从知道。
+        这里把两处截断的 id 合并进同一个字段（`count` 是总数）。
+        """
+        ids = [i for i in dropped_ids if i]
+        if not ids:
+            return
+        more = packet.get("verdicts_more") or {"count": 0, "ids": []}
+        more["count"] = int(more.get("count") or 0) + len(ids)
+        more["ids"] = list(more.get("ids") or []) + ids
+        packet["verdicts_more"] = more
+
+    def _cap_verdicts(n: int) -> None:
+        vs = packet.get("verdicts") or []
+        if len(vs) <= n:
+            return
+        _record_dropped_verdicts([v.get("id") for v in vs[n:]])
+        packet["verdicts"] = vs[:n]
 
     steps = [
         ("unmeasured_examples", lambda: [g.pop("examples", None) for g in packet["unmeasured"]]),
@@ -1085,7 +1163,6 @@ def enforce_budget(packet: dict[str, Any],
         # 所以再加两级：先把每条处置文本截短（code 与"怎么办"的骨架保留），
         # 最后才丢条目、并把丢掉的 **code 列出来**（读者知道少了什么、去哪看）。
         ("refusal_actions", _shorten_refusal_actions),
-        ("verdicts", lambda: _cap_list(packet, "verdicts", 6)),
         # 真机教训（拒绝密集的机器上包被裁到 facts 全丢）：facts 是判词的**动态内容**，
         # 而 `kernel_time` / `cost_per_token` / `saving_estimate` / `truth_vs_substitute`
         # 这四条是"什么最贵、多少钱、先改哪里"的结论本身 —— 一屏上出现
@@ -1093,12 +1170,20 @@ def enforce_budget(packet: dict[str, Any],
         # 到下一个更狠的级别才动这四条。
         ("facts_secondary", lambda: [v.pop("facts", None) for v in packet["verdicts"]
                                      if v.get("id") not in PRIMARY_FACT_IDS]),
+        # V-1（第五轮 P0）：**拒绝散文先裁、判词最后裁**。
+        # 旧顺序把 `verdicts` 排在 `refusal_entries`/`refusal_action_text` 之前，
+        # 与函数自己的 docstring（"结论比处置散文重要"）相反：真机 9 条判词 → 包 6 条，
+        # 被删的正是 `occupancy`/`roofline`/`over_peak`（含"物理不可能"守卫），
+        # 而 8 条拒绝的处置散文一条不少。处置文本随时能从报告与参考层再取回
+        # （`remedy.sh <code>`），判词不能。
         ("refusal_entries", _cap_refusal_entries),
         ("refusal_action_text", _drop_refusal_action_text),
-        ("verdicts_hard_cap", _cap_verdicts_hard),
         # 环境降级诊断：message 先丢，再限条目数（R-70）
         ("environment_messages", _trim_environment_messages),
         ("environment_entries", _cap_environment_entries),
+        # 最后才动结论条数，而且**每一次都留痕**（`verdicts_more`）
+        ("verdicts", lambda: _cap_verdicts(6)),
+        ("verdicts_hard_cap", lambda: _cap_verdicts(VERDICT_KEEP_HARD)),
         # **最后一级**：到这一步才允许把"什么最贵/多少钱/先改哪里/真值偏差"的 facts 丢掉。
         # 读者仍然能拿到判词 id/status/value/unit 与全部拒绝码，只是细节要回完整报告看。
         ("facts_primary", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),

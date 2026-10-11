@@ -433,7 +433,7 @@ def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
     （样本代表性是假设），此时前缀改为 `est__` + estimated（R-12：名字承诺什么，
     出处就得是什么）。前缀本身由 R3 强制。
     """
-    from .analyze.memtrace import to_metrics
+    from .analyze.memtrace import split_unavailable_note, to_metrics
 
     if st is None:
         return None
@@ -441,6 +441,15 @@ def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
     sampled = st.sampling_ratio < 0.999
     for name, value, unit, source, note in to_metrics(st):
         if value is None:
+            # R-78：「0 不是测到 0」—— 全局口径 0 条记录时这些指标没有定义，
+            # `to_metrics` 把它们标成拒绝（note 第一段带 code），这里还原成结构化 n/a 行，
+            # 而不是 `continue` 掉（静默消失比错的 0 更让人无从查起）。
+            code, why = split_unavailable_note(note)
+            s.add(Metric.unavailable(
+                name, why, unit=unit, source=source, code=code,
+                observed={"records": st.records, "records_global": st.records_global,
+                          "kind_counts": dict(st.kind_counts)},
+                severity="blocking"))
             continue
         if name.startswith("meas__") and sampled:
             name = "est__" + name[len("meas__"):]
@@ -454,7 +463,9 @@ def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
                                  st.dram_bytes_unavailable_reason or "轨迹不足以给出 DRAM 字节",
                                  code=RefusalCode.TRACE_UNAVAILABLE,
                                  observed={"sampling_ratio": round(st.sampling_ratio, 4),
-                                           "records": st.records}))
+                                           "records": st.records,
+                                           "records_global": st.records_global,
+                                           "l2_bytes": st.l2_bytes}))
     # 两条独立路径的交叉校验（NVML 代理 vs 轨迹模型）
     if (st.dram_bytes_per_launch is not None and opt.dram is not None
             and getattr(opt.dram, "bytes_per_launch", None)):

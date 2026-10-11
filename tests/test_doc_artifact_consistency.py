@@ -90,12 +90,37 @@ def test_newest_artifact_records_the_sanitize_step():
 
 
 def test_every_artifact_dir_is_listed_and_explained():
-    """每个产物目录都要被 bench/artifacts/README.md 登记，并写明它是现行还是历史。"""
+    """每个产物目录都要被登记，且"现行/历史"标签必须与**推出来的最新产物**一致。
+
+    第五轮 V-20：旧实现只断言"目录名在文件里出现过" —— 于是把两份产物的「现行/历史」
+    标签对调，20 条测试照样全绿（而 `_newest()`、`gen_calibration_excerpt.newest_profile()`、
+    CALIBRATION 节选三处都以真正最新的那一份为准）。登记表是文档对数据的**承诺**，
+    承诺必须被机器校验。
+    """
     readme = ARTIFACTS / "README.md"
     assert readme.exists(), "bench/artifacts/README.md 必须存在（登记每个产物目录）"
     text = readme.read_text(encoding="utf-8")
-    for d in _artifact_dirs():
+    dirs = _artifact_dirs()
+    for d in dirs:
         assert d.name in text, f"{d.name} 没被 bench/artifacts/README.md 登记"
+
+    # 每行（一个产物目录一行）必须带明确标签；**有且仅有**最新那一份是"现行"
+    current = _newest().name
+    rows: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.startswith("|") or "`" not in line:
+            continue
+        for d in dirs:
+            if f"`{d.name}`" in line:
+                rows[d.name] = line
+    missing = [d.name for d in dirs if d.name not in rows]
+    assert not missing, f"这些产物目录没有自己的登记行：{missing}"
+    marked_current = [name for name, row in rows.items() if "**现行**" in row]
+    assert marked_current == [current], (
+        f"「现行」标签必须且只能落在最新产物 {current} 上，实际：{marked_current}")
+    for name, row in rows.items():
+        if name != current:
+            assert "**历史**" in row, f"{name} 不是最新，却既没标「历史」也没标「现行」"
 
 
 # --------------------------------------------------------------------------

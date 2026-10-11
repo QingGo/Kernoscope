@@ -187,8 +187,15 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
     monkeypatch.setattr(pk, "find_metric", lambda rep, name: FakeMetric(name, values.get(name)))
     monkeypatch.setattr(pk, "metric_value", lambda rep, name: values.get(name))
 
+    class FakeSection:
+        def __init__(self, metrics):
+            self.name, self.metrics = "SpeedOfLight", metrics
+
     class FakeKernel:
         name, total_ns, launch_count = "k", 1_000_000_000, 10
+        # 判词是**绑在 kernel 上**的（第五轮 V-6：跨 kernel 传染），所以替身必须有
+        # 与真 Report 同构的 sections —— 否则测的是替身，不是产品。
+        sections = [FakeSection([FakeMetric(n, v) for n, v in values.items()])]
 
     class FakeRep:
         kernels = [FakeKernel()]

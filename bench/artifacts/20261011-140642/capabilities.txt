@@ -43,6 +43,6 @@ Kernoscope 0.2.0 能力自检：本机最高可用层 = 3 (instrumented)
   - 解锁 1 个问题（issue_slot），代价 ≈600s：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界
       kernoscope --ks-instr-hist opcode_hist.txt ...
   - 解锁 1 个问题（achieved_occupancy），代价 ≈600s：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）
-      kernoscope occupancy --records <probe-records> -o occ.json
+      kernoscope occupancy --from <probe-records> --write-json occ.json
 
 注：本次未做计数器实测探测（静态推断）：要实测结论请加 --probe

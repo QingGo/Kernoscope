@@ -15,9 +15,10 @@ import argparse
 import json
 import sys
 
-from .analyze.memtrace import analyze_memtrace, to_metrics
+from .analyze.memtrace import analyze_memtrace, split_unavailable_note, to_metrics
 from .backends.memtrace import MemTraceError, load_memtrace_auto
 from .provenance import provenance_for_name
+from .refusals import Refusal, RefusalCode
 
 
 def _graded_metrics(metrics, sampling_ratio: float):
@@ -27,15 +28,33 @@ def _graded_metrics(metrics, sampling_ratio: float):
     是假设，所以名字降级为 est__，出处随名字一起变成 estimated。这与
     `sections.build_memtrace_section` 的处理完全一致，避免子命令 JSON 与主报告
     对同一份轨迹给出两套名字。
+
+    拒绝行（value is None）不参与降级：没有数就是没有数，不是"估算出来的数"，
+    也不该被追加一句采样说明。
     """
     sampled = sampling_ratio < 0.999
     out = []
     for name, value, unit, source, note in metrics:
+        if value is None:
+            out.append((name, value, unit, source, note))
+            continue
         if sampled and name.startswith("meas__"):
             name = "est__" + name[len("meas__"):]
             note = (f"{note}；按 {sampling_ratio * 100:.1f}% 采样放大 → estimated")
         out.append((name, value, unit, source, note))
     return out
+
+
+def _metric_obj(name: str, value, unit: str, source: str, note: str) -> dict:
+    """一个指标对象：与主报告同构（R-42）；拒绝行额外带 reason + 结构化 refusal。"""
+    obj = {"name": name, "value": value, "unit": unit, "source": source, "note": note,
+           "provenance": provenance_for_name(name, value)}
+    if value is None:
+        code, why = split_unavailable_note(note)
+        # remedy 由拒绝码闭集给（不在这里另写一套文案）
+        obj["reason"] = why
+        obj["refusal"] = Refusal(code=code, message=why).to_dict()
+    return obj
 
 
 def build_parser() -> "argparse.ArgumentParser":
@@ -106,8 +125,9 @@ def memtrace_main(argv: list[str]) -> int:
             "dram_bytes_per_launch": st.dram_bytes_per_launch,
             "dram_bytes_unavailable_reason": st.dram_bytes_unavailable_reason,
             "op_counts": st.op_counts,
-            "metrics": [{"name": name, "value": value, "unit": unit, "source": source,
-                         "note": note, "provenance": provenance_for_name(name, value)}
+            "kind_counts": st.kind_counts,
+            "records_global": st.records_global,
+            "metrics": [_metric_obj(name, value, unit, source, note)
                         for name, value, unit, source, note in graded],
         }, indent=2, ensure_ascii=False))
         return 0
@@ -120,13 +140,18 @@ def memtrace_main(argv: list[str]) -> int:
           f"({'全量' if not sampled else f'按 block 采样 {st.sampling_ratio * 100:.1f}%'}）")
     for name, value, unit, source, note in graded:
         if value is None:
+            # R-78：「0 不是测到 0」—— 拒绝行必须打出来（n/a + code），不能静默跳过
+            code, why = split_unavailable_note(note)
+            print(f"  {name:<{w}}: n/a  [unavailable]  code={code.value}")
+            print(f"      └ {why}")
             continue
         prov = f"[{provenance_for_name(name, value)}]"
         print(f"  {name:<{w}}: {value}{' ' + unit if unit else ''}  {prov}")
         print(f"      └ {source}")
-    if st.dram_bytes_unavailable_reason:
-        print(f"  {'DRAM 字节/launch':<{w}}: n/a  [unavailable]")
-        print(f"      └ {st.dram_bytes_unavailable_reason}")
+    if st.dram_bytes_per_launch is None:
+        print(f"  {'DRAM 字节/launch':<{w}}: n/a  [unavailable]  "
+              f"code={RefusalCode.TRACE_UNAVAILABLE.value}")
+        print(f"      └ {st.dram_bytes_unavailable_reason or '轨迹不足以给出 DRAM 字节'}")
     print()
     print("  对照关系：sectors/request ↔ ncu l1tex__average_t_sectors_per_request；")
     print("            L2 命中率 ↔ ncu lts__t_sector_hit_rate（本工具是 LRU 模型的上界，不是计数器）")

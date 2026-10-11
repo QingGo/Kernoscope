@@ -300,3 +300,68 @@ def test_dropped_and_over_cap_are_reported_not_silently_lost():
     assert plan2.dropped_by_refusal == ["est__x"]
     assert "premises failed" in plan2.comment
     assert "est__x" not in render_comment(plan2).split("premises failed", 1)[0].split("values:")[0]
+
+
+# --------------------------------------------------------------------------- #
+# 第五轮验收 V-11 / V-12：署名散文不许宣称不存在的能力、不许举结构上做不到的例子
+# --------------------------------------------------------------------------- #
+def test_sidecar_does_not_claim_details_renders_table_rows():
+    """V-11：真 ncu 判定 details 页只出节标题 + 规则文本，**没有表格行**。
+
+    所以署名文件与 docstring 都不许写"会出现在 … 表里"。这条测试把口径钉住：
+    必须明确写出"表格行不会渲染"，并指出完整数值在哪。
+    """
+    from kernoscope.ncrep.ncu_rows import convert
+    from kernoscope.ncrep.substitute import render_sidecar
+
+    text = render_sidecar(_build_plan_for_sidecar(), ncu_rep_path="out.ncu-rep")
+    assert "表格行不会渲染" in text
+    assert "--page raw" in text
+    # 单位换算必须同时写清"我们的值 × 系数"，读者才能复核（而不是只给 ncu 单位）
+    assert "ms × 1e6" in text or "× 1e6" in text
+    # 白名单里的行结构上不可能出现在 by_namespace 里 —— 散文不许拿它当"被丢弃"的例子
+    from kernoscope.ncrep.profile import build_report
+    from kernoscope.ncrep.ncu_rows import row_for
+    assert row_for("gpu__time_duration.sum") is not None
+    assert row_for("launch__local_mem_per_thread") is None
+    assert convert("gpu__time_duration.sum", 1.0, "ms")[0] == 1e6
+
+
+def _build_plan_for_sidecar():
+    """构造一个 plan：含同源行 + 一个真的会被命名空间规则丢弃的名字。"""
+    from kernoscope.ncrep.substitute import build_plan
+
+    class _M:
+        def __init__(self, name, value, unit=""):
+            from kernoscope.provenance import Provenance
+            self.name, self.value, self.unit = name, value, unit
+            self.provenance = Provenance.EXACT
+            self.source = "nvml"
+
+    class _Sec:
+        def __init__(self, metrics):
+            self.name = "Duration"
+            self.metrics = metrics
+
+    class _L:
+        grid = (1024, 1, 1)
+        block = (256, 1, 1)
+
+    class _K:
+        name = "k(float *)"
+        launches = [_L()]
+        sections = [_Sec([_M("gpu__time_duration.sum", 4.755, "ms"),
+                          _M("ks__launch_time_mean", 4.755, "ms"),
+                          _M("launch__local_mem_per_thread", 0.0, "B")])]
+
+    return build_plan(_K(), packet={"verdicts": []}, tool_version="test")
+
+
+def test_sidecar_names_a_value_that_can_actually_be_dropped():
+    """V-12：旧散文拿 `gpu__time_duration.sum` 当"被命名空间丢弃"的例子 —— 结构上不可能。"""
+    plan = _build_plan_for_sidecar()
+    assert "gpu__time_duration.sum" not in plan.dropped_by_namespace
+    assert "launch__local_mem_per_thread" in plan.dropped_by_namespace
+    from kernoscope.ncrep.substitute import render_sidecar
+    text = render_sidecar(plan, ncu_rep_path="out.ncu-rep")
+    assert "launch__local_mem_per_thread" in text

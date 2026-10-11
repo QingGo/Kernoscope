@@ -743,15 +743,11 @@ def test_onepage_says_what_was_left_out():
     assert (p["refusals_omitted"]["codes"] or [""])[0] in text
 
 
-def test_primary_verdict_facts_survive_the_first_facts_trim():
-    """拒绝密集的机器上，facts 是**分两级**裁的：先裁次要判词，结论四条最后才动。
+def _budget_fixture() -> dict:
+    """拒绝密集 + 判词多的包（V-1 与 facts 分级裁剪都用它）。"""
+    from kernoscope.packet import PRIMARY_FACT_IDS
 
-    真机教训：一处 GEMM 负载 + 8 个拒绝码时，包被裁到"全部 facts 丢失"，
-    一屏上出现"最耗时的是 ?（None ms）"—— 结论本身被裁没了。
-    """
-    from kernoscope.packet import PRIMARY_FACT_IDS, enforce_budget
-
-    packet = {
+    return {
         "schema_version": 1, "schema_revision": "1.2", "tool": "kernoscope",
         "tool_version": "0.2.0",
         "verdicts": ([
@@ -763,6 +759,8 @@ def test_primary_verdict_facts_survive_the_first_facts_trim():
             {"id": "saving_estimate", "status": "ok",
              "facts": {"n": 1, "top_pct_lo": 79.0, "top_pct_hi": 88.2},
              "metrics": ["ks__prescription_total_saving_per_hour"]},
+            {"id": "truth_vs_substitute", "status": "ok", "facts": {"n": 3},
+             "metrics": ["ncu__gpu__time_duration.sum"]},
         ] + [{"id": f"extra_{i}", "status": "ok",
               "facts": {"padding": "x" * 60}, "metrics": [f"ks__m{i}"],
               "premises": [{"id": "p", "observed": i, "ok": True}]} for i in range(12)]),
@@ -773,14 +771,151 @@ def test_primary_verdict_facts_survive_the_first_facts_trim():
                      for i in range(8)},
         "next": [{"verdict": f"v{i}", "action": "下一步" * 20} for i in range(6)],
     }
-    enforce_budget(packet, limit=1400)
+
+
+def test_primary_verdict_facts_survive_the_first_facts_trim():
+    """拒绝密集的机器上，facts 是**分两级**裁的：先裁次要判词，结论四条最后才动。
+
+    真机教训：一处 GEMM 负载 + 8 个拒绝码时，包被裁到"全部 facts 丢失"，
+    一屏上出现"最耗时的是 ?（None ms）"—— 结论本身被裁没了。
+    """
+    from kernoscope.packet import PRIMARY_FACT_IDS, enforce_budget
+
+    # ① 宽松一点：次要 facts 已经裁掉，结论四条的 facts 必须还在
+    packet = _budget_fixture()
+    enforce_budget(packet, limit=2600)
     trimmed = packet["cost"]["trimmed"]
     assert "facts_secondary" in trimmed, f"没走到次要 facts 裁剪：{trimmed}"
+    assert "facts_primary" not in trimmed, f"这个预算不该动结论 facts：{trimmed}"
     by_id = {v["id"]: v for v in packet["verdicts"]}
-    if "facts" not in trimmed:            # 只裁到次要级别：结论四条的 facts 必须还在
-        for vid in PRIMARY_FACT_IDS:
-            if vid in by_id:
-                assert by_id[vid].get("facts"), f"{vid} 的 facts 是结论本身，不该先被裁"
-        assert any(not v.get("facts") for k, v in by_id.items() if k.startswith("extra_"))
-    else:                                  # 裁到最深一级：那就都没了（如实记录在 trimmed 里）
-        assert "facts" in trimmed
+    for vid in PRIMARY_FACT_IDS:
+        if vid in by_id:
+            assert by_id[vid].get("facts"), f"{vid} 的 facts 是结论本身，不该先被裁"
+    assert any(not v.get("facts") for k, v in by_id.items() if k.startswith("extra_"))
+
+    # ② 极紧预算：才允许动结论 facts，而且必须是**最后**一步、留下痕迹
+    tight = _budget_fixture()
+    enforce_budget(tight, limit=1400)
+    t2 = tight["cost"]["trimmed"]
+    assert t2.index("facts_secondary") < t2.index("facts_primary"), t2
+    assert t2[-1] == "facts_primary", f"结论 facts 必须是最后一级：{t2}"
+
+
+def test_budget_drops_refusal_prose_before_it_drops_verdicts():
+    """V-1（第五轮 P0）：结论比处置散文重要 —— 顺序必须是"先裁散文，再裁判词"。
+
+    旧顺序把 `verdicts` 排在 `refusal_entries`/`refusal_action_text` 之前，与函数自己的
+    docstring 相反：真机 9 条判词 → 包 6 条，被删的正是 `occupancy`/`roofline`/`over_peak`
+    （含"物理不可能"守卫），而 8 条拒绝的处置散文一条不少。
+    """
+    from kernoscope.packet import enforce_budget
+
+    packet = _budget_fixture()
+    enforce_budget(packet, limit=3200)          # 只够裁到拒绝散文这一级
+    trimmed = packet["cost"]["trimmed"]
+    assert "refusal_action_text" in trimmed or "refusal_entries" in trimmed, trimmed
+    if "verdicts" in trimmed:                   # 真裁到判词时，散文必须已经先被裁过
+        assert trimmed.index("refusal_action_text") < trimmed.index("verdicts"), trimmed
+    # 只裁散文的那一档：判词一条不许少
+    assert len(packet["verdicts"]) == 16, [v["id"] for v in packet["verdicts"]]
+
+
+def test_budget_never_drops_a_verdict_without_recording_it():
+    """V-1 的另一半：预算裁掉的判词 id 必须进 `verdicts_more`，不许静默消失。"""
+    from kernoscope.packet import enforce_budget
+
+    packet = _budget_fixture()
+    original = [v["id"] for v in packet["verdicts"]]
+    enforce_budget(packet, limit=1400)
+    kept = [v["id"] for v in packet["verdicts"]]
+    more = packet.get("verdicts_more") or {}
+    recorded = list(more.get("ids") or [])
+    assert set(original) == set(kept) | set(recorded), (kept, recorded)
+    assert more.get("count") == len(original) - len(kept)
+    assert len(recorded) == more.get("count")
+
+
+def test_verdict_caps_are_both_traced():
+    """`MAX_VERDICTS` 截断与预算截断共用一个留痕字段（count 是两者之和）。"""
+    from kernoscope.packet import enforce_budget
+
+    packet = _budget_fixture()
+    enforce_budget(packet, limit=1000)
+    more = packet["verdicts_more"]
+    assert more["count"] == 16 - len(packet["verdicts"]) == len(more["ids"])
+    assert len(packet["verdicts"]) <= 4
+
+
+# --------------------------------------------------------------------------- #
+# 第五轮 V-6：跨 kernel 传染（一份报告里 kernel A 的超峰污染 kernel B 的 roofline）
+# --------------------------------------------------------------------------- #
+class _KM:
+    def __init__(self, name, value, unit="", provenance="measured", source="s", note=""):
+        from kernoscope.provenance import Provenance
+        self.name, self.value, self.unit = name, value, unit
+        self.provenance = Provenance(provenance)
+        self.source, self.note = source, note
+
+
+class _KSec:
+    def __init__(self, name, metrics):
+        self.name, self.metrics = name, metrics
+
+
+class _KK:
+    def __init__(self, name, total_ns, sections, launch_count=1):
+        self.name, self.total_ns, self.sections = name, total_ns, sections
+        self.launch_count = launch_count
+
+
+class _KRep:
+    def __init__(self, kernels):
+        self.kernels = kernels
+        self.meta = {}
+        self.device = None
+        self.wall_time_ns = sum(k.total_ns for k in kernels)
+        self.tool_version = "test"
+        self.schema_version = 1
+
+    def iter_sections(self):
+        for k in self.kernels:
+            yield from k.sections
+
+
+def _two_kernel_report(*, cheap_over_peak: bool, top_over_peak: bool):
+    cheap = _KK("cheap_kernel", 1_000_000, [_KSec("SpeedOfLight", [
+        _KM("gpu__time_duration.sum", 1.0, "ms", "exact"),
+        _KM("est__roofline_efficiency_pct", 20.0, "%", "estimated"),
+        *([_KM("ks__over_peak_warning", 1.0, "", "derived")] if cheap_over_peak else []),
+    ])])
+    top = _KK("top_kernel", 9_000_000, [_KSec("SpeedOfLight", [
+        _KM("gpu__time_duration.sum", 9.0, "ms", "exact"),
+        _KM("est__bound", "memory", "", "estimated"),
+        _KM("est__roofline_efficiency_pct", 91.0, "%", "estimated"),
+        *([_KM("ks__over_peak_warning", 1.0, "", "derived")] if top_over_peak else []),
+    ])])
+    return _KRep([cheap, top])
+
+
+def test_over_peak_of_another_kernel_does_not_poison_a_legit_roofline():
+    """真机可达：便宜 kernel 超峰 → 另一个 kernel 合法的 91% roofline 被判 refused。"""
+    from kernoscope.packet import build
+
+    p = build(_two_kernel_report(cheap_over_peak=True, top_over_peak=False))
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["facts"]["kernel"] == "cheap_kernel"
+    assert by_id["roofline"]["status"] != "refused", by_id["roofline"]
+    assert by_id["roofline"]["facts"]["efficiency_pct"] == 91.0
+    assert by_id["roofline"]["facts"]["kernel"] == "top_kernel"
+
+
+def test_same_kernel_over_peak_still_poisons_its_own_roofline():
+    """同 kernel 的超峰仍必须把 roofline 打掉（R-59/D18 的既有语义不许丢）。"""
+    from kernoscope.packet import build
+
+    p = build(_two_kernel_report(cheap_over_peak=False, top_over_peak=True))
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["facts"]["kernel"] == "top_kernel"
+    assert by_id["roofline"]["status"] == "refused"
+    assert by_id["roofline"].get("value") is None
+    assert by_id["roofline"]["facts"]["uncitable_value"] == 91.0

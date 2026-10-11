@@ -44,6 +44,27 @@ def _report():
     ]}]}]}
 
 
+def _multi_report():
+    """两个真 kernel + 一个 `(device)` 伪 kernel（V-2 的复现形状）。
+
+    真 kernel 的 `ks__launch_count` 分别是 5 / 20，`ks__theoretical_occupancy_pct` 是
+    33.3 / 100.0；`meas__nvml_mem_busy_mean_pct` 只挂在设备级伪 kernel 上。
+    """
+    return {"kernels": [
+        {"name": "synthetic_gemm", "sections": [{"name": "Launch", "metrics": [
+            {"name": "ks__launch_count", "value": 5, "provenance": "exact"},
+            {"name": "ks__theoretical_occupancy_pct", "value": 33.3, "provenance": "derived"},
+        ]}]},
+        {"name": "synthetic_elementwise", "sections": [{"name": "Launch", "metrics": [
+            {"name": "ks__launch_count", "value": 20, "provenance": "exact"},
+            {"name": "ks__theoretical_occupancy_pct", "value": 100.0, "provenance": "derived"},
+        ]}]},
+        {"name": "(device)", "sections": [{"name": "DeviceStatistics", "metrics": [
+            {"name": "meas__nvml_mem_busy_mean_pct", "value": 96.8, "provenance": "measured"},
+        ]}]},
+    ]}
+
+
 # --------------------------------------------------------------------------
 # gate 规则
 # --------------------------------------------------------------------------
@@ -104,6 +125,65 @@ def test_missing_metric_and_bad_rule_are_failures_not_silent_passes():
     assert not run_gate(_packet(), require=["kernel_time=bogus"]).passed
 
 
+def test_max_metric_evaluates_every_kernel_and_names_the_violator():
+    """V-2：第二个 kernel 超限也必须不通过，且输出点名是哪个 kernel（旧实现只看第一个）。"""
+    rep = _multi_report()
+    res = run_gate(_packet(), report=rep, max_metric=["ks__launch_count=10"])
+    assert not res.passed, "第二个 kernel 是 20，超了 10，绝不能放绿"
+    assert len(res.failures) == 1
+    assert res.failures[0].observed["kernel"] == "synthetic_elementwise"
+    assert "synthetic_elementwise" in res.failures[0].reason
+    assert "synthetic_gemm" not in res.failures[0].reason      # 只点名违反的那个
+    # 两个 kernel 都满足时才通过
+    assert run_gate(_packet(), report=rep, max_metric=["ks__launch_count=25"]).passed
+
+
+def test_min_metric_evaluates_every_kernel_and_names_the_violator():
+    """V-2：min 同理 —— 不能拿第一个 kernel 的 33.3 去判第二个 kernel 的 100.0。"""
+    rep = _multi_report()
+    res = run_gate(_packet(), report=rep, min_metric=["ks__theoretical_occupancy_pct=90"])
+    assert not res.passed
+    assert res.failures[0].observed["kernel"] == "synthetic_gemm"
+    assert "synthetic_gemm" in res.failures[0].reason
+    assert run_gate(_packet(), report=rep,
+                    min_metric=["ks__theoretical_occupancy_pct=30"]).passed
+
+
+def test_metric_absent_on_one_kernel_is_a_failure_not_a_free_pass():
+    """真 kernel 缺这个指标 = 空白，不是豁免：没有数不能当作通过。"""
+    rep = _multi_report()
+    rep["kernels"][1]["sections"][0]["metrics"] = [
+        m for m in rep["kernels"][1]["sections"][0]["metrics"]
+        if m["name"] != "ks__launch_count"]
+    res = run_gate(_packet(), report=rep, max_metric=["ks__launch_count=100"])
+    assert not res.passed
+    assert res.failures[0].observed["kernel"] == "synthetic_elementwise"
+
+
+def test_metric_absent_everywhere_is_a_failure():
+    assert not run_gate(_packet(), report=_multi_report(), max_metric=["nope=1"]).passed
+    assert not run_gate(_packet(), report=_multi_report(), min_metric=["nope=1"]).passed
+
+
+def test_device_only_metric_is_judged_on_the_device_pseudo_kernel():
+    """只有 `(device)` 带的指标是设备级判据：真 kernel 缺项不算违规，但设备自己必须达标。"""
+    rep = _multi_report()
+    assert run_gate(_packet(), report=rep,
+                    max_metric=["meas__nvml_mem_busy_mean_pct=99"]).passed
+    bad = run_gate(_packet(), report=rep, max_metric=["meas__nvml_mem_busy_mean_pct=50"])
+    assert not bad.passed and bad.failures[0].observed["kernel"] == "(device)"
+
+
+def test_device_metric_also_compared_when_it_carries_a_kernel_scoped_metric():
+    """`(device)` 带了 kernel 级指标时也一起比（缺项豁免，不是数值豁免）。"""
+    rep = _multi_report()
+    rep["kernels"][2]["sections"][0]["metrics"].append(
+        {"name": "ks__launch_count", "value": 99, "provenance": "derived"})
+    res = run_gate(_packet(), report=rep, max_metric=["ks__launch_count=25"])
+    assert not res.passed
+    assert [f.observed["kernel"] for f in res.failures] == ["(device)"]
+
+
 def test_no_rules_at_all_is_a_failure():
     """"一条规则都没给"绝不能变成"通过" —— 那会让 CI 永远绿灯。"""
     res = run_gate(_packet())
@@ -153,6 +233,56 @@ def test_gate_cli_refuses_to_be_green_on_an_empty_rule_set(tmp_path, capsys):
     packet, _ = _pipeline(tmp_path, capsys)
     rc, out, _ = _run(capsys, "gate", "--packet", packet)
     assert rc == 1 and "一条规则都没给" in out
+
+
+def test_gate_cli_max_metric_flags_the_second_kernel(tmp_path, capsys):
+    """V-2 的 CLI 面：合成报告第二个 kernel 超限 → rc=1 且输出点名它。"""
+    packet, _ = _pipeline(tmp_path, capsys)
+    report = tmp_path / "multi.ksreport.json"
+    report.write_text(json.dumps(_multi_report()), encoding="utf-8")
+
+    rc, out, _ = _run(capsys, "gate", "--packet", packet, "--report", str(report),
+                      "--max-metric", "ks__launch_count=10")
+    assert rc == 1 and "synthetic_elementwise" in out
+
+    rc, out, _ = _run(capsys, "gate", "--packet", packet, "--report", str(report),
+                      "--min-metric", "ks__theoretical_occupancy_pct=90")
+    assert rc == 1 and "synthetic_gemm" in out
+
+    rc, out, _ = _run(capsys, "gate", "--packet", packet, "--report", str(report),
+                      "--max-metric", "ks__launch_count=25")
+    assert rc == 0 and "门禁通过" in out
+
+
+def test_gate_cli_forbid_code_rejects_a_typo_as_a_usage_error(tmp_path, capsys):
+    """V-3：拼错的 code 是用法错误（rc=2），不是"没命中所以通过"。"""
+    packet, _ = _pipeline(tmp_path, capsys)
+    rc, out, err = _run(capsys, "gate", "--packet", packet,
+                        "--forbid-code", "counters_denyed")
+    assert rc == 2, "未知 code 绝不能静默放绿"
+    assert "门禁通过" not in out
+    assert "闭集" in err and "counters_denied" in err           # 打印了可用 code 的引导
+
+
+def test_gate_cli_valid_forbid_code_keeps_its_meaning(tmp_path, capsys):
+    """合法 code 语义不变：命中 → rc=1；没命中 → rc=0。"""
+    packet, _ = _pipeline(tmp_path, capsys)
+    rc, out, _ = _run(capsys, "gate", "--packet", packet,
+                      "--forbid-code", "counters_denied")
+    assert rc == 1 and "出现了被禁止的拒绝码" in out
+
+    rc, out, _ = _run(capsys, "gate", "--packet", packet,
+                      "--forbid-code", "protocol_mismatch")
+    assert rc == 0 and "门禁通过" in out
+
+
+def test_gate_cli_rejects_an_unknown_require_status_as_a_usage_error(tmp_path, capsys):
+    """`--require` 的 status 也是闭集：写错同样是用法错误，不是"弱于要求"。"""
+    packet, _ = _pipeline(tmp_path, capsys)
+    rc, out, err = _run(capsys, "gate", "--packet", packet,
+                        "--require", "kernel_time=bogus")
+    assert rc == 2 and "门禁通过" not in out
+    assert "ok/soft/refused" in err
 
 
 # --------------------------------------------------------------------------

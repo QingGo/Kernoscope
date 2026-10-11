@@ -7,10 +7,15 @@
   那张表）：Label 认不出来，那一行就整个消失；Label 认出来但 Name 在报告里找不到，就渲染成
   `(!) n/a`。这是真机二分实验的结论（把真报告里一个 Header.Metrics 的 Label 从
   "Grid Size" 改成我们的指标名 → 该表立刻少一行；改回真标签 → 行回来）。
-* 所以想让 details（以及 ncu-ui 的表格视图）显示我们的数，**必须**：
-  ① 用 ncu 的节标识（`LaunchStats` / `SpeedOfLight`）；
-  ② 每一行用 **ncu 的显示标签**；
-  ③ 值写在 **ncu 的同名指标**下面，且按 ncu 的**单位**换算。
+* 但**只用这些还不够**：details 页的**表格行**只在"报告的指标集完整到能被 ncu 自己的节定义
+  解析"时才渲染（真机二分：把真报告的 839 条 MetricResults 全搬进来才出行；只给子集 ——
+  哪怕名字/标签/单位全对 —— 一行都不出）。替代口径报告**结构上不可能**满足这个条件，
+  所以那道题的正解不是继续伺候它的渲染逻辑，而是：
+  ① 用 ncu 的节标识（`LaunchStats` / `SpeedOfLight`）+ **ncu 的显示标签** + **ncu 的单位**，
+     让我们的同源行在**任何**按 ncu 语义读文件的工具里都自洽；
+  ② 每个节挂一条 `RuleResult`（details 页**会**渲染它的 Message 散文）→ 同源值以文本出现；
+  ③ 完整数值走 `--page raw` / Python API / 旁路署名 / 我们自己的查看器。
+  ⇒ 现实口径：details 页给"节标题 + 同源值文本 + 署名"，**不给表格行**（README §11⑧）。
 
 这条纪律与"绝不占用计数器命名空间"并不冲突，因为这里只允许**同源**的量：
   我们确实从 CUPTI activity / cubin 拿到的、与 ncu 语义完全相同的那些数
@@ -38,6 +43,9 @@ class NcuRow:
         unit: 写进文件的单位（ncu 的单位）。
         scale: 把**我们的值**换算成 ncu 单位要乘的系数。
         section: 它属于哪个 ncu 节标识。
+        from_units: 我们报告里这个指标**允许**的单位（别名集合）。
+            这是换算的安全带（第五轮 V-9）：`scale` 只在"我们的单位确实是这个"时才成立，
+            所以换算前必须核对单位。空字符串表示"无量纲/计数"。
     """
 
     name: str
@@ -45,6 +53,7 @@ class NcuRow:
     unit: str
     scale: float
     section: str
+    from_units: tuple[str, ...] = ("",)
 
 
 @dataclass(frozen=True)
@@ -64,16 +73,16 @@ class NcuSection:
 #: 早先的做法是"干脆不写它"，那是把**单位问题**当成了**身份问题**：同源的量只要换算正确，
 #: 写进 ncu 名下恰恰是它该在的地方（用户要的就是在 ncu-ui 里看到 Duration）。
 NCU_ROWS: tuple[NcuRow, ...] = (
-    NcuRow("gpu__time_duration.sum", "Duration", "ns", 1e6, "SpeedOfLight"),
+    NcuRow("gpu__time_duration.sum", "Duration", "ns", 1e6, "SpeedOfLight", ("ms",)),
     NcuRow("launch__grid_size", "Grid Size", "", 1.0, "LaunchStats"),
     NcuRow("launch__block_size", "Block Size", "", 1.0, "LaunchStats"),
     NcuRow("launch__registers_per_thread", "Registers Per Thread", "register/thread", 1.0,
            "LaunchStats"),
     NcuRow("launch__shared_mem_per_block_static", "Static Shared Memory Per Block",
-           "byte/block", 1.0, "LaunchStats"),
+           "byte/block", 1.0, "LaunchStats", ("B", "byte", "bytes")),
     NcuRow("launch__thread_count", "Threads", "thread", 1.0, "LaunchStats"),
     NcuRow("launch__shared_mem_per_block_dynamic", "Dynamic Shared Memory Per Block",
-           "byte/block", 1.0, "LaunchStats"),
+           "byte/block", 1.0, "LaunchStats", ("B", "byte", "bytes")),
 )
 
 #: 我们会生成的 ncu 节（只列我们能填的行；ncu 的节定义里有更多行，我们没有就不写）。
@@ -100,12 +109,38 @@ def section_of(name: str) -> str:
     return row.section if row is not None else ""
 
 
-def convert(name: str, value: float) -> tuple[float, str]:
+class UnitMismatch(ValueError):
+    """我们的单位与这张表假设的单位不一致 —— 换算系数不成立，拒绝换算。
+
+    为什么要有它（第五轮 V-9）：`gpu__time_duration.sum` 无条件 ×1e6 只在"我们的单位确实是
+    ms"时才对；上游哪天改成 ns，就会静默写出 1000× 的数。宁可炸，也不要写一个乘错的数字。
+    """
+
+
+def unit_ok(name: str, unit: str | None) -> bool:
+    """这个单位能不能按本表的系数换算（None = 没带单位信息，按表里的假设走）。"""
+    row = _BY_NAME.get(name)
+    if row is None:
+        return False
+    if unit is None or unit == "" and "" in row.from_units:
+        return True
+    return unit in row.from_units
+
+
+def convert(name: str, value: float, unit: str | None = None) -> tuple[float, str]:
     """把我们的值换算成 ncu 单位；返回 ``(换算后的值, ncu 单位)``。
 
-    名字不在白名单里就抛 —— 调用方必须先 `row_for()` 判过，绝不允许"顺手写一个名字"。
+    Args:
+        unit: 我们的值**实际**的单位。给了就核对（不一致抛 :class:`UnitMismatch`）；
+            给 ``None`` 表示调用方拿不到单位信息，按表里的假设换算（老调用点兼容）。
+
+    名字不在白名单里也抛 —— 调用方必须先 `row_for()` 判过，绝不允许"顺手写一个名字"。
     """
     row = _BY_NAME[name]
+    if unit is not None and unit not in row.from_units:
+        raise UnitMismatch(
+            f"{name}: 我们的单位是 {unit!r}，本表的换算系数按 {row.from_units} 成立"
+            f"（ncu 单位 {row.unit!r}）—— 单位不符时不换算，宁可不写")
     return float(value) * row.scale, row.unit
 
 
@@ -125,6 +160,8 @@ def consensus_check() -> list[str]:
             problems.append(f"{row.name} 没有 ncu 显示标签（details 页会整行消失）")
         if row.scale <= 0:
             problems.append(f"{row.name} 的换算系数非法：{row.scale}")
+        if not row.from_units:
+            problems.append(f"{row.name} 没声明 from_units —— 换算没有安全带（V-9）")
     for sec in NCU_SECTIONS:
         for name in sec.rows:
             if name not in _BY_NAME:

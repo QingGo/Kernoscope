@@ -61,9 +61,17 @@ if [[ -z "${NVBIT_PATH:-}" ]]; then
   done
   [[ -n "$found" ]] && NVBIT_PATH="$found"
 fi
+NVBIT_VERSION="n/a"
+if [[ -n "${NVBIT_PATH:-}" ]]; then
+  # 版本从**实物**读（core/nvbit.h 的 NVBIT_VERSION，退化到 mem_trace.so 里的版本字符串）：
+  # 哪个版本能用正是轨迹那一节结论的全部依据，只记路径等于没记（V-10）。
+  NVBIT_VERSION="$("$ROOT/tools/probes/nvbit_memtrace/nvbit_version.sh" "$NVBIT_PATH" 2>/dev/null \
+                   || echo n/a)"
+  [[ -n "$NVBIT_VERSION" ]] || NVBIT_VERSION="n/a"
+fi
 if [[ -n "${NVBIT_PATH:-}" ]]; then
   export NVBIT_PATH
-  echo "[bench] NVBit: $NVBIT_PATH"
+  echo "[bench] NVBit: ${NVBIT_PATH}（${NVBIT_VERSION}）"
 else
   echo "[bench] warn: 没找到 NVBit（可选依赖）—— 步骤 8/9 会跳过"
 fi
@@ -131,6 +139,7 @@ KS_VERSION="$(KSC --version 2>/dev/null || echo 'n/a')"
   echo "nsys: $($NSYS --version 2>/dev/null | tail -1)"
   echo "nvidia-smi: $(nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null)"
   echo "nvbit: ${NVBIT_PATH:-n/a}"
+  echo "nvbit_version: ${NVBIT_VERSION:-n/a}"
 } > "$HOSTDIR/environment.txt" 2>&1
 cat "$HOSTDIR/environment.txt"
 if [[ "$REVISION_SOURCE" == "none" ]]; then

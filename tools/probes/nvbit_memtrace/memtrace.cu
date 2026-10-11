@@ -75,12 +75,22 @@ static int size_from_opcode(const std::string& op) {
     return 4;
 }
 
-/* 只关心会走到 L2/DRAM 的访存：排除共享内存(LDS/STS)与常量(LDC/ULDC) */
+/* 只关心会走到 L2/DRAM 的访存：排除共享内存(LDS/STS/ATOMS/REDS)与常量(LDC/ULDC)。
+ *
+ * R-78（第五轮 V-5）：**全局原子/归约也是 DRAM 流量**。旧实现只认 LDG/STG/LD/ST，
+ * 于是纯原子 kernel（RL 训练里的 index_add_/MoE 路由/直方图/损失累加）采出 0 条记录，
+ * 解析器只会报"没有任何访存记录"，而不是给出字节数。
+ * 顺序要紧：ATOMS/REDS 必须先判，否则被 ATOM/RED 前缀吃掉；
+ * 全局原子在 SASS 里是 RED.E.ADD…/ATOMG/CAS（sm_90+ 的归约是 REDG）。 */
 static bool is_dram_relevant(const std::string& op) {
     if (op.rfind("LDS", 0) == 0 || op.rfind("STS", 0) == 0) return false;
     if (op.rfind("LDC", 0) == 0 || op.rfind("ULDC", 0) == 0) return false;
+    if (op.rfind("ATOMS", 0) == 0 || op.rfind("REDS", 0) == 0) return false;  /* 共享原子 */
     if (op.rfind("LDG", 0) == 0 || op.rfind("STG", 0) == 0) return true;
-    if (op.rfind("LD", 0) == 0 || op.rfind("ST", 0) == 0) return true;   /* LDL/STL 等 */
+    if (op.rfind("ATOMG", 0) == 0 || op.rfind("REDG", 0) == 0) return true;   /* 全局原子/归约 */
+    if (op.rfind("ATOM", 0) == 0 || op.rfind("RED", 0) == 0) return true;
+    if (op.rfind("CAS", 0) == 0) return true;
+    if (op.rfind("LD", 0) == 0 || op.rfind("ST", 0) == 0) return true;        /* LDL/STL 等 */
     return false;
 }
 

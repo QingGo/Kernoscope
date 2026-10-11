@@ -216,7 +216,7 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         then_answers=("issue_slot_upper_bound",)),
     RefusalCode.NO_OCCUPANCY_PROBE: Remedy(
         "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）",
-        command="kernoscope occupancy --records <probe-records> -o occ.json",
+        command="kernoscope occupancy --from <probe-records> --write-json occ.json",
         cost_s=600.0, then_answers=("achieved_occupancy",)),
     RefusalCode.NO_SASS_SOURCE: Remedy(
         "SASS/源码逐行对照需要 --import-source，本项目不实现：改用 cuobjdump -sass 自行对照",
@@ -288,10 +288,14 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         cost_s=20.0, then_answers=("dram_bytes", "dram_bytes_trace")),
     RefusalCode.WINDOW_LAUNCH_UNALIGNED: Remedy(
         "per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；"
-        "窗口被裁过、而 launch 时间戳与采样时钟又对不上时，分母不可信，所以不给这个数。"
-        "把窗口放开（--ks-window full；代价是启动/JIT 会稀释覆盖率，可能被 coverage_too_low 挡），"
-        "或改走整窗口口径 --ks-ledger-total-mb / 轨迹口径 --ks-memtrace —— 后两条不需要这个分母",
-        command="kernoscope --ks-window full -- python bench_loop.py", cost_s=20.0,
+        "窗口被裁过、或忙碌段里混了不在 launch 表里的工作（斜率离 1 超出锚点不确定度）时，"
+        "分母不可信，所以不给这个数。两条不需要这个分母的替代口径：整窗口口径 "
+        "--ks-ledger-total-mb（对拍总量）或轨迹口径 --ks-memtrace（只测被追踪的 kernel）。"
+        "要让 per-launch 口径本身成立：让采样窗口覆盖整段运行（别用 --ks-window-s 切得比 "
+        "launch 表还短）并给出逐 launch 时间戳（--ks-sqlite）——"
+        "**不是**把窗口切来切去（`--ks-window full` 只是换了窗口，分母口径不变，"
+        "第五轮 V-32 之前这里恰恰推荐错了方向）",
+        command="kernoscope --ks-ledger-total-mb 440000 -- python bench_loop.py", cost_s=20.0,
         then_answers=("dram_bytes", "dram_bytes_trace")),
     RefusalCode.SHARE_UNKNOWN: Remedy(
         "逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，"

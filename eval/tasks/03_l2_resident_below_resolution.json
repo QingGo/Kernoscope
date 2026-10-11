@@ -168,7 +168,7 @@
           "action": "跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…",
           "cost_kind": "wall_seconds",
           "cost_s": 600.0,
-          "cmd": "kernoscope occupancy --records <probe-records> -o occ.j…"
+          "cmd": "kernoscope occupancy --from <probe-records> --write-jso…"
         },
         "no_memtrace": {
           "action": "加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…",

@@ -92,7 +92,9 @@ CHANGES = [
     Change("backend", "加一族数据源（nsys / NVML / cuobjdump / NVBit）",
            truth=["src/kernoscope/backends"],
            touch=["src/kernoscope/doctor.py", "src/kernoscope/capabilities.py"],
-           tests=["tests/test_doctor.py", "tests/test_toolchain.py"], sec="②"),
+           tests=["tests/test_doctor.py", "tests/test_toolchain.py",
+                  # 第五轮：窗口的环境证据（降频位图/时钟驻留/同卡其他租户）也属于数据源面
+                  "tests/test_environment_evidence.py"], sec="②"),
     Change("workload", "加一个已知答案负载（selftest 那一族）",
            truth=["src/kernoscope/selftest.py"],
            tests=["tests/test_diff_selftest.py"], sec="③"),
@@ -106,7 +108,9 @@ CHANGES = [
            truth=["src/kernoscope/refusals.py"],
            regen=["tools/gen_agent_refs.py"],
            touch=["CHANGELOG.md"],
-           tests=["tests/test_refusals.py", "tests/test_agent_surface.py"], sec="⑤"),
+           tests=["tests/test_refusals.py", "tests/test_agent_surface.py",
+                  # 第五轮 V-13：处方命令必须交给真解析器（28 条 kernoscope 命令 + AST 超集扫）
+                  "tests/test_remedy_commands.py"], sec="⑤"),
     Change("artifact", "加一次 bench 产物 / 改公开数字",
            truth=["bench/run.sh"],
            touch=["bench/artifacts/README.md"],

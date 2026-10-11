@@ -482,7 +482,8 @@ def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
         "BlockSize": dict(zip("XYZ", source.block)),
         "MetricResults": [
             {"NameId": name_id,
-             "MetricValue": {"DoubleValue": float(convert(metric.name, metric.value)[0])
+             "MetricValue": {"DoubleValue": float(convert(metric.name, metric.value,
+                                                           metric.unit or None)[0])
                              if section_of(metric.name) else float(metric.value)}}
             for name_id, metric in zip(name_ids, metrics)
         ],

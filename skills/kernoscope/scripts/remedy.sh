@@ -10,7 +10,7 @@ case "${1:-}" in
                echo; echo "例子：bash remedy.sh share_too_low"; exit 0;;
 esac
 code="$1"
-[[ -f "$REFS" ]] || { echo "error: 缺少参考表 $REFS（跑 tools/gen_agent_refs.py 生成）" >&2; exit 1; }
+[[ -f "$REFS" ]] || { echo "error: 缺少参考表 ${REFS}（跑 tools/gen_agent_refs.py 生成）" >&2; exit 1; }
 
 row="$(grep -F "| \`$code\` |" "$REFS" | head -1)"
 if [[ -z "$row" ]]; then

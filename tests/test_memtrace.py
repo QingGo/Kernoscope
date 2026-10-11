@@ -484,3 +484,245 @@ def test_official_trace_completeness_sentinel_is_detected(tmp_path):
     b = load_official_memtrace(str(with_sentinel), sm_count=1)
     assert a.complete == "unknown" and b.complete == "yes"
     assert a.header["trace_sha256"] != b.header["trace_sha256"], "两份轨迹的指纹必须不同"
+
+
+# --------------------------------------------------------------------------
+# R-78（第五轮验收 V-5）：全局原子/归约**也是全局访存**；0 条记录 ≠ 测到 0
+#
+# 验收方在 RTX 4090（sm_89）上用 NVBit 1.7.x 采的 `atomicAdd` 轨迹里，opcode 全是
+# `RED.E.ADD.F32.FTZ.RN.STRONG.GPU`。旧实现只认 LDG/STG（与含 GLOBAL 的字样），于是
+# 256 条记录全被剔出全局口径：sectors/request 报 `0.0 [measured]`（看起来像"测到 0"），
+# 且 DRAM 字节拒绝时还说"轨迹头部缺少 l2_bytes"—— 而用户明明给了 `--l2-bytes`。
+#
+# 下面的合成数据照这个形态造（**不含任何机器身份**：没有主机名/IP/绝对路径）。
+# --------------------------------------------------------------------------
+# 各架构实测形态（`cuobjdump -sass`；sm_75/80/86/89 与 sm_90a/sm_100 各自一组）
+GLOBAL_ATOMIC_OPCODES = (
+    "RED.E.ADD.F32.FTZ.RN.STRONG.GPU",      # sm_75..sm_89 的 atomicAdd（真机采到）
+    "RED.E.ADD.STRONG.GPU",                 # 泛型指针归约（真机采到）
+    "RED.E.ADD.F32.FTZ.RN",                 # 不带作用域词的裸归约
+    "REDG.E.ADD.F32.FTZ.RN.STRONG.GPU",     # sm_90a/sm_100 带 G 后缀
+    "REDG.E.ADD.STRONG.GPU",
+    "ATOMG.E.CAS.STRONG.GPU",               # 真机采到的 atomicCAS
+    "ATOMG.E.ADD", "ATOM.E.CAS", "ATOM.E.ADD.STRONG.SYS", "CAS",
+    "red.global.add.f32", "atom.global.cas.b32", "atom.acq_rel.gpu.global.add.u32",
+)
+NON_GLOBAL_ATOMIC_OPCODES = {
+    "ATOMS.ADD": "shared",                  # SASS 的共享原子（S 后缀）
+    "ATOMS.POPC.INC.32": "shared",          # 真机采到的共享 atomicAdd
+    "ATOMS.CAS": "shared",
+    "REDS.ADD": "shared",
+    "RED.SHARED.ADD.F32": "shared",
+    "ATOM.SHARED.ADD": "shared",
+    "RED.LOCAL.ADD": "local",
+    "atom.shared.cas.b32": "shared",
+    "atom.local.add.u32": "local",
+}
+
+
+def _acceptance_atomic_rows(n_warps=256, lanes=32, stride_elems=37):
+    """验收报告里那个 kernel 的地址形态：`atomicAdd(&y[(i*37) & (2^20-1)], 1.0f)`。
+
+    lane 之间间隔 37 个 float（148 B）⇒ 每个 warp 触达 32 个互不重叠的 32B sector。
+    """
+    mask = (1 << 20) - 1
+    rows = []
+    for w in range(n_warps):
+        addrs = [((w * lanes + lane) * stride_elems & mask) * 4 for lane in range(lanes)]
+        rows.append((0x30, "RED.E.ADD.F32.FTZ.RN.STRONG.GPU", lanes, 4, w % 2, addrs))
+    return rows
+
+
+def test_access_kind_counts_global_atomics_as_global():
+    """全局原子/归约 → global；共享/本地原子**不进**全局口径；判不出的仍归 unknown。"""
+    from kernoscope.backends.memtrace import access_kind
+
+    for op in GLOBAL_ATOMIC_OPCODES:
+        assert access_kind(op) == "global", (op, access_kind(op))
+    for op, want in NON_GLOBAL_ATOMIC_OPCODES.items():
+        assert access_kind(op) == want, (op, access_kind(op), want)
+    # 现有行为不能被这次改动带走
+    for op, want in (("LDG.E.128", "global"), ("STG.E", "global"),
+                     ("LDS", "shared"), ("STS.U16", "shared"), ("LDSM.16.M88.4", "shared"),
+                     ("LDL", "local"), ("STL", "local"),
+                     ("ld.global.v4.f32", "global"), ("st.shared.f32", "shared"),
+                     ("ld.local.f32", "local"), ("LD.E", "unknown"), ("ST.E", "unknown"),
+                     ("MULTIMEM.RED", "unknown"), ("BAR.SYNC", "other")):
+        assert access_kind(op) == want, (op, access_kind(op), want)
+
+
+def test_global_atomic_trace_matches_acceptance_numbers(tmp_path):
+    """真机那种 opcode 形态要能算出验收方独立重算的那组数（R-78 的核心回归）。
+
+    8×1024 线程 = 256 个 warp；每个 warp 触达 32 个散射 sector：
+        sectors/request 32.0、合并效率 12.5%、工作集 0.262 MB、DRAM 262,144 B（全 miss）。
+    """
+    path = _mk_trace(tmp_path / "atom.txt", _acceptance_atomic_rows(), grid=8, blocks_traced=8)
+    st = analyze_memtrace(load_memtrace(str(path)), l2_bytes=75497472)
+    assert st.kind_counts == {"global": 256}, st.kind_counts
+    assert st.records_global == 256 and st.records == 256
+    assert st.sectors_per_request == pytest.approx(32.0)
+    assert st.coalescing_pct == pytest.approx(12.5)
+    assert st.working_set_mb == pytest.approx(256 * 32 * 32 / 1e6)      # 0.262144 MB
+    assert st.dram_bytes_per_launch == pytest.approx(256 * 32 * 32)     # 262,144 B
+    assert st.dram_bytes_unavailable_reason == ""
+
+
+def test_mixed_atomic_and_shared_traffic_keeps_global_caliber_clean(tmp_path):
+    """一条轨迹里混着全局原子、共享原子与共享访存时，只有全局那条进全局口径。"""
+    path = tmp_path / "mixed.txt"
+    rows = [(0x30, "RED.E.ADD.F32.FTZ.RN.STRONG.GPU", 32, 4, 0,
+             [0x1000 + 4 * i for i in range(32)]),                    # 4 sector，100%
+            (0x40, "ATOMS.POPC.INC.32", 32, 4, 0, [0x10 + i for i in range(32)]),
+            (0x50, "LDS", 32, 4, 0, [0x20 + 4 * i for i in range(32)]),
+            (0x60, "STG.E", 32, 4, 0, [0x5000 + 4 * i for i in range(32)])]
+    _mk_trace(path, rows)
+    st = analyze_memtrace(load_memtrace(str(path)), l2_bytes=L2_72MB)
+    assert st.kind_counts == {"global": 2, "shared": 2}, st.kind_counts
+    assert st.records_global == 2
+    # 全局口径只算那两条：各 4 个 sector、各 128 B 有用字节
+    assert st.sectors_per_request == pytest.approx(4.0)
+    assert st.coalescing_pct == pytest.approx(100.0)
+    assert st.working_set_mb == pytest.approx(8 * 32 / 1e6)
+    assert not st.coalescing_clamped
+
+
+def test_zero_global_records_is_unavailable_not_measured_zero(tmp_path, capsys):
+    """全局口径 0 条记录 ⇒ 那一串指标是 `unavailable` + code，绝不是 `0.0 [measured]`。"""
+    from kernoscope.analyze.memtrace import split_unavailable_note, to_metrics
+    from kernoscope.refusals import RefusalCode
+
+    path = tmp_path / "shared-only.txt"
+    _mk_trace(path, [(0x10, "LDS", 32, 4, 0, [0x100 + 4 * i for i in range(32)]),
+                     (0x20, "STS.U16", 32, 2, 0, [0x200 + 2 * i for i in range(32)]),
+                     (0x30, "ATOMS.POPC.INC.32", 32, 4, 0, [0x10 + i for i in range(32)])])
+    st = analyze_memtrace(load_memtrace(str(path)), l2_bytes=L2_72MB)
+    assert st.records_global == 0 and st.kind_counts == {"shared": 3}
+
+    metrics = {name: (value, note) for name, value, _u, _s, note in to_metrics(st)}
+    for name in ("meas__sectors_per_request", "meas__coalescing_efficiency_pct",
+                 "meas__trace_working_set_mb", "meas__trace_records_global",
+                 "est__l2_hit_rate_l2only_pct", "est__l2_hit_rate_with_l1_pct"):
+        value, note = metrics[name]
+        assert value is None, (name, value)
+        code, why = split_unavailable_note(note)
+        assert code is RefusalCode.TRACE_UNAVAILABLE, (name, code)
+        assert "而不是 0" in why
+    # 全部记录数仍然是实测值：拒绝只针对"全局口径"那一族
+    assert metrics["meas__trace_records"][0] == pytest.approx(3.0)
+
+    assert cli.main(["memtrace", "--from", str(path), "--l2-bytes", str(L2_72MB)]) == 0
+    out = capsys.readouterr().out
+    assert "meas__sectors_per_request" in out
+    assert "n/a" in out and "code=trace_unavailable" in out
+    assert "meas__sectors_per_request : 0.0" not in out
+    assert "meas__trace_records_global: 0.0" not in out
+
+    assert cli.main(["memtrace", "--from", str(path), "--l2-bytes", str(L2_72MB),
+                     "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    m = {x["name"]: x for x in doc["metrics"]}
+    assert m["meas__sectors_per_request"]["value"] is None
+    assert m["meas__sectors_per_request"]["provenance"] == "unavailable"
+    assert m["meas__sectors_per_request"]["refusal"]["code"] == "trace_unavailable"
+    assert m["meas__trace_records"]["value"] == pytest.approx(3.0)
+    assert doc["dram_bytes_per_launch"] is None
+    assert "全局口径 0 条记录" in doc["dram_bytes_unavailable_reason"]
+
+
+def test_unrecognized_opcodes_are_listed_so_the_gap_is_visible(tmp_path):
+    """分类缺口要一眼可见：拒绝理由里列出实际出现的 opcode 形态（不猜、但要说清）。"""
+    path = tmp_path / "unknown-ops.txt"
+    _mk_trace(path, [(0x1, "LD.E", 32, 4, 0, [0x1000 + 4 * i for i in range(32)]),
+                     (0x2, "MULTIMEM.RED", 32, 4, 0, [0x2000 + 4 * i for i in range(32)])])
+    st = analyze_memtrace(load_memtrace(str(path)), l2_bytes=L2_72MB)
+    assert st.kind_counts == {"unknown": 2} and st.records_global == 0
+    why = st.dram_bytes_unavailable_reason
+    assert "LD.E×1" in why and "MULTIMEM.RED×1" in why
+    assert "这不是" in why and "0 字节" in why
+
+
+def test_dram_refusal_reason_tracks_whether_l2_was_given(tmp_path, capsys, monkeypatch):
+    """拒绝理由不许张冠李戴：给了 `--l2-bytes` 就不能说"缺 l2_bytes"（验收 V-5）。"""
+    # ① 只有共享访存（全局口径 0 条）+ **给了** --l2-bytes
+    given = tmp_path / "shared-only.txt"
+    _mk_trace(given, [(0x10, "LDS", 32, 4, 0, [0x100 + 4 * i for i in range(32)])])
+    assert cli.main(["memtrace", "--from", str(given), "--l2-bytes", str(L2_72MB)]) == 0
+    out = capsys.readouterr().out
+    assert "全局口径 0 条记录" in out
+    assert "缺少 l2_bytes" not in out and "没有 l2_bytes" not in out
+
+    # ② 真的没给（轨迹头也没有）⇒ 理由必须点明 l2_bytes 与具体参数名
+    nol2 = _mk_trace(tmp_path / "nol2.txt", [_coalesced(0x1000)], l2=0)
+    st = analyze_memtrace(load_memtrace(str(nol2)))
+    assert st.dram_bytes_per_launch is None
+    why = st.dram_bytes_unavailable_reason
+    assert "l2_bytes" in why and "--l2-bytes" in why and "--ks-l2-bytes" in why
+
+    # ②b 同一条前提在 CLI 上也要成立（--l2-bytes 不给、本机 nvidia-smi 也拿不到）
+    def _no_smi():
+        raise RuntimeError("本机没有 nvidia-smi")
+
+    monkeypatch.setattr("kernoscope.backends.nsys.device_info_from_smi", _no_smi)
+    assert cli.main(["memtrace", "--from", str(nol2)]) == 0
+    out2 = capsys.readouterr().out
+    assert "--l2-bytes" in out2 and "l2_bytes" in out2
+
+    # ③ 给了 l2 但访问数超上限：理由只讲 max_accesses，不许把锅甩给 l2_bytes
+    many = _mk_trace(tmp_path / "many.txt", [_coalesced(0x100000 + 0x1000 * i) for i in range(50)])
+    st3 = analyze_memtrace(load_memtrace(str(many)), l2_bytes=L2_72MB, max_accesses=10)
+    assert st3.dram_bytes_per_launch is None
+    assert "上限" in st3.dram_bytes_unavailable_reason
+    assert "l2_bytes" not in st3.dram_bytes_unavailable_reason
+
+
+def test_report_section_marks_zero_global_metrics_unavailable(monkeypatch, tmp_path):
+    """主报告同构：MemoryTrace section 里这些行是 n/a + code，而不是 0.0 [measured]。"""
+    path = tmp_path / "shared-only.txt"
+    _mk_trace(path, [(0x10, "LDS", 32, 4, 0, [0x100 + 4 * i for i in range(32)])],
+              kernel="synthetic_gemm")
+    base = tmp_path / "rep"
+    rc = cli.main(["--ks-synthetic", "--ks-no-nvml", "--ks-memtrace", str(path),
+                   "-k", "regex:gemm", "-o", str(base), "-f"])
+    assert rc == 0
+    doc = json.loads((tmp_path / "rep.ksreport.json").read_text())
+    secs = {s["name"]: s for k in doc["kernels"] for s in k["sections"]}
+    metrics = {m["name"]: m for m in secs["MemoryTrace"]["metrics"]}
+    for name in ("meas__sectors_per_request", "meas__coalescing_efficiency_pct",
+                 "meas__trace_working_set_mb", "meas__trace_records_global"):
+        assert metrics[name]["value"] is None, (name, metrics[name])
+        assert metrics[name]["provenance"] == "unavailable"
+        assert metrics[name]["refusal"]["code"] == "trace_unavailable"
+    assert metrics["meas__trace_records"]["value"] == pytest.approx(1.0)
+    dram = metrics["est__dram_bytes_per_launch_trace"]
+    assert dram["provenance"] == "unavailable"
+    assert dram["refusal"]["code"] == "trace_unavailable"
+    assert "全局口径 0 条记录" in dram["reason"]
+
+
+def test_official_atomic_lines_reach_global_caliber(tmp_path, capsys):
+    """官方 `mem_trace` 输出里的原子数据行（验收方用的那条路径）同样算全局访存。"""
+    from kernoscope.backends.memtrace import load_official_memtrace
+
+    body = ["MEMTRACE: CTX 0x1 - LAUNCH - Kernel pc 0x10 - Kernel name k_atomic(float*) "
+            "- grid launch id 0 - grid size 8,1,1 - block size 1024,1,1"]
+    for w in range(4):
+        addrs = " ".join(hex(0x100000 + (w * 32 + lane) * 148) for lane in range(32))
+        body.append(f"MEMTRACE: CTX 0x1 - grid_launch_id 0 - CTA 0,0,0 - warp {w} - "
+                    f"RED.E.ADD.F32.FTZ.RN.STRONG.GPU - {addrs}")
+    p = tmp_path / "official-atomic.txt"
+    p.write_text("\n".join(body) + "\n", encoding="utf-8")
+
+    tr = load_official_memtrace(str(p), sm_count=8)
+    assert [r.kind for r in tr.records] == ["global"] * 4
+    st = analyze_memtrace(tr, l2_bytes=L2_72MB)
+    assert st.records_global == 4
+    assert st.sectors_per_request == pytest.approx(32.0)
+    assert st.dram_bytes_per_launch is not None
+
+    assert cli.main(["memtrace", "--from", str(p), "--sm-count", "8",
+                     "--l2-bytes", str(L2_72MB), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["records_global"] == 4
+    assert doc["sectors_per_request"] == pytest.approx(32.0)
+    assert doc["dram_bytes_per_launch"] is not None

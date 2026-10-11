@@ -697,12 +697,15 @@ def test_window_cut_without_launch_times_refuses_per_launch():
     assert not est.attributable
     r = est.refusal_for("est__dram_bytes_per_launch")
     assert r.code is RefusalCode.WINDOW_LAUNCH_UNALIGNED
-    assert "分母" in r.message and "--ks-window full" in r.message
+    # V-32：处方不许再推荐 `--ks-window full`（那只是换窗口，分母口径不变）
+    assert "分母" in r.message and "--ks-window full" not in r.message
+    assert "--ks-ledger-total-mb" in r.message or "--ks-memtrace" in r.message
     # R-47 要求把可算的偏差报出来；W3/D24 要求 observed 与 threshold 都不空
     assert r.observed and r.threshold
     assert r.observed["window_bias_pct"] == pytest.approx(-50.0, abs=1.0)
     rem = default_remedy(r.code)
-    assert rem.command and "full" in rem.command
+    assert rem.command and "full" not in rem.command
+    assert "--ks-ledger-total-mb" in rem.command or "--ks-memtrace" in rem.command
 
 
 def test_misaligned_clocks_are_refused_not_divided():
@@ -880,3 +883,87 @@ def test_window_probe_accepts_a_clean_refusal(tmp_path):
           _packet_with_per_launch(tmp_path, "b", 0, code="window_launch_unaligned"),
           _packet_with_per_launch(tmp_path, "c", 0, code="window_launch_unaligned")]
     assert mod.check(pk, analytic_mb=1073.74) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 第五轮 V-7 / V-31：未裁窗口也必须用"窗口内等效 launch 数"当分母
+# --------------------------------------------------------------------------- #
+def test_untrimmed_window_with_longer_launch_table_is_refused_not_halved():
+    """V-7 的决定性构造：采样 20 s、launch 表 40 s、**没有** --ks-window-s。
+
+    旧实现走到 `elif launches > 0`，把窗口积分除以整段 launch 数 → per-launch 静默偏小
+    50%，`attributable=True`、无告警，而且 `window_launch_unaligned` 在这条路径上**不可达**。
+    修复后：两个时钟的速率对不上（slope≈0.5）⇒ 拒绝，而不是给一个等比偏小的数。
+    """
+    samples = [DeviceSample(t=float(i), mem_util_pct=96.0, sm_util_pct=90.0,
+                            sm_clock_mhz=2500.0, power_w=300.0) for i in range(20)]
+    spans = [(float(2 * i), float(2 * i + 1.9)) for i in range(20)]      # 40 s 的 launch 表
+    est = estimate(samples, peak_gbs=900.0, window_s=20.0, launches=20,
+                   window_mode="full", launch_spans=spans, matched_kernel_ns=int(19.5e9))
+    assert est.bytes_per_launch is None, (
+        f"窗口 20 s / launch 表 40 s：分母不成立却给了数 {est.bytes_per_launch}")
+    assert not est.attributable
+    r = est.refusal_for("est__dram_bytes_per_launch")
+    assert r.code is RefusalCode.WINDOW_LAUNCH_UNALIGNED
+    # V-31：偏差口径的分母是 **launch 表跨度**（20/40−1 = −50%），不是进程 wall
+    assert r.observed["window_bias_pct"] == pytest.approx(-50.0, abs=2.0)
+
+
+def test_window_bias_uses_launch_span_not_process_wall():
+    """V-31：偏差估计的分母是 launch 表跨度；两者一致时必须是 0%，不许凭 wall 报偏差。"""
+    samples, spans = _uniform_run()
+    est = estimate(samples, peak_gbs=900.0, window_s=123.0, launches=200,   # wall 与真实不符
+                   window_mode="full", launch_spans=spans, matched_kernel_ns=int(40.0e9))
+    assert est.window_bias_pct == pytest.approx(0.0, abs=1.0), est.window_bias_pct
+
+
+def test_launch_table_offset_by_a_second_is_aligned_by_the_anchor_not_ignored():
+    """launch 表整体平移 1 s 时必须用忙碌锚点对齐（而不是"看起来在窗口附近"就算同源）。
+
+    这正是 CLI 合成夹具的形态：采样窗 [0,2.4]、launch 表 [1.0,3.4]、两者斜率都是 1。
+    按同源处理会把 5 个 launch 数成 2.92 个（per-launch 偏大 64%）；用锚点对齐后是 5.0。
+    """
+    samples, spans = _uniform_run()
+    shifted = [(a + 1.0, b + 1.0) for a, b in spans]
+    est = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                   window_mode="full", launch_spans=shifted, matched_kernel_ns=int(40.0e9))
+    assert est.launches_in_window == pytest.approx(200.0, rel=0.02), est.launches_in_window
+    assert est.bytes_per_launch == pytest.approx(est.bytes_total / 200.0, rel=0.02)
+
+
+# --------------------------------------------------------------------------- #
+# 第五轮 V-8：分母的"分辨率"必须真的是误差上界（锚点相位 + 斜率）
+# --------------------------------------------------------------------------- #
+def test_busy_segment_with_extra_work_is_refused_not_bounded_tightly():
+    """窗口里混了不在 launch 表里的工作（例如先跑 3.6 s memcpy）⇒ 拒绝给 per-launch。
+
+    真机构造：分母 433.03 vs 真值 472.0（−8.3%），而报出的区间只有 0.85% ——
+    报告的"分辨率"不是误差上界，读者会以为这个数比实际可信。
+    """
+    dt = 0.2
+    # 采样：前 18 个点被 memcpy 占着（忙），之后是 kernel 段（忙），共 43.6 s
+    samples = [DeviceSample(t=i * dt, mem_util_pct=95.0, sm_util_pct=90.0,
+                            sm_clock_mhz=2500.0, power_w=300.0) for i in range(218)]
+    # launch 表只覆盖 kernel 段：40 s（20 个 launch，每个 1.9 s）
+    spans = [(3.6 + 2.0 * i, 3.6 + 2.0 * i + 1.9) for i in range(20)]
+    est = estimate(samples, peak_gbs=900.0, window_s=43.6, launches=20,
+                   window_mode="full", launch_spans=spans,
+                   matched_kernel_ns=int(38.0e9))
+    assert est.launch_align_slope is not None and est.launch_align_slope > 1.02, \
+        est.launch_align_slope
+    assert est.bytes_per_launch is None, (
+        f"忙碌段混了别的工作，分母不可信却给了数：{est.bytes_per_launch}")
+    assert est.launches_in_window_range is None
+    r = est.refusal_for("est__dram_bytes_per_launch")
+    assert r.code is RefusalCode.WINDOW_LAUNCH_UNALIGNED
+    assert "斜率" in r.message
+
+
+def test_normal_load_reports_a_tight_resolution():
+    """正常负载（忙碌段就是 launch 表）时，分辨率必须紧 —— 不许把 [0.9,1.1] 整个算进去。"""
+    samples, spans, base = _session_relative_run()
+    est = estimate(samples, peak_gbs=900.0, window_s=35.0, launches=600,
+                   window_mode="auto", launch_spans=spans, matched_kernel_ns=int(30.0e9))
+    lo, hi = est.launches_in_window_range
+    assert est.launches_in_window is not None
+    assert 100.0 * (hi - lo) / est.launches_in_window < 3.0, (lo, hi)

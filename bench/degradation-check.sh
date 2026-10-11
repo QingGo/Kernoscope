@@ -67,7 +67,7 @@ EOF
 KSC --set basic --packet "$OUT/degraded.packet.json" --screen only -- "${TARGET[@]}" \
     > "$OUT/degraded.onepage.txt" 2> "$OUT/degraded.err"
 rc=$?
-echo "  降级运行退出码 = $rc（验收要求 0）"
+echo "  降级运行退出码 = ${rc}（验收要求 0）"
 "$PY" - "$OUT/degraded.packet.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))

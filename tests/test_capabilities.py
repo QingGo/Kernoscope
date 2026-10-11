@@ -313,3 +313,58 @@ def test_capabilities_brief_can_still_write_the_full_json(capsys, tmp_path):
     assert "answers" in full and "refusals" in full     # 参考层照常落盘
     captured = capsys.readouterr()
     json.loads(captured.out)                            # stdout 仍是纯 JSON
+
+
+# --------------------------------------------------------------------------- #
+# 第五轮 §4.6：入口层预算必须由**代码**执行（真机 1301 B > 1300 的门禁，CI 永远看不到）
+# --------------------------------------------------------------------------- #
+def test_brief_never_exceeds_the_budget_for_any_env():
+    """有效负载无关：任何探测组合都必须 ≤ 预算（真机 1301 B 那次就是"多一点点"）。
+
+    旧实现只在测试里钉 ≤1300：无 GPU 的 CI 永远绿（1058 B），真机红 1 B ——
+    尺寸没有由代码执行，就永远会有"某台机器多 1 B"。
+    """
+    from kernoscope.capabilities import BRIEF_BUDGET_BYTES, _brief_size
+
+    combos = [
+        dict(),
+        dict(has_gpu=True, has_nvml=True),
+        dict(has_gpu=True, has_nvml=True, has_nsys=True, has_ncu=True, has_cubin=True,
+             has_memtrace=True, has_instr_hist=True, has_occupancy_probe=True,
+             has_calibration=True, has_workload=True),
+        dict(has_gpu=True, has_nvml=True, has_nsys=True, has_ncu=True,
+             counter_state="denied"),
+    ]
+    for kw in combos:
+        b = evaluate(Env(**kw)).brief()
+        assert _brief_size(b) <= BRIEF_BUDGET_BYTES, (kw, _brief_size(b))
+
+
+def test_brief_budget_trim_is_ordered_and_recorded():
+    """裁到预算内时必须**留痕**（`trimmed`），且顺序从"最能再生成"的开始。
+
+    与决策包 `cost.trimmed` 同一纪律：读者要知道这是摘要，完整信息在
+    `capabilities --json`。
+    """
+    from kernoscope.capabilities import BRIEF_BUDGET_BYTES, _brief_size, _enforce_brief_budget
+
+    bloated = {
+        "schema_version": 1, "tool": "kernoscope", "tool_version": "0.2.0",
+        "tier": {"level": 3, "name": "instrumented"},
+        "counter_state": "denied",
+        "can_answer": [f"q{i}" for i in range(30)],
+        "weak": [f"w{i}" for i in range(30)],
+        "cannot_answer": [f"n{i}" for i in range(30)],
+        "blocked_by": ["counters_denied"],
+        "blocked_by_unavailable": ["no_nvlink"],
+        "next": [{"code": "c", "unlocks": 1, "cost_kind": "manual",
+                  "cost_s": 600.0, "cmd": "kernoscope " + "x" * 60} for _ in range(4)],
+        "next_layer": {"command": "kernoscope capabilities --json", "bytes": 25800,
+                       "contains": ["refusal_reasons", "remedies", "premises",
+                                    "per_question_state"]},
+    }
+    out = _enforce_brief_budget(bloated)
+    assert _brief_size(out) <= BRIEF_BUDGET_BYTES, _brief_size(out)
+    assert out["trimmed"], out
+    assert out["trimmed"][0] == "next_cmds"
+    assert "can_answer" in out and "cannot_answer" in out      # 三个回答最后才动

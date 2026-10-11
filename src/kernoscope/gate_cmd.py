@@ -12,13 +12,20 @@
 四条判据（都按**可编程的东西**判，不按散文）：
 
   `--require <id>[=<status>]`   判词必须存在，且状态至少是 `status`（默认 `ok`；
-                                 顺序 ok > soft > refused）
+                                 顺序 ok > soft > refused）。`status` 是闭集，写错即用法错误
   `--require-actionable <id>`   判词必须 `actionable=true`（v1.0 包没有这个字段时，
                                  回退到"不是 refused 且列出的前提全部成立"）
-  `--forbid-code <code>`        出现该拒绝码即失败（含判词的 refusal 与 refusals 索引）
-  `--max-metric <name>=<v>` /   报告里的指标必须 ≤ / ≥ 阈值（**只有存在且可引用的指标**
-  `--min-metric <name>=<v>`     才会被比较；unavailable 的指标一律算"不满足"，
-                                 因为"没数"不能当作"通过了"）
+  `--forbid-code <code>`        出现该拒绝码即失败（含判词的 refusal 与 refusals 索引）。
+                                 `code` 必须是 `refusals.py` 闭集成员：拼错的 code 是
+                                 **用法错误（rc=2）**，绝不静默放绿
+  `--max-metric <name>=<v>` /   指标阈值，**逐 kernel** 判（任一个违反即失败）：只要至少一个真
+  `--min-metric <name>=<v>`     kernel 带这个指标，它就是 kernel 级判据 —— 每个真 kernel 都必须
+                                 带、可引用、且达标（缺项 / n/a / 超限都算不合格，并在输出里点名
+                                 是哪个 kernel）。只有 `(device)` 带的指标（如 `ks__cost_per_mtok`）
+                                 按设备级判 `(device)`。**没有数不能当作"通过了"**
+
+判据是"任一个违反即失败"，不是"任一个通过即通过"：门禁被拿去卡 CI，松一格就是绿灯骗人。
+
 
 **不读也不跑测量**：门禁只消费已经产出的包与报告。要新数据就先跑一次采集。
 """
@@ -32,8 +39,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .refusals import RefusalCode
+from .report_md import DEVICE_KERNEL
+
 # 状态强弱顺序：`--require x=soft` 意思是"至少 soft"，因此 ok 也算过。
 _STATUS_RANK = {"ok": 2, "soft": 1, "refused": 0}
+
+# `--forbid-code` 的合法取值 = refusals.py 的 code 闭集（`.value` 是包里出现的字符串）。
+# 拼错的 code 永远不会出现在任何包里 —— 如果当成"没命中"，`--forbid-code counters_denyed`
+# 就会放绿，把一个拼错的规则伪装成"规则通过"。所以未知 code 是用法错误（rc=2）。
+_VALID_CODES: frozenset[str] = frozenset(c.value for c in RefusalCode)
+
+
+def valid_codes() -> list[str]:
+    """闭集里全部合法 code（排序，供用法错误的引导文本使用）。"""
+    return sorted(_VALID_CODES)
+
+
+def _codes_hint() -> str:
+    return "合法 code（refusals.py 闭集）：" + "、".join(valid_codes())
 
 
 @dataclass
@@ -55,10 +79,14 @@ class GateResult:
     failures: list[Failure] = field(default_factory=list)
     checked: list[str] = field(default_factory=list)
     packet_path: str = ""
+    # 规则本身写错（未知 code / 未知 status）→ CLI 按"用法错误"退出（rc=2），
+    # 而不是像"规则不满足"那样退 1：这两种失败对 CI 的含义不同。
+    usage_errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {"passed": self.passed, "packet": self.packet_path,
-                "checked": self.checked, "failures": [f.to_dict() for f in self.failures]}
+                "checked": self.checked, "usage_errors": self.usage_errors,
+                "failures": [f.to_dict() for f in self.failures]}
 
 
 def _verdicts(packet: dict[str, Any]) -> list[dict[str, Any]]:
@@ -80,13 +108,21 @@ def _refusal_codes(packet: dict[str, Any]) -> set[str]:
     return out
 
 
-def _metric_lookup(report: dict[str, Any]) -> dict[str, Any]:
-    """报告 JSON 里的指标名 → metric 对象（跨 kernel/section 全收）。"""
-    out: dict[str, Any] = {}
+def _kernel_metrics(report: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """报告 JSON → [(kernel 名, {指标名: metric 对象}), ...]，**按 kernel 分开**。
+
+    V-2（验收报告第五轮）：旧实现用 `setdefault` 把跨 kernel 的同名指标压成一个映射，
+    于是 `--max-metric`/`--min-metric` 只看**第一个** kernel。报告里只要有第二个 kernel
+    超限，门禁照样放绿 —— 对"拿去卡 CI"的子命令来说这是最坏的失败模式。指标规则因此
+    逐个 kernel 评估，失败的 Failure 里带 `kernel` 字段，输出点名是哪一个。
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
     for k in report.get("kernels") or []:
+        metrics: dict[str, Any] = {}
         for s in k.get("sections") or []:
             for m in s.get("metrics") or []:
-                out.setdefault(str(m.get("name")), m)
+                metrics.setdefault(str(m.get("name")), m)
+        out.append((str(k.get("name") or "?"), metrics))
     return out
 
 
@@ -106,20 +142,74 @@ def _parse_assign(text: str) -> tuple[str, float]:
     return name.strip(), float(raw)
 
 
+def _check_metric_rule(res: GateResult, *, op: str, better: str, name: str,
+                       threshold: float, report: dict[str, Any]) -> None:
+    """一条 max/min 指标规则：对报告里的 kernel **逐个**判定（V-2 的修复）。
+
+    语义（**任一个违反即失败**，绝不是"任一个通过即通过"）：
+
+      * **kernel 级判据**：只要报告里**至少一个真 kernel** 带了这个指标，它就是 kernel 级的
+        —— 那么**每一个**真 kernel 都必须带它、可引用、且达标。缺项、n/a、超限都算不合格：
+        "没数"不是"通过"（沿用旧纪律）。这样第二个 kernel 超限不会再被第一个盖住。
+      * **设备级判据**：如果只有 `(device)` 伪 kernel 带这个指标（例如 `ks__cost_per_mtok`
+        与 NVML 的设备读数），它就是设备级判据，只判 `(device)` —— 真 kernel 天然不带它，
+        不能因此把规则判红（否则 README 里的例子会无脑变红）。
+      * 报告里**任何 kernel 都没有**这个名字 → 不合格（同旧的"报告里没有这个指标"）。
+      * `(device)` 带了 kernel 级指标时也一起比（多一个点名的地方，不是豁免）。
+
+    每条失败都带 `kernel` 字段并在 reason 里点名，用户才知道该去改哪个 kernel。
+    """
+    check = f"{op}-metric {name}"
+    kernels = _kernel_metrics(report)
+    # 有真 kernel 带这个指标 → kernel 级判据：每个真 kernel 都必须带。
+    kernel_scoped = any(name in km for kname, km in kernels if kname != DEVICE_KERNEL)
+    present = False
+    for kname, kmetrics in kernels:
+        m = kmetrics.get(name)
+        if m is None:
+            if kname == DEVICE_KERNEL or not kernel_scoped:
+                continue
+            res.failures.append(Failure(
+                check, f"kernel `{kname}` 没有这个指标：没有数不能当作通过",
+                {"kernel": kname}))
+            res.passed = False
+            continue
+        present = True
+        if m.get("value") is None or m.get("provenance") == "unavailable":
+            res.failures.append(Failure(
+                check, f"kernel `{kname}` 的指标不可用（n/a）：没有数不能当作通过",
+                {"kernel": kname, "refusal": (m.get("refusal") or {}).get("code")}))
+            res.passed = False
+            continue
+        value = float(m["value"])
+        ok = value <= threshold if op == "max" else value >= threshold
+        if not ok:
+            res.failures.append(Failure(
+                check, f"kernel `{kname}` 实测 {value:g} 不满足 {better} {threshold:g}",
+                {"kernel": kname, "value": value, "threshold": threshold,
+                 "provenance": m.get("provenance")}))
+            res.passed = False
+    if not present:
+        res.failures.append(Failure(check, "报告里没有这个指标"))
+        res.passed = False
+
+
 def run_gate(packet: dict[str, Any], *, report: dict[str, Any] | None = None,
              require: list[str] | None = None, require_actionable: list[str] | None = None,
              forbid_codes: list[str] | None = None, max_metric: list[str] | None = None,
              min_metric: list[str] | None = None, packet_path: str = "") -> GateResult:
     """纯函数：跑一遍门禁规则。便于测试，也让「门禁判什么」只有一处实现。"""
     res = GateResult(packet_path=packet_path)
-    metrics = _metric_lookup(report or {})
 
     for spec in require or []:
         vid, _, want = spec.partition("=")
         want = (want or "ok").strip()
         if want not in _STATUS_RANK:
-            res.failures.append(Failure(f"require {vid}",
-                                        f"状态名非法：{want}（可选 ok/soft/refused）"))
+            # status 是闭集：写错是**规则本身**写错（用法错误），不是"规则不满足"。
+            msg = (f"状态名 {want!r} 非法：status 是闭集，可选 "
+                   f"{'/'.join(_STATUS_RANK)}")
+            res.usage_errors.append(f"require {vid.strip()}: {msg}")
+            res.failures.append(Failure(f"require {vid}", msg))
             res.passed = False
             continue
         v = _find_verdict(packet, vid.strip())
@@ -154,6 +244,14 @@ def run_gate(packet: dict[str, Any], *, report: dict[str, Any] | None = None,
     codes = _refusal_codes(packet)
     for code in forbid_codes or []:
         res.checked.append(f"forbid-code {code}")
+        if code not in _VALID_CODES:
+            # 未知 code 永远不会命中任何包：当成"没命中"就会静默放绿一个拼错的规则。
+            msg = (f"{code!r} 不是 refusals.py 闭集里的拒绝码（用法错误：拼错的 code "
+                   f"永远不会命中，静默放绿等于骗人）。{_codes_hint()}")
+            res.usage_errors.append(f"forbid-code {code}: {msg}")
+            res.failures.append(Failure(f"forbid-code {code}", msg))
+            res.passed = False
+            continue
         if code in codes:
             res.failures.append(Failure(f"forbid-code {code}", "出现了被禁止的拒绝码",
                                         {"all_codes": sorted(codes)}))
@@ -168,24 +266,8 @@ def run_gate(packet: dict[str, Any], *, report: dict[str, Any] | None = None,
             res.passed = False
             continue
         res.checked.append(f"{op}-metric {name}")
-        m = metrics.get(name)
-        if m is None:
-            res.failures.append(Failure(f"{op}-metric {name}", "报告里没有这个指标"))
-            res.passed = False
-            continue
-        if m.get("value") is None or m.get("provenance") == "unavailable":
-            res.failures.append(Failure(
-                f"{op}-metric {name}", "指标不可用（n/a）：没有数不等于通过",
-                {"refusal": (m.get("refusal") or {}).get("code")}))
-            res.passed = False
-            continue
-        value = float(m["value"])
-        ok = value <= threshold if op == "max" else value >= threshold
-        if not ok:
-            res.failures.append(Failure(
-                f"{op}-metric {name}", f"实测 {value:g} 不满足 {better} {threshold:g}",
-                {"value": value, "threshold": threshold, "provenance": m.get("provenance")}))
-            res.passed = False
+        _check_metric_rule(res, op=op, better=better, name=name, threshold=threshold,
+                           report=report or {})
 
     if not res.checked:
         res.failures.append(Failure("rules", "一条规则都没给：门禁不会凭空通过（加 --require/"
@@ -219,15 +301,20 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--packet", required=True, help="决策包 JSON（kernoscope --packet 产出）")
     ap.add_argument("--report", default=None, help="完整报告 JSON（--metrics 阈值需要它）")
     ap.add_argument("--require", action="append", default=[], metavar="ID[=STATUS]",
-                    help="判词必须存在且状态至少 STATUS（默认 ok；可选 soft/refused）")
+                    help="判词必须存在且状态至少 STATUS（默认 ok；闭集：ok/soft/refused。"
+                         "写错即用法错误 rc=2）")
     ap.add_argument("--require-actionable", action="append", default=[], metavar="ID",
                     help="判词必须可作为行动依据（actionable=true / 前提全部成立）")
     ap.add_argument("--forbid-code", action="append", default=[], metavar="CODE",
-                    help="出现该拒绝码即失败（可重复）")
+                    help="出现该拒绝码即失败（可重复）。CODE 必须是 refusals.py 闭集成员；"
+                         "未知 code 是用法错误（rc=2），绝不静默放绿")
     ap.add_argument("--max-metric", action="append", default=[], metavar="NAME=VALUE",
-                    help="报告里的指标必须 ≤ 阈值（不可用的指标算不通过）")
+                    help="指标必须 ≤ 阈值，**逐 kernel 判**：只要一个真 kernel 带这个指标，"
+                         "每个真 kernel 都必须带且达标（缺项 / n/a / 超限 → 不通过并点名 "
+                         "kernel）；只有 (device) 带的指标按设备级判 (device)")
     ap.add_argument("--min-metric", action="append", default=[], metavar="NAME=VALUE",
-                    help="报告里的指标必须 ≥ 阈值")
+                    help="指标必须 ≥ 阈值（语义同 --max-metric：逐 kernel 判，任一个违反即"
+                         "不通过并点名 kernel）")
     ap.add_argument("--json", action="store_true", help="机器可读（agent 用这个）")
     return ap
 
@@ -251,6 +338,14 @@ def gate_main(argv: list[str]) -> int:
                    forbid_codes=list(args.forbid_code),
                    max_metric=list(args.max_metric), min_metric=list(args.min_metric),
                    packet_path=str(args.packet))
+    if res.usage_errors:
+        # 规则本身写错（未知 code / 未知 status）：与"文件读不了"同一类用法错误，
+        # 按项目惯例 rc=2 并把可用取值打出来。**绝不退 0**。
+        for msg in res.usage_errors:
+            print(f"error: {msg}", file=sys.stderr)
+        print("hint: 拒绝码是 `refusals.py` 里 RefusalCode 的闭集（上面已列出全部合法取值）；"
+              "别忘了 `--forbid-code` 只吃 `.value`（小写下划线形式）。", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
     else:

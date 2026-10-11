@@ -13,19 +13,40 @@
 | L1/L2 命中率 | **LRU 模型的上界**（`estimated`） | `lts__t_sector_hit_rate.pct` |
 | DRAM 字节/launch | 模型 L2 miss × 32B × 采样放大（`estimated`） | `dram__bytes.sum` |
 
-## NVBit 版本与构建布局（R-72：这两件事必须配对写）
+## NVBit 版本与构建布局（R-72/R-77：版本、布局、构建命令、结论四件事必须配对写）
 
-历史上这里只写了"NVBit 1.8.1"，却让人跑 1.7.x 的 `make -C tools/mem_trace` —— **版本号与
-布局互相矛盾**，照抄的人会失败。可用组合实测如下（都能产出 `tools/build/mem_trace/mem_trace.so`）：
+历史上这里写过"NVBit 1.8.1 是本仓库真机跑通的、1.7.x 也行" —— 第五轮验收报告 V-10 的真机
+A/B 把它推翻了：**同一份 app（`nvcc -O3 -arch=sm_89`，两个 kernel：copy + atomicAdd）、
+同一个环境变量（`NO_EAGER_LOAD=0`）、只换 `mem_trace.so`**，本环境（CUDA 13 + sm_89 +
+驱动 580）**唯一被钉住可用**的组合是 v1.7.7.3 + 老 Makefile：
 
-| NVBit | 构建方式 | 备注 |
-|---|---|---|
-| **v1.8.1** | CMake：`cmake -S tools -B build && cmake --build build --target mem_trace`（或新版 `make --target mem_trace`） | 本仓库真机（CUDA 13 + sm_89 + 驱动 580）跑通的就是这条。⚠ **不要** `make` 整个 `tools`：`mem_trace_tma` 用 `%cluster_ctaid` 要求 sm_90+，会把整棵树带崩；架构变量写**裸数字**（`89`，不是 `sm_89`） |
-| **v1.7.7.3** | 老 Makefile：`make -C $NVBIT_PATH/tools/mem_trace ARCH=sm_89` | 验收报告第四轮在另一台上走通的组合（那台上 1.8.1 的整树 make 失败） |
+| NVBit 版本 | 构建方式（实测过的命令） | 产物布局 | 本环境（CUDA 13 + sm_89 + 驱动 580）结论 |
+|---|---|---|---|
+| **v1.7.7.3** | 老 Makefile：`make -C $NVBIT_PATH/tools/mem_trace ARCH=sm_89` | `tools/mem_trace/mem_trace.so` | ✅ **可用**（真机 A/B：rc=0，6 条 `MEMTRACE` 行 —— `LDG.E.CONSTANT` / `STG.E` / `RED.E.ADD.F32.FTZ.RN.STRONG.GPU`）。本仓库真机钉住的就是这一行 |
+| **v1.8.1** | CMake：`cmake -S tools -B build && cmake --build build --target mem_trace`（在 `$NVBIT_PATH` 下；或新版 `make --target mem_trace`） | `tools/build/mem_trace/mem_trace.so` | ❌ **实测失败**（rc=1，**0 条** `MEMTRACE` 行）：`ERROR file ./src/nvbit_imp.cpp line 735: CUDA_ERROR_INVALID_SOURCE device kernel image is invalid`。⚠ **不要** `make` 整个 `tools`：`mem_trace_tma` 用 `%cluster_ctaid` 要求 sm_90+，会把整棵树带崩；架构变量写**裸数字**（`89`，不是 `sm_89`） |
 
-两条都必须 `NO_EAGER_LOAD=0`（1.8 默认懒加载会让插桩错过时机：程序跑完但零记录）。
-`tests/test_nvbit_smoke.py` 会**按本文件的说明**真采一段轨迹，并把这里写的版本号与
-`$NVBIT_PATH/core/nvbit.h` 里的 `NVBIT_VERSION` 对拍 —— 文档与实物不一致会红。
+> ⚠ **别把"版本号"当可用性凭据。** 同一台机器上还有一份更早的 v1.8.1 CMake 构建
+> （`<workdir>/lab/nvbit_release_x86_64`，2026-10-08 构建）在小负载上出过轨迹 ——
+> **同一个版本号、不同的那份构建，结果不同**。所以本文档钉住的是**组合**
+> （版本 + 构建方式 + 产物布局），本环境唯一实测可用的组合就是上表第一行；
+> 换环境后要改这张表，得先在本机把 A/B 重做一遍（同一份 app、同一 `NO_EAGER_LOAD=0`、只换 `.so`）。
+
+配套的三条事实（都有门禁守着）：
+
+* `collect.sh` **两种布局都找**（`tools/build/mem_trace/mem_trace.so` 与
+  `tools/mem_trace/mem_trace.so`）；显式给了 `NVBIT_PATH`/`NVBIT_MEMTRACE_SO` 却找不到产物时
+  **报错退出**（`exit 2`）并列出**实际找过的路径**，不再"静默跳过"、也不再让你重复指同一个变量。
+* 版本从**实物**里读（别处不许手抄）：`nvbit_version.sh` 先看 `$NVBIT_PATH/core/nvbit.h` 的
+  `NVBIT_VERSION`，退化时看 `.so` 里的整行版本字符串。
+  `bench/artifacts/*/environment.txt` 现在同时记 `nvbit:`（路径）与 `nvbit_version:`（版本）
+  —— 这一整节的结论就建立在版本上，只记路径等于没记。
+* `tests/test_nvbit_smoke.py` 把本文件的矩阵**解析成结构化行**，与测试内写死的实测结论逐格比对
+  （版本 ↔ 构建命令 ↔ 布局 ↔ 结论），并**按本文件的说明真采一段轨迹**。把 v1.8.1 那行的命令换回
+  实测失败的老 Makefile 写法、把两行的结论对调、或删掉任一候选路径，门禁都会红；本机完全没有
+  NVBit 时文档/候选路径那两层仍然跑（不 skip）。
+
+两条都必须 `NO_EAGER_LOAD=0` —— **它是所有版本的前提**（1.8 起默认懒加载会让插桩错过时机：
+程序跑完但零记录）。看到 0 条记录先查它，再查版本与布局是否配对。
 
 ## 依赖与许可
 
@@ -91,8 +112,10 @@ NVBIT_MEMTRACE_SO=/path/to/mem_trace.so KS_MEMTRACE_OUT=t.txt ./collect.sh -- ./
 kernoscope memtrace --from t.txt --sm-count 128 --l2-bytes 75497472 --kernel <子串>
 ```
 
-`collect.sh` 会在 `$NVBIT_PATH/tools/build/mem_trace/mem_trace.so` 里自动找官方工具
-（也可以直接给 `NVBIT_MEMTRACE_SO`）；`kernoscope memtrace` 缺 `--l2-bytes` 时会取本机 L2 容量。
+`collect.sh` 会在 `$NVBIT_PATH` 下**按两种布局**自动找官方工具
+（`tools/mem_trace/mem_trace.so`、`tools/build/mem_trace/mem_trace.so`，见上面的版本矩阵；
+也可以直接给 `NVBIT_MEMTRACE_SO`）；两处都没有时它会列出**实际找过的路径**并以 `exit 2` 退出。
+`kernoscope memtrace` 缺 `--l2-bytes` 时会取本机 L2 容量。
 报告路径同样吃官方输出（`--ks-memtrace <file>`，自动判别格式），
 缓存模型的访问上限用 `--ks-max-accesses` 调（超限时**拒绝**给 DRAM 字节而不是给偏小的值）。
 

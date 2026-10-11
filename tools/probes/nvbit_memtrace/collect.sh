@@ -5,35 +5,79 @@
 #   NVBIT_MEMTRACE_SO=/path/to/mem_trace.so KS_MEMTRACE_OUT=t.txt \
 #       ./collect.sh -- ./your_app args
 #
-# 工具选择与版本（R-72：以前这里把"布局"和"版本号"写成了互相矛盾的一对）：
-#   * 本仓库实测**可用**的组合：NVBit **1.8.1** + CMake 构建（`cmake --build … --target mem_trace`
-#     或新版 `make --target mem_trace`）→ `tools/build/mem_trace/mem_trace.so`（本脚本的默认路径）。
+# 工具选择与版本（R-72/R-77：版本、布局、构建命令、结论四件事必须配对；见同目录 README.md）：
+#   * 本仓库真机（CUDA 13 + sm_89 + 驱动 580）**实测可用**的是 NVBit **v1.7.7.3** + 老 Makefile：
+#     `make -C $NVBIT_PATH/tools/mem_trace ARCH=sm_89` → `tools/mem_trace/mem_trace.so`。
+#     真机 A/B：rc=0，6 条 MEMTRACE 行。
+#   * NVBit **v1.8.1** + CMake（`cmake --build … --target mem_trace`）→
+#     `tools/build/mem_trace/mem_trace.so`，在本环境**实测失败**：rc=1、0 条 MEMTRACE 行，
+#     `ERROR file ./src/nvbit_imp.cpp line 735: CUDA_ERROR_INVALID_SOURCE device kernel image is invalid`。
 #     注意 1.8.1 里**不要** `make` 整个 tools：`mem_trace_tma` 用 `%cluster_ctaid` 要求 sm_90+，
 #     会把整棵树带崩；架构变量要**裸数字**（写 `89`，不是 `sm_89`）。
-#   * 另一条实测可用的组合：NVBit **v1.7.7.3** + 老 Makefile 布局
-#     （`make -C $NVBIT_PATH/tools/mem_trace ARCH=sm_89`，产出 tools/build/mem_trace/mem_trace.so）。
-#     验收报告第四轮在那台上是这么跑通的（1.8.1 的整树 make 会失败）。
-#   * 两条都要求 `NO_EAGER_LOAD=0`：1.8 默认懒加载会让插桩错过时机（程序跑完但零记录）。
+#   * 两条都要求 `NO_EAGER_LOAD=0`：1.8 起默认懒加载会让插桩错过时机（程序跑完但零记录）。
 # 官方工具产出的是"一行 = 一条 warp 访存指令 + 全部 lane 地址"，粒度刚好够用。
 #
-# ⚠️ 必须 NO_EAGER_LOAD=0：NVBit 1.8 默认懒加载模块，会让插桩错过时机，
-#    表现为"程序正常跑完但一条记录都没有"。
+# 自动发现：$NVBIT_PATH 下的**两种布局都要找**（旧版把同一行写了两遍，
+# 于是 v1.7.7.3 的 `tools/mem_trace/` 永远没人找 —— 显式指了那棵树还静默跳过）。
 set -euo pipefail
 
-# 自动发现官方工具：$NVBIT_PATH/tools/build/mem_trace/mem_trace.so（NVBit 自带的示例）
-if [ -z "${NVBIT_MEMTRACE_SO:-}" ] && [ -n "${NVBIT_PATH:-}" ]; then
-  for cand in "$NVBIT_PATH/tools/build/mem_trace/mem_trace.so" \
-              "$NVBIT_PATH/tools/build/mem_trace/mem_trace.so" \
-              "$NVBIT_PATH/tools/build/mem_trace/*.so"; do
+# 实测过的两种产物布局（顺序：先新后旧；两份都必须真的出现在这个列表里）
+CANDIDATES=()
+if [ -n "${NVBIT_PATH:-}" ]; then
+  CANDIDATES=("$NVBIT_PATH/tools/build/mem_trace/mem_trace.so" \
+              "$NVBIT_PATH/tools/mem_trace/mem_trace.so")
+fi
+
+if [ -z "${NVBIT_MEMTRACE_SO:-}" ] && [ "${#CANDIDATES[@]}" -gt 0 ]; then
+  for cand in "${CANDIDATES[@]}"; do
     if [ -f "$cand" ]; then NVBIT_MEMTRACE_SO="$cand"; break; fi
   done
+  # 还认这两个目录里其它名字的官方工具（`mem_trace_*.so`）
+  if [ -z "${NVBIT_MEMTRACE_SO:-}" ]; then
+    for cand in "$NVBIT_PATH/tools/build/mem_trace/"*.so "$NVBIT_PATH/tools/mem_trace/"*.so; do
+      if [ -f "$cand" ]; then NVBIT_MEMTRACE_SO="$cand"; break; fi
+    done
+  fi
 fi
-: "${NVBIT_MEMTRACE_SO:?请设置 NVBIT_MEMTRACE_SO=/path/to/mem_trace.so，或用 NVBIT_PATH 指向 NVBit 安装目录（工具需自行构建）}"
+
+if [ -z "${NVBIT_MEMTRACE_SO:-}" ]; then
+  if [ "${#CANDIDATES[@]}" -gt 0 ]; then
+    # 显式指了 NVBIT_PATH：这不是"没装"，是"你指的这棵树里没有构建产物" ——
+    # 报错必须说清这一点（而不是再让人指一遍同一个变量），并列出**实际找过的路径**。
+    {
+      echo "！NVBIT_PATH=$NVBIT_PATH 这棵树里没有构建产物（NVBit 自带的示例工具需要自己构建）。"
+      echo "  实际找过的路径："
+      for cand in "${CANDIDATES[@]}"; do echo "    - $cand"; done
+      echo "  两种布局分别属于哪个版本（详见 tools/probes/nvbit_memtrace/README.md）："
+      echo "    * NVBit v1.7.7.3（老 Makefile，**本环境实测可用**）："
+      echo "        make -C \$NVBIT_PATH/tools/mem_trace ARCH=sm_89   → tools/mem_trace/mem_trace.so"
+      echo "    * NVBit v1.8.1（CMake，本环境实测失败 CUDA_ERROR_INVALID_SOURCE）："
+      echo "        cmake -S \$NVBIT_PATH/tools -B \$NVBIT_PATH/tools/build &&" \
+           "cmake --build \$NVBIT_PATH/tools/build --target mem_trace" \
+           "→ tools/build/mem_trace/mem_trace.so"
+      echo "  手上已经有构建好的 .so 时，直接 NVBIT_MEMTRACE_SO=/path/to/mem_trace.so 指过去。"
+    } >&2
+  else
+    {
+      echo "！没有可用的 mem_trace.so：请设置 NVBIT_MEMTRACE_SO=/path/to/mem_trace.so，" \
+           "或用 NVBIT_PATH 指向 NVBit 安装树（示例工具需自行构建）。"
+      echo "  也可以把构建好的 .so 放到 $(dirname "${BASH_SOURCE[0]}")/ 下。"
+    } >&2
+  fi
+  exit 2
+fi
 if [ ! -f "$NVBIT_MEMTRACE_SO" ]; then
   echo "！NVBIT_MEMTRACE_SO 指向的文件不存在: $NVBIT_MEMTRACE_SO" >&2
-  echo "  构建官方工具（在 NVBit 目录下）：" >&2
-  echo "    make -C tools/mem_trace    # 产出 tools/build/mem_trace/mem_trace.so" >&2
+  echo "  两种布局的构建命令见 tools/probes/nvbit_memtrace/README.md" >&2
   exit 2
+fi
+
+# 用了哪份产物、它是哪个版本 —— 版本从实物读（不手抄），采集记录里能对得上。
+NV_V="$(bash "$(dirname "${BASH_SOURCE[0]}")/nvbit_version.sh" "$NVBIT_MEMTRACE_SO" 2>/dev/null || true)"
+if [ -n "${NV_V:-}" ]; then
+  echo "工具: ${NVBIT_MEMTRACE_SO}（NVBit ${NV_V}）"
+else
+  echo "工具: ${NVBIT_MEMTRACE_SO}（NVBit 版本读不出：core/nvbit.h 与 .so 字符串里都没有）"
 fi
 # 工具"发现"了还不够：NVBit 的官方 mem_trace 在启动时直接 `exec` `cuobjdump`，
 # 而它按 **PATH** 找 —— 租用机上 CUDA 常常装了但不在 PATH（本机就是：nvcc/cuobjdump 都在
@@ -82,7 +126,7 @@ if [ -n "${FREE_MB:-}" ]; then
   fi
 fi
 
-echo "采集 → $OUT（NO_EAGER_LOAD=0；上限 ${MAX_MB} MiB，超出即截断且**不会**写结束标记）"
+echo "采集 → ${OUT}（NO_EAGER_LOAD=0；上限 ${MAX_MB} MiB，超出即截断且**不会**写结束标记）"
 set +e
 ulimit -f $((MAX_MB * 1024)) 2>/dev/null || true     # 512B 块：MAX_MB MiB
 NO_EAGER_LOAD=0 \
@@ -99,7 +143,7 @@ if [ "$RC" -ne 0 ] && [ "$(stat -c%s "$OUT" 2>/dev/null || echo 0)" -ge $((MAX_M
   echo "  请缩小负载/只让被测 kernel 进轨迹，或提高 KS_MEMTRACE_MAX_MB 后重采。" >&2
 fi
 if [ "$RC" -ne 0 ]; then
-  echo "！被测程序没跑成功（退出码 $RC）—— 先看 $OUT 的末尾几行：" >&2
+  echo "！被测程序没跑成功（退出码 ${RC}）—— 先看 $OUT 的末尾几行：" >&2
   tail -5 "$OUT" >&2
   exit "$RC"
 fi

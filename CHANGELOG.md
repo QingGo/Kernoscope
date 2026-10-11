@@ -5,6 +5,96 @@
 
 ## Unreleased
 
+第五轮验收报告（`study/mimo-rl-study/Kernoscope验收报告-第五轮.md`，基线 `01f650b`）的修复。
+**其中若干条会改变外部消费者看到的东西**，逐条列在下面。
+
+### 结论不许静默消失（V-1，P0）
+
+- 预算裁剪的顺序改成"**先裁拒绝散文、最后裁判词**"（旧顺序与函数自己的 docstring 相反：
+  真机 9 条判词 → 包 6 条，被删的正是 `occupancy`/`roofline`/`over_peak`，
+  而 8 条拒绝的处置散文一条不少）。
+- 预算裁掉的判词 id **并入 `verdicts_more.ids`**（`count` 是 `MAX_VERDICTS` 截断与预算截断之和）：
+  一个判词要么在包里，要么在 `verdicts_more` 里，没有第三种下场。
+  新增 4 条测试钉住（顺序、留痕、`facts` 两级裁剪的分界、`verdicts_more` 计数）。
+
+### `gate` 静默放绿（V-2/V-3，P0）
+
+- `--max-metric`/`--min-metric` 改为**逐 kernel** 判：只要一个真 kernel 带该指标，
+  每个真 kernel 都必须带且达标；缺项 / `n/a` / 超限 → 不通过，并**点名 kernel**。
+  只有 `(device)` 伪 kernel 带的指标（如 `ks__cost_per_mtok`）按设备级判。
+- `--forbid-code` 与 `--require` 的取值限定为闭集（`refusals.py` 的 `RefusalCode` / `ok,soft,refused`）：
+  拼错 ⇒ **用法错误 rc=2** 并打印合法取值；不再"拼错就等于没开"。
+
+### 口径正确性（V-5/V-6/V-7/V-8/V-9/V-31）
+
+- **全局原子算全局访存（R-78）**：`RED.E.ADD…`/`ATOMG`/`REDG`/`CAS`（含 `.STRONG.GPU`）
+  进入全局口径；`ATOMS`/`REDS`/`.SHARED`/`.LOCAL` 不进。修前真机原子 kernel
+  （256 条 `RED.E.ADD.F32.FTZ.RN.STRONG.GPU`）拿到的是「全局记录 0/256、`sectors/request`
+  `0.0 [measured]`、DRAM 拒绝理由甩锅"缺 l2_bytes"（而用户给了 `--l2-bytes`）」；
+  修后与验收方独立重算逐项一致：**256/256、32.0、12.5%、0.262 MB、262,144 B**。
+  同时：`records_global == 0` 时全局口径一族输出 `unavailable` + `code=`（**0 不是测到 0**）；
+  拒绝理由逐条列出真正不成立的前提；`memtrace` 的 CLI/JSON/主报告都不再静默跳过拒绝行。
+  自带探针 `tools/probes/nvbit_memtrace/memtrace.cu` 的 `is_dram_relevant()` 同步收进全局原子
+  （否则纯原子 kernel 采出 0 条记录）。
+- **判词绑定到 kernel（V-6）**：`roofline`/`over_peak` 改为按 kernel 取值并在 `facts` 里点名
+  kernel —— 一个便宜 kernel 的超峰不再把另一个 kernel 合法的 91% roofline 判成 refused。
+- **窗口分母（V-7）**：分母（窗口内等效 launch 数）与"窗口是否被裁"**无关**，始终按时间重叠加权；
+  旧实现未裁窗口时直接除以整段 launch 数（采样 20 s / launch 表 40 s ⇒ per-launch 静默偏小 50%、
+  `attributable=True`、无告警，而 `window_launch_unaligned` 永不可达）。现在这类情况**拒绝给数**。
+- **对齐必须用锚点（V-8）**：launch 表"看起来落在窗口附近"不再被当成同源时钟；有忙碌锚点就用它对齐。
+  分母的区间从"锚点 ±1 采样周期 + 锚点推出的斜率容差"给出；若斜率离 1 超出锚点能解释的范围
+  （忙碌段里混了不在 launch 表里的工作，例如 memcpy），**拒绝**而不是报一个不成立的窄区间。
+- **偏差口径（V-31）**：`window_bias_pct` 的分母改成 **launch 表跨度**（旧实现用进程 wall，
+  会报出并不存在的偏差）。
+- **`.ncu-rep` 单位换算的安全带（V-9）**：换算系数只在"我们的单位确实是 `from_units` 里那个"时成立；
+  单位不符 ⇒ 该行**不写**（并进"因命名空间/单位规则未写入"清单），`convert()` 直接抛
+  `UnitMismatch` 兜底。旧实现无条件 ×10⁶，上游哪天改成 ns 就会静默写出 1000× 的数。
+
+### 文档不实与门禁自我满足（V-10…V-13、V-19/V-20/V-21、§4.6）
+
+- **NVBit 版本矩阵**：按真机 A/B 更正为"本环境（CUDA 13 + sm_89 + 驱动 580）唯一实测可用的
+  是 **v1.7.7.3 + 老 Makefile**（产物 `tools/mem_trace/`）；按文档 CMake 命令构建的 v1.8.1
+  实测失败（rc=1、0 条记录、`CUDA_ERROR_INVALID_SOURCE`）"。`collect.sh` 两种布局都找、
+  删掉重复候选、显式指了路径却找不到产物 ⇒ `exit 2` + 实际找过的路径清单；
+  版本从实物读（`nvbit_version.sh`）并记进 `environment.txt` 的 `nvbit_version:`。
+  门禁改为**结构化矩阵比对**（旧版是"版本号字符串在文档里出现过"，被注释满足）。
+- **`--page details` 的口径**：署名散文不再宣称会渲染表格行（真 ncu 只出节标题 + 规则文本）；
+  旁路署名里"因命名空间未写入"的例子改成真的会被丢弃的名字（`gpu__local_mem_per_thread` 类），
+  不再拿已经写进去的 `gpu__time_duration.sum` 当例子（V-11/V-12）。
+- **处方命令（V-13）**：`no_occupancy_probe` 的 `kernoscope occupancy --records … -o occ.json`
+  被真解析器拒绝，改为 `--from … --write-json …`；新增 `tests/test_remedy_commands.py`：
+  把 `refusals.py` 全部 28 条 kernoscope 处方逐条交给真解析器（+ AST 扫全 `src/` 的
+  `Remedy(command=…)` 共 32 条），并重跑受影响的生成物（参考层文档、评测材料、入库产物）。
+- **门禁自我满足**：
+  - CI 门禁改为解析工作流里的 **`run:` 步骤**（注释里的命令不算）——旧实现整文件子串匹配，
+    把真步骤换成 no-op、只在注释里留一句命令照样全绿（V-19）；
+  - `bench/artifacts/README.md` 的「现行/历史」标签现在由 `_newest()` 推导并门禁校验
+    （有且仅有最新产物是"现行"）；顺带修掉两份产物标签对调的错（V-20）；
+  - `by_namespace` 分支补了正向测试：把 `select_metrics` 的过滤去掉 ⇒ 测试必红（V-21）。
+- **入口层预算（§4.6 真机专属失败）**：`capabilities --brief` 在有 GPU 的机器上是 1301 B >
+  1300 的门禁（CI 无 CUDA 永远看不到）。现在**由代码执行预算**：超了就按有序步骤裁剪
+  （命令字符串 → 不可行依赖 → 弱项 → 列表尾部），并把步骤名记进 `trimmed`。
+  另修 `tests/test_toolchain.py` 的三条"只在工具不在 PATH 的机器上才绿"的用例
+  （显式屏蔽 PATH 命中，并新增一条钉住文档契约"PATH 优先"）。
+- 顺修脚本层 `$VAR（中文括号` 展开（非 UTF-8 locale 下 `unbound variable`）：
+  `collect.sh` / `bench/run.sh` / `bench/degradation-check.sh` / `remedy.sh`。
+
+### 新增能力：窗口的环境证据
+
+- `meas__sm_clock_p50_mhz`（只在**活跃**采样点上统计时钟驻留，含空闲点中位数同时给出）、
+  `meas__throttle_limited_pct`（降频位图，空闲位不算受限，未知位照实写 `bitN`，
+  驱动只给 Active 时记 `unspecified`）、`meas__gpu_idle_pct`、`meas__other_procs_on_gpu`
+  （同卡其他计算进程，排除我们自己拉起的负载进程树）。
+- 决策包新增前提 `env_gpu_exclusive` / `env_gpu_busy_pct` / `env_no_throttle_pct`：
+  环境不干净时 `cost_per_token` 自动降级，而不是假装独占。
+
+### 逆向政策
+
+- 从"不逆向"改为"**逆向允许、冒充计数器语义不允许**"：可以用没有文档的面（驱动位图、
+  NVML/nvidia-smi 查询面、各家工具输出格式）与通用逆向工具（形如 REA 的本地分析桥）；
+  边界在发布出去的值上 —— 同源量按 ncu 的单位与语义写、代理量只留自有命名空间、每份文件带署名。
+
+
 ### 导出的 `.ncu-rep`：同源行改用 ncu 的单位/标签，并让 `--page details` 显示出来
 
 - **会改变外部消费者看到的东西**：`gpu__time_duration.sum` 现在**会**写进导出文件，
@@ -62,10 +152,11 @@
 - `capabilities --brief` 的 `next_layer.bytes` 现在等于**它自己命名的那个命令的真实输出
   字节数**（以前用紧凑序列化算，低估 35%）；新增 `blocked_by_unavailable`。
 - `capabilities --json` 的输出不再多一个换行。
-- 文档命令门禁：**全部**可检命令（当前 34 条）都交给**真实解析器**（7 个子命令各有自己的
+- 文档命令门禁：**全部**可检命令（当前 59 条）都交给**真实解析器**（10 个子命令各有自己的
   `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
-  其中**读者面 9 条**逐字执行并断言结论（比例 9/34，不是"每条都断言"）。
+  其中**读者面 11 条**逐字执行并断言结论（比例 11/59，不是"每条都断言"）。
+  注：这三个数字随代码走动，若与 `tests/test_documented_commands.py` 的断言不一致，以测试为准。
 
 ### 访存轨迹口径（NVBit）
 
@@ -84,9 +175,13 @@
   （`yes`/`no`/`unknown`）；`collect.sh` 追加 `KS-TRACE-COMPLETE` 哨兵（官方格式没有结束标记，
   被 `ulimit`/磁盘截断时察觉不到，报告里两次因此拿到低于物理下界的数）；结尾不是换行一律按
   截断处理；**协议哈希新增 `memtrace` 身份**（文件名 + 指纹），换了轨迹不再被当成同协议。
-- 依赖说明（`tools/probes/nvbit_memtrace/README.md` + `collect.sh`）改成**版本×构建矩阵**：
-  v1.8.1 走 CMake（本仓库真机验证）、v1.7.7.3 走老 Makefile（第四轮真机验证），
-  并写明"不要 make 整个 tools / 架构变量用裸数字 / 必须 NO_EAGER_LOAD=0"。
+- 依赖说明（`tools/probes/nvbit_memtrace/README.md` + `collect.sh`）改成**版本×构建矩阵**。
+  ~~v1.8.1 走 CMake（本仓库真机验证）~~ —— **按第五轮验收报告 V-10 的真机 A/B 更正**：
+  本环境（CUDA 13 + sm_89 + 驱动 580）唯一实测可用的是 **v1.7.7.3 + 老 Makefile**
+  （产物在 `tools/mem_trace/mem_trace.so`）；按文档 CMake 命令构建的 v1.8.1 实测失败
+  （rc=1、0 条记录、`CUDA_ERROR_INVALID_SOURCE device kernel image is invalid`）。
+  原句"v1.8.1 真机验证"不实，已删；另写明"不要 make 整个 tools / 架构变量用裸数字 /
+  必须 NO_EAGER_LOAD=0 / 别把版本号当可用性凭据（同版本不同构建结果可以不同）"。
   新增 `tests/test_nvbit_smoke.py`：按文档真采一段轨迹并核对版本号（无 NVBit 时跳过）。
 
 ### 测量口径（重要）
@@ -263,7 +358,9 @@
 
 ### 输出与案件目录（C5）
 
-- 一屏（`--screen only`，`-o` 时也落 `*.onepage.txt`）改为**三段式**，段落标题固定可解析：
+- 一屏（`--screen only`）改为**三段式**，段落标题固定可解析：
+  （**更正**：早期条目写过"`-o` 时也落 `*.onepage.txt`"，但仓库里从来没有这个写入点 ——
+  一屏只走 stdout/`--screen`；要文件请重定向或看决策包/报告。）
   `结论：` 一行 → `-- 发现（判词与前提）--` → `-- 路径（下一步，按挡住决策的程度排序）--`
   → `本次代价：`。「路径」段的排序是确定的：**先列被拒的判词**（它们挡住了决策），
   再列成立判词自带的提示，最后列未测到的组；同一 code/提示只出现一次。

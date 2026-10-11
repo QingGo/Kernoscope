@@ -103,7 +103,8 @@ class DramEstimate:
     launch_align_slope: float | None = None      # 两个时钟的速率比（自检：接近 1 才可信）
     launches_in_window_range: tuple[float, float] | None = None  # offset ±1 采样周期的计数区间
     launch_spans_mapped: list[tuple[float, float]] | None = None  # 对齐到采样时钟后的区间（内部用）
-    window_bias_pct: float | None = None    # 100×(window_used_s/window_s − 1)，可算的偏差估计
+    # 100×(window_used_s/launch_span_s − 1)：把窗口积分除以整段 launch 数会偏小多少
+    window_bias_pct: float | None = None
     # ---- R-46：窗口主导性（per-launch 归因的第二个前提）----
     # 被匹配 kernel 的 GPU 时间（ns，来自 CUPTI 的逐 launch 时长求和）。
     # 分母是**参与积分的窗口长度** window_used_s。窗口被 --ks-window auto 裁短时，
@@ -367,6 +368,15 @@ class DramEstimate:
             elif self.launch_align_slope is not None and not 0.9 <= self.launch_align_slope <= 1.1:
                 why = (f"launch 时间戳与采样时钟的**速率比 {self.launch_align_slope:.3f}**"
                        f"（应当≈1）：两者不同源或被缩放，不能相除")
+            elif (self.launch_align_slope is not None and self.launch_align_slope_tol
+                  and abs(self.launch_align_slope - 1.0) > max(
+                      3.0 * self.launch_align_slope_tol, 0.02)):
+                # V-8：斜率在 [0.9,1.1] 里，但超出"锚点不确定度"能解释的范围 ⇒
+                # 忙碌段里混了不在 launch 表里的工作（memcpy/别的 kernel），分母不可信
+                why = (f"忙碌段与 launch 表覆盖的**工作不一致**（对齐斜率 "
+                       f"{self.launch_align_slope:.3f}，锚点能解释 ±"
+                       f"{self.launch_align_slope_tol * 100:.2f}%）：映射被整体缩放，"
+                       f"per-launch 的误差无法用锚点那点量级界定")
             else:
                 why = "launch 时间戳与采样时钟对不上，且无法用忙碌段推出偏移"
             bias = self.window_bias_pct
@@ -376,8 +386,10 @@ class DramEstimate:
                 RefusalCode.WINDOW_LAUNCH_UNALIGNED,
                 f"窗口被裁过，而窗口内的 launch 数算不出来（{why}）：per-launch 的分子是"
                 f"窗口内字节、分母必须是**同一个窗口内**的 launch 数，否则整个数字等比偏小。"
-                f"{est_bias}改用 --ks-window full 让两者同覆盖，或走整窗口口径"
-                f"（--ks-ledger-total-mb）/ 轨迹口径（--ks-memtrace）—— 后两条不需要这个分母",
+                f"{est_bias}两个可走的替代口径：整窗口口径（--ks-ledger-total-mb 对拍总量）"
+                f"或轨迹口径（--ks-memtrace，只测被追踪的 kernel）—— 它们都不需要这个分母；"
+                f"要让 per-launch 口径成立，得让**采样窗口覆盖整段运行**并给出逐 launch 时间戳"
+                f"（--ks-sqlite），而不是把窗口切来切去",
                 observed={"launches_total": self.launches_total,
                           "launches_in_window": None,
                           "window_used_s": round(self.window_used_s, 2),
@@ -732,12 +744,16 @@ def _launches_in_window(spans: Sequence[tuple[float, float]] | None,
     if t0 is None or t1 is None or sample_t0 is None or sample_t1 is None:
         return None, None, None, None
     lo_ok, hi_ok = sample_t0 - tol, sample_t1 + tol
-    if all(lo_ok <= a and b <= hi_ok for a, b in spans):
-        if not any(b >= sample_t0 and a <= sample_t1 for a, b in spans):
-            return None, False, None, None, None
-        return _count_in_window(spans, t0, t1), True, 0.0, 1.0, list(spans)
     if busy_lo is None or busy_hi is None or busy_hi - busy_lo <= 0:
+        # 没有忙碌锚点（整段都闲着）：只能相信两个时钟同源 —— 而且必须是"落在窗口附近"才信。
+        if all(lo_ok <= a and b <= hi_ok for a, b in spans) and any(
+                b >= sample_t0 and a <= sample_t1 for a, b in spans):
+            return _count_in_window(spans, t0, t1), True, 0.0, 1.0, list(spans)
         return None, False, None, None, None
+    # V-7：**有锚点就必须用它对齐**（哪怕 launch 表看起来"落在窗口附近"）。旧实现先用
+    # `±tol` 判"在窗口附近"就直接按同源处理，于是"launch 表整体平移 1 s"这种真实的
+    # 偏移 1 s 会被静默接受：计数变成部分重叠（真机夹具里 5 个 launch 数成 2.92 个），
+    # per-launch 随之偏大 64%。对齐与否必须由锚点算出来，而不是由"看起来差不多"决定。
     l_lo = min(a for a, _ in spans)
     l_hi = max(b for _, b in spans)
     if l_hi - l_lo <= 0:
@@ -857,34 +873,70 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     # 忙碌 = 有 kernel 在跑，所以它与（整段运行的）launch 表覆盖同一段物理时间。
     busy_lo = raw_busy_ts[0] if raw_busy_ts else None
     busy_hi = (raw_busy_ts[-1] + default_dt) if raw_busy_ts else None
-    # 可算的偏差估计：窗口被裁掉多少，per-launch 就会等比偏小多少（R-47 要报这个数）
-    if window_s and window_s > 0:
+    # 可算的偏差估计（R-47 / V-31）：**分母是 launch 表的跨度**，不是进程 wall。
+    # 语义 = "把窗口积分除以整段 launch 数会偏小多少"；两者相等时是 0%（真机 v3-only 的
+    # +0% 就是这一条），而旧实现在未裁窗口时会拿 wall 当分母报出一个不存在的偏差。
+    launch_span_s = 0.0
+    if launch_spans:
+        launch_span_s = max(b for _, b in launch_spans) - min(a for a, _ in launch_spans)
+    if launch_span_s > 0:
+        est.window_bias_pct = 100.0 * (total_time / launch_span_s - 1.0)
+    elif window_s and window_s > 0:
         est.window_bias_pct = 100.0 * (total_time / window_s - 1.0)
-    if window_cut:
-        # 分母必须落在窗口内。窗口内的等效 launch 数按时间重叠加权（跨边界的 launch
-        # 只算它落在窗口里的那一段），否则分子是窗口内字节、分母是整段 launch 数。
-        tol_s = max(5.0 * default_dt, 1.0)
-        (est.launches_in_window, est.launch_clock_aligned,
-         est.launch_align_offset_s, est.launch_align_slope, mapped_spans) = _launches_in_window(
-            launch_spans, est.window_t0, est.window_t1,
-            sample_t0, sample_t1, busy_lo, busy_hi, tol=tol_s)
-        est.launch_spans_mapped = mapped_spans
-        if est.launches_in_window is not None and est.launches_in_window > 0:
-            est.bytes_per_launch = est.bytes_total / est.launches_in_window
-            # 分母的分辨率：锚点（首个忙碌采样点）的精度是 ±1 个采样周期，
-            # 据此把整个对齐后的 launch 表左右各挪一周期，给出计数的区间。
-            if mapped_spans:
-                def _shifted(d: float) -> list[tuple[float, float]]:
-                    return [(a + d, b + d) for a, b in mapped_spans]
 
-                a = _count_in_window(_shifted(-default_dt), est.window_t0, est.window_t1)
-                b = _count_in_window(_shifted(+default_dt), est.window_t0, est.window_t1)
-                # 区间必须**包住**中点估计（偏移挪前/挪后各算一次，谁大谁小取决于窗口边界）
-                est.launches_in_window_range = (round(min(a, b), 2), round(max(a, b), 2))
-        if est.launches_in_window is not None and est.launches_in_window > 0:
-            est.bytes_per_launch = est.bytes_total / est.launches_in_window
-    elif launches > 0:
-        # 窗口没被裁：分子与分母都覆盖整段运行，直接用整段 launch 数
+    # 分母的口径与"窗口是否被裁"**无关**（第五轮 V-7）：分子始终是参与积分那段窗口里的字节，
+    # 分母就必须是那段窗口里的等效 launch 数（按时间重叠加权，跨边界的 launch 只算窗口内那一段）。
+    # 旧实现只在 window_cut 时这么做，未裁窗口时直接除以**整段 launch 数** —— 采样 20 s、
+    # launch 表 40 s 时 per-launch 会静默偏小 50%（attributable 还是 True、无告警），
+    # 而 `window_launch_unaligned` 在这条路径上永不可达。
+    tol_s = max(5.0 * default_dt, 1.0)
+    (est.launches_in_window, est.launch_clock_aligned,
+     est.launch_align_offset_s, est.launch_align_slope, mapped_spans) = _launches_in_window(
+        launch_spans, est.window_t0, est.window_t1,
+        sample_t0, sample_t1, busy_lo, busy_hi, tol=tol_s)
+    est.launch_spans_mapped = mapped_spans
+    if est.launches_in_window is not None and est.launches_in_window > 0:
+        est.bytes_per_launch = est.bytes_total / est.launches_in_window
+        # 分母的分辨率：锚点（首个忙碌采样点）的精度是 ±1 个采样周期，
+        # 据此把整个对齐后的 launch 表左右各挪一周期，给出计数的区间。
+        if mapped_spans:
+            # 分母的分辨率必须**真的是误差上界**（第五轮 V-8）。旧实现只按"锚点 ±1 个采样
+            # 周期"平移，报出来的区间很窄（真机构造：0.85%），而真值偏了 8.3% —— 因为
+            # 斜率只被限制在 [0.9, 1.1]：忙碌段与 launch 表覆盖的**工作**不一致时（例如窗口
+            # 里先跑了一段 memcpy，它让忙碌段变长但不在匹配 kernel 的表里），映射整体缩放，
+            # 计数会差几个百分点。所以区间要把斜率容差也算进去。
+            anchor = min(a for a, _ in mapped_spans)
+            slope = est.launch_align_slope or 1.0
+            # 斜率的不确定度来自锚点：忙碌段两端各有一个采样周期的相位不确定
+            # ⇒ Δslope ≈ 2·dt / 忙碌段长度。用**这个**当容差，而不是把 [0.9,1.1] 整个算进去，
+            # 否则正常负载（slope=1.000）也会报出 ±10% 的区间，读者会以为分辨率很差。
+            busy_len = max(b for _, b in mapped_spans) - anchor
+            slope_tol = (2.0 * default_dt / busy_len) if busy_len > 0 else 0.05
+            slope_tol = min(0.1, max(slope_tol, 0.002))
+            est.launch_align_slope_tol = slope_tol
+            # V-8：斜率离 1 超过"锚点能解释的范围"⇒ 忙碌段里混了不在 launch 表里的工作
+            # （例如窗口里先跑了一段 memcpy）。这时映射整体被缩放，per-launch 的误差
+            # 不是锚点那点量级（真机构造：报 0.85% 而真值偏 8.3%），所以拒绝给这个数。
+            if abs(slope - 1.0) > max(3.0 * slope_tol, 0.02):
+                est.launches_in_window = None
+                est.bytes_per_launch = None
+                est.notes.append(
+                    f"忙碌段与 launch 表覆盖的工作不一致（对齐斜率 {slope:.3f}，"
+                    f"锚点能解释的容差 ±{slope_tol * 100:.2f}%）：per-launch 的分母不可信")
+                mapped_spans = None
+            if mapped_spans is not None:
+                counts: list[float] = []
+                for k in (1.0 - slope_tol, 1.0, 1.0 + slope_tol):
+                    f = k / slope if slope else k
+                    scaled = [(anchor + (a - anchor) * f, anchor + (b - anchor) * f)
+                              for a, b in mapped_spans]
+                    for d in (-default_dt, 0.0, +default_dt):
+                        counts.append(_count_in_window([(a + d, b + d) for a, b in scaled],
+                                                       est.window_t0, est.window_t1))
+                # 区间必须**包住**中点估计（偏移挪前/挪后与斜率缩放一起取极值）
+                est.launches_in_window_range = (round(min(counts), 2), round(max(counts), 2))
+    elif launches > 0 and not window_cut and not launch_spans:
+        # 连 launch 时间戳都没有、窗口也没被裁：采样覆盖整段运行，整段 launch 数就是窗口内数量
         est.launches_in_window = float(launches)
         est.bytes_per_launch = est.bytes_total / launches
 
