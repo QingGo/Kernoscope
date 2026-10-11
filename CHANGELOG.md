@@ -803,6 +803,25 @@ Nsight Systems 2025.3.1 / `/proc/driver/nvidia/params` 可读且 **`RmProfilingA
   `-i https://pypi.org/simple`（README §2 已加一句）。另外**匿名 `git clone` 公开仓库可用**，
   即"跟 main"的那条安装路径在真机上成立。
 
+### 真机门禁 9/9（AutoDL 4090 容器，**没有 uv**）
+
+`--gates` 第一次在真 GPU 容器上全绿（此前"门禁在租用 GPU 机上跑不了"是第七轮 X-2）：
+
+```
+uv 缺席 → note: 门禁改用 /root/miniconda3/bin/python3（CI 仍用 `uv run`）
+[ok] pytest 209.5s  全量 1140 passed / 14 skipped（真机跳过的是需要 GPU-无关前提的少数用例）
+[ok] coverage/agentrefs/playbook/index/tasks/calib/sanitize/build
+9/9 通过，合计 215.1 s
+```
+
+同一轮修掉三条**只在真机红**的测试（CI 里 `python` 与 `uv` 都在，所以抓不到）：
+两条用裸 `python` 当被测目标（该容器 PATH 里没有 `python`，只有 `/root/miniconda3/bin/python3`
+⇒ 撞上 X-1 的目标预解析）→ 改用 `sh -c true`；一条假定有 `uv` → 改成 uv 缺席时 **skip 并写明原因**。
+另：该容器缺 `build` 模块时 `build` 门禁诚实失败并给出补法（`pip install build` 或装 uv）。
+
+同机另外确认：`skills/kernoscope/scripts/setup-check.sh` 从 rc=127（第六/七轮真机缺陷）
+变成 **rc=0 + 554 B JSON**，`_ks.sh` 正确选中 `/root/miniconda3/bin/python3`。
+
 ## 0.2.0
 
 **已发布（PyPI）**：`2026-10-11` 由 tag `v0.2.0` 触发 CI 以 **Trusted Publisher（OIDC，零密钥）**
