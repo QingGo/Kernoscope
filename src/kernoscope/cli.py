@@ -44,7 +44,8 @@ from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
                        build_cost_attribution_section, build_cost_section,
                        build_device_kernel, build_dram_section, build_kernel_sections,
-                       counter_section_reason, requested_sections)
+                       build_prescription_section, counter_section_reason,
+                       requested_sections)
 
 PROG = "kernoscope"
 
@@ -853,6 +854,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     dev_kr.sections = dev_sections
     rep.kernels.append(dev_kr)
 
+    # ---------- C2：把"改哪里、能省多少"算出来（头寸 + 排序）----------
+    _attach_prescription(rep, args, cost_est, peaks, log)
+
     # ---------- I1：导入一份真值 .ncu-rep 并与替代口径对拍 ----------
     if getattr(args, "ks_ncu_rep", None):
         _attach_truth(rep, str(args.ks_ncu_rep), log)
@@ -985,6 +989,110 @@ def main(argv: Sequence[str] | None = None) -> int:
     return rc
 
 
+def _stderr_log(args: argparse.Namespace, logged: list[str]):
+    """把"记进 logged + 按 --quiet 打到 stderr"包成一个函数（`_emit` 内部用）。"""
+    def log(msg: str) -> None:
+        logged.append(msg)
+        if not getattr(args, "quiet", False):
+            print(msg, file=sys.stderr)
+
+    return log
+
+
+def _kernel_metric(kr, name: str) -> float | None:
+    """在**某个** kernel 的 section 里取指标值（`packet.metric_value` 取的是全报告第一个）。"""
+    for sec in getattr(kr, "sections", []) or []:
+        for m in sec.metrics:
+            if m.name == name and isinstance(m.value, (int, float)) \
+                    and not isinstance(m.value, bool):
+                return float(m.value)
+    return None
+
+
+def _attach_prescription(rep: Report, args: argparse.Namespace, cost_est, peaks, log) -> None:
+    """C2：把"哪个 kernel 还有多少头寸、能省多少钱"算成可排序的处方。
+
+    三条诚实边界（都在 analyze/prescription.py 里执行，这里只负责接线）：
+      * 头寸的分母**只能**是本机实测峰值：`--ks-peak-*` 覆盖/规格表一律算不出区间；
+      * 没有价格就没有钱（比例仍然给）；
+      * 重叠的头寸不相加（按最大者封顶）。
+    没有任何达成值可算时**不产生 section**：那种情况下 roofline 判词的拒绝已经说清了缺什么。
+    """
+    from .analyze.cost import attribute as attribute_cost
+    from .analyze.prescription import (Calibration, bandwidth_headroom, issue_headroom,
+                                       prescribe_or_refuse)
+    from .packet import metric_value
+
+    if peaks is not None and getattr(args, "ks_calibration", None) and not (
+            getattr(args, "ks_peak_gbps", None) or getattr(args, "ks_peak_tflops", None)):
+        calib = Calibration(bandwidth_gbs=peaks.bandwidth_gbs,
+                            issue_util_pct=getattr(peaks, "issue_util_pct", None),
+                            source=peaks.source_label(), measured=True,
+                            caliber_ok=bool(getattr(peaks, "caliber_ok", True)),
+                            caliber_note=getattr(peaks, "caliber_note", ""))
+    else:
+        calib = Calibration.from_spec(
+            bandwidth_gbs=(getattr(args, "ks_peak_gbps", None)
+                           or (peaks.bandwidth_gbs if peaks else None)),
+            source="--ks-peak-*/规格表（不用于头寸估计）")
+
+    window_s = float(getattr(cost_est, "window_s", 0.0) or 0.0) or rep.wall_time_ns / 1e9
+    entries = []
+    for kr in rep.kernels:
+        if kr.name == "(device)":
+            continue
+        share = (min(100.0, 100.0 * kr.total_ns / (window_s * 1e9))
+                 if window_s and kr.total_ns else None)
+        cost = attribute_cost(cost_est, share, steps=kr.launch_count or None) if share else None
+        achieved_gbs = _kernel_metric(kr, "est__achieved_gbs")
+        if achieved_gbs is None:
+            achieved_gbs = _kernel_metric(kr, "meas__achieved_gbs")
+        if achieved_gbs is not None:
+            entries.append(bandwidth_headroom(
+                kr.name, achieved_gbs=achieved_gbs, calib=calib, cost=cost,
+                kernel_share_pct=share, cost_per_mtok=cost_est.cost_per_mtok,
+                achieved_provenance="measured" if _kernel_metric(
+                    kr, "meas__achieved_gbs") is not None else "estimated"))
+        util = _kernel_metric(kr, "est__issue_slot_utilization_pct")
+        if util is not None:
+            entries.append(issue_headroom(
+                kr.name, achieved_pct=util, calib=calib, cost=cost,
+                kernel_share_pct=share, cost_per_mtok=cost_est.cost_per_mtok))
+    if not entries and _kernel_metric(rep.kernels[0], "ks__over_peak_warning") is None:
+        # 一个达成值都没有：不给处方（roofline 判词的拒绝已经指向 --ks-gemm/--ks-calibration）
+        return
+    pre = prescribe_or_refuse(entries, currency=cost_est.inputs.currency)
+    sec = build_prescription_section(pre)
+    dev = next((k for k in rep.kernels if k.name == "(device)"), None)
+    if sec is not None and dev is not None:
+        dev.sections.append(sec)
+    rep.meta["prescription"] = {
+        "currency": pre.currency,
+        "ranked": [{"kernel": h.kernel, "resource": h.resource, "confidence": h.confidence,
+                    "pct_lo": (h.saving_pct_range[0] if h.saving_pct_range else None),
+                    "pct_hi": (h.saving_pct_range[1] if h.saving_pct_range else None),
+                    "per_hour": h.saving_per_hour, "per_mtok": h.saving_per_mtok,
+                    "basis": h.basis,
+                    "refusal": h.refusal.code.value if h.refusal else None,
+                    "money_refusal": h.money_refusal.code.value if h.money_refusal else None}
+                   for h in pre.ranked],
+        "total_per_hour": pre.total_saving_per_hour,
+        "total_per_mtok": pre.total_saving_per_mtok,
+        "refusal": pre.refusal.code.value if pre.refusal else None,
+        "refusal_message": pre.refusal.message if pre.refusal else "",
+        "money_refusal": pre.money_refusal.code.value if pre.money_refusal else None,
+        "money_refusal_message": pre.money_refusal.message if pre.money_refusal else "",
+        "notes": pre.notes,
+    }
+    if pre.ranked:
+        hy = (f"，合计可省 {pre.total_saving_per_hour:.3g} {pre.currency}/h"
+              if pre.total_saving_per_hour is not None else "（钱还给不出：见 money_refusal）")
+        log(f"prescription: {len(pre.ranked)} 条头寸{hy}")
+    else:
+        log("prescription: 没有可辩护的头寸（" +
+            (pre.refusal.message[:120] if pre.refusal else "缺少达成值/实测峰值") + "）")
+
+
 def _attach_truth(rep: Report, path: str, log) -> None:
     """把 `.ncu-rep` 里的真值接进报告（I1），并逐条与替代口径对拍。
 
@@ -1000,7 +1108,10 @@ def _attach_truth(rep: Report, path: str, log) -> None:
     from .refusals import Refusal, RefusalCode
 
     try:
-        data = ncu_rep_backend.load(path)
+        # 必须走子进程：主进程里已经 import 了 torch，与 Nsight Compute 的原生模块同进程
+        # 会让 `get_version()` 段错误（真机 rc=139，见 backends/ncu_rep.load_isolated 的说明）。
+        # segfault 抓不住，所以隔离是唯一可靠的做法。
+        data = ncu_rep_backend.load_isolated(path)
     except ncu_rep_backend.NcuRepUnavailable as e:
         msg = (f"读不了 {path}：{e}；读 .ncu-rep 只要 Nsight Compute 的 Python 模块"
                f"（把它放进 PYTHONPATH），不需要 GPU 与计数器权限")
@@ -1064,6 +1175,11 @@ def _attach_truth(rep: Report, path: str, log) -> None:
         "metrics_skipped": sum(a.skipped_metrics for a in data.actions),
         "pairs_compared": hit, "pairs_total": total_rows,
         "actions": [{"kernel": a.kernel_name, "grid": list(a.grid), "block": list(a.block),
+                     # Python API 的 grid/block 只能从 launch__grid_dim_* 指标里读，**没有**独立
+                     # accessor（2025.3.1 实测）。缺这几个指标时这里是 0 = 未知，不是"0 个 block"；
+                     # 而 `ncu --import` 能看到 Geometry（它读 ProfileResult.GridSize）。
+                     "geometry_known": any(d in a.metrics for d in
+                                           ("launch__grid_dim_x", "launch__block_dim_x")),
                      "metrics": len(a.metrics), "rules": a.rules} for a in data.actions],
         "comparisons": comparisons,
         "max_abs_err_pct": (max((abs(r["rel_err_pct"]) for c in comparisons
@@ -1408,7 +1524,9 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
 
     # ---------- I2/M4：把替代口径导出成 .ncu-rep（+ 旁路署名）----------
     if getattr(args, "export_ncu_rep", None):
-        rc_export = _export_substitute(rep, args, packet, logged)
+        # `_emit` 手里只有 `logged`（一个 list），而 `_export_substitute` 要的是打印函数 ——
+        # 真机验收时这里传错成 list，`log(...)` 抛 TypeError，让进程崩在**写完文件之后**。
+        rc_export = _export_substitute(rep, args, packet, _stderr_log(args, logged))
         if rc_export:
             return rc_export
 

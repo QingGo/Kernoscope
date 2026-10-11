@@ -43,6 +43,9 @@ REFS_END = "<!-- refs-index:end -->"
 REF_DOCS = [
     ("refusal-codes.md", "每个拒绝码什么意思、怎么办、代价", True),
     ("verdicts.md", "判词目录、方向、前提、MDD 键", True),
+    # 受限环境的 signal→cause→fix 手册：由 tools/gen_playbook.py 从同一批代码（refusals /
+    # route_cmd / capabilities / sections）生成，所以它和上面两份一样属于**生成物**。
+    ("diagnosis-playbook.md", "受限环境诊断手册：signal→cause→fix、任务路由、补不回来的采集", True),
     ("provenance-rules.md", "出处纪律的短版", False),
     ("recipes.md", "四个闭环配方", False),
 ]

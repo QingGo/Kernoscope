@@ -11,6 +11,7 @@
 | `kernel_time` | 哪个 kernel 最耗时、每次跑多久 | 越低越好 | 该 kernel 占全部 kernel 时间的比例、kernel 时间占进程 wall 的比例 | `premise_failed` |
 | `cost_per_token` | cost_per_token | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
 | `truth_vs_substitute` | truth_vs_substitute | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
+| `saving_estimate` | saving_estimate | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
 | `dram_bytes` | DRAM 搬了多少字节 / 是不是 DRAM bound | 越低越好 | 窗口是否被被测负载主导、参与积分的窗口内显存忙碌均值 | `coverage_too_low` |
 | `dram_bytes_per_launch` | 每次 launch 搬多少字节 | 越低越好 | 窗口是否被被测负载主导、被匹配 kernel 是否占窗口 kernel 时间 ≥95% | `coverage_too_low`, `share_too_low` |
 | `dram_bytes_trace` | DRAM 字节的第二条口径（访存轨迹 + 缓存模型） | 越低越好 | 轨迹口径 / NVML 口径 | `premise_failed` |

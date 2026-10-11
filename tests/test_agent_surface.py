@@ -198,6 +198,15 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
         meta = {
             "ncu_truth": {"ncu_version": "2025.3.1", "actions": 1, "pairs_compared": 2,
                           "pairs_total": 3, "max_abs_err_pct": 4.5},
+            # 处方判词（C2）同理：替身必须能表达"有头寸"的状态
+            "prescription": {
+                "currency": "CNY",
+                "ranked": [{"kernel": "k", "resource": "dram_bandwidth",
+                            "confidence": "measured", "pct_lo": 10.0, "pct_hi": 20.0,
+                            "per_hour": 1.5, "per_mtok": None, "basis": "b",
+                            "refusal": None, "money_refusal": None}],
+                "total_per_hour": 1.5, "total_per_mtok": None, "refusal": None,
+                "money_refusal": None, "notes": []},
         }
 
     ids = set()

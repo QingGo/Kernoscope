@@ -51,7 +51,7 @@
 | `no_tokens` | 没有给每次迭代的 token/样本数：算不出单位成本 | 给出每次迭代（step）处理的 token 数：推理填一次 forward 的 token 数，训练填一步的 token 数（packing 后的实际数）—— 有了它才有 tokens/s 与单位成本 | `kernoscope --ks-tokens 8192 -- python app.py` | ≈0 |
 | `no_price` | 没有给电价或租用价：算不出钱 | 给出价格：--ks-price-per-kwh（电费口径）或 --ks-price-per-hour（整机租约口径），两者都给就相加；币种随你给的价格，不做汇率换算 | `kernoscope --ks-tokens 8192 --ks-price-per-hour 2.5 -- python app.py` | ≈0 |
 | `no_energy` | 拿不到窗口能耗读数（NVML 能量/功率不可用） | 打开 NVML 采样（别加 --ks-no-nvml）并让稳态段长于采样周期；拿不到功率读数时能耗口径不可用，我们不按 TDP 顶替 | `kernoscope --set basic -o rep -- python bench_loop.py` | ≈0 |
-| `ncu_report_unreadable` | 读不了这份 .ncu-rep（缺 Nsight Compute 的 Python 模块，或文件损坏） | 读 .ncu-rep 只需要 Nsight Compute 的 Python 模块（不需要 GPU、不需要计数器权限）：把 `<nsight-compute>/extras/python` 加进 PYTHONPATH；若文件本身损坏，重新导出或重采 | `PYTHONPATH=/opt/nvidia/nsight-compute/<版本>/extras/python kernoscope --ks-ncu-rep report.ncu-rep --set basic` | 需人工 |
+| `ncu_report_unreadable` | 读不了这份 .ncu-rep（缺 Nsight Compute 的 Python 模块，或文件损坏） | 读 .ncu-rep 只需要 Nsight Compute 的 Python 模块（不需要 GPU、不需要计数器权限）：把 `<nsight-compute>/extras/python` 加进 PYTHONPATH；若文件本身损坏，重新导出或重采 | `PYTHONPATH=<nsight-compute>/extras/python kernoscope --ks-ncu-rep report.ncu-rep --set basic` | 需人工 |
 | `unknown_arch` | 未知架构，算不出上界 | 用 --ks-sm-count 指定 SM 数，或报告里带上 compute capability：未知架构算不出 occupancy 上界，我们不猜 |  | 需人工 |
 | `no_selftest_band` | 没有本机误差带与 MDD | 跑一次 selftest 得到本机误差带与最小可分辨差异（MDD）；没有它就无法判断两次运行的差别是真差别还是噪声 | `kernoscope selftest --out machine-selfcheck.json` | ≈2min |
 | `mdd_unknown` | 误差带里没有这个指标的 MDD | 误差带里没有这个指标（MDD 按指标族给）：用 --metric 指定有 MDD 的指标，或重跑 selftest 覆盖该负载族 | `kernoscope selftest --out machine-selfcheck.json` | ≈2min |

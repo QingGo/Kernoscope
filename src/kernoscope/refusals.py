@@ -355,7 +355,7 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
     RefusalCode.NCU_REPORT_UNREADABLE: Remedy(
         "读 .ncu-rep 只需要 Nsight Compute 的 Python 模块（不需要 GPU、不需要计数器权限）："
         "把 `<nsight-compute>/extras/python` 加进 PYTHONPATH；若文件本身损坏，重新导出或重采",
-        command="PYTHONPATH=/opt/nvidia/nsight-compute/<版本>/extras/python kernoscope "
+        command="PYTHONPATH=<nsight-compute>/extras/python kernoscope "
                 "--ks-ncu-rep report.ncu-rep --set basic",
         cost_kind="manual", then_answers=("truth_vs_substitute",)),
     RefusalCode.UNKNOWN_ARCH: Remedy(

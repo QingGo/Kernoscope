@@ -340,6 +340,49 @@ def build_cost_attribution_section(opt: BuildOptions, kr) -> Section | None:
     return s
 
 
+def _split_unavailable(note: str) -> tuple[str, str]:
+    """从 `unavailable: code=xxx | 原因` 里拆出 (code, 原因)。
+
+    为什么用这个约定：`Prescription.to_metrics()` 的返回元组只有四格，装不下结构化拒绝，
+    所以拒绝被编码进 note 的第一段。**拆不出来时退回 PREMISE_FAILED**（有 code 总比
+    散文式拒绝强：R1/W3 要求 n/a 行必须带 code）。
+    """
+    if note.startswith("unavailable: code="):
+        rest = note[len("unavailable: code="):]
+        code, _, why = rest.partition(" | ")
+        try:
+            return RefusalCode(code.strip()).value, (why.strip() or "口径不成立")
+        except ValueError:
+            return RefusalCode.PREMISE_FAILED.value, (why.strip() or "口径不成立")
+    return RefusalCode.PREMISE_FAILED.value, note or "口径不成立"
+
+
+def build_prescription_section(prescription: Any) -> Section | None:
+    """处方 section（C2）：排序后的头寸 + 每条的区间与金额，拒绝逐行带 code。
+
+    命名纪律也在这里执行：`ks__` 行是 derived（由实测再算），`est__` 行是 estimated；
+    文本行（kernel 名、口径注记）不进指标表，改放 `Section.note` —— 指标表里混字符串会让
+    CSV/JSON 下游的解析长出一堆特例。
+    """
+    if prescription is None:
+        return None
+    s = Section("Prescription")
+    notes: list[str] = []
+    for name, value, unit, note in prescription.to_metrics():
+        if value is None:
+            code, why = _split_unavailable(note)
+            s.add(Metric.unavailable(name, why, unit=unit, code=RefusalCode(code),
+                                     observed={"note": note[:200]}, severity="degraded"))
+        elif isinstance(value, str):
+            notes.append(f"{name}: {value}" if value else name)
+        elif name.startswith("est__"):
+            s.add(Metric.estimated(name, value, unit, source=note))
+        else:
+            s.add(Metric.derived(name, value, unit, source=note))
+    s.note = "；".join(notes)
+    return s
+
+
 def build_memtrace_section(st, opt: BuildOptions) -> Section | None:
     """访存轨迹 section（NVBit 插桩口径）。
 

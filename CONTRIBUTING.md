@@ -37,6 +37,7 @@ uv run python tools/dev_index.py --gates
 | `pytest` | `uv run pytest` | ≈12.7 s | 全量测试 |
 | `coverage` | `uv run python tools/gen_coverage.py --check` | ≈0.2 s | COVERAGE.md 与 capabilities 同源 |
 | `agentrefs` | `uv run python tools/gen_agent_refs.py --check` | ≈0.2 s | references/*.md 与拒绝码/判词同源 |
+| `playbook` | `uv run python tools/gen_playbook.py --check` | ≈0.2 s | references/diagnosis-playbook.md 与拒绝码/路由/能力层同源 |
 | `index` | `uv run python tools/dev_index.py --check` | ≈0.1 s | 本索引与仓库现状同源 |
 | `tasks` | `uv run python eval/make_tasks.py --check` | ≈0.1 s | 评测任务材料与 packet.build() 同源 |
 | `calib` | `uv run python tools/gen_calibration_excerpt.py --check` | ≈0.1 s | CALIBRATION.md 的产物节选与最新产物同源 |

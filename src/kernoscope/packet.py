@@ -600,6 +600,62 @@ def _verdict_truth(rep: Any) -> Verdict | None:
               f"最大相对偏差 {facts.get('max_abs_err_pct')}%")
 
 
+def _verdict_saving(rep: Any) -> Verdict | None:
+    """处方判词（C2）—— "先改哪个、能省多少"，只有在算得出头寸时才出。
+
+    三条边界（与 analyze/prescription.py 同源，这里只负责呈现）：
+      * 比例的分母必须是**本机实测峰值**（规格表/覆盖值算不出头寸）；
+      * 没有价格就没有钱（比例照给，状态为 soft）；
+      * 头寸重叠不相加（由处方模块保证，包里的 total 就是它给的那个数）。
+    """
+    p = (getattr(rep, "meta", {}) or {}).get("prescription")
+    if not p:
+        return None
+    ranked = list(p.get("ranked") or [])
+    if not ranked:
+        code = p.get("refusal") or p.get("money_refusal") or RefusalCode.NO_WORKLOAD.value
+        try:
+            code_enum = RefusalCode(str(code))
+        except ValueError:
+            code_enum = RefusalCode.NO_WORKLOAD
+        return Verdict(
+            id="saving_estimate", question="先改哪里、能省多少钱", status=REFUSED,
+            refusal=Refusal(code_enum, str(p.get("refusal_message")
+                                          or p.get("money_refusal_message")
+                                          or "没有可辩护的头寸：缺达成值或本机实测峰值")),
+            metrics=("ks__prescription_headroom_n",),
+            next="给 --ks-gemm M,N,K（或 --ks-flops/--ks-bytes）并加 --ks-calibration "
+                 "machine-profile.json，才有实测分母来算头寸",
+            claim="不给节省估计：没有可辩护的头寸（缺少达成值或本机实测峰值）")
+    top = ranked[0]
+    facts: dict[str, Any] = {"n": len(ranked), "top_kernel": _clip(str(top.get("kernel", "")),
+                                                                  FACT_STR_LIMIT),
+                             "confidence": top.get("confidence", "")}
+    if top.get("pct_lo") is not None:
+        facts["top_pct_lo"] = round(float(top["pct_lo"]), 1)
+        facts["top_pct_hi"] = round(float(top["pct_hi"]), 1)
+    if p.get("total_per_hour") is not None:
+        facts["total_per_hour"] = round(float(p["total_per_hour"]), 4)
+        facts["currency"] = p.get("currency", "CNY")
+    if p.get("total_per_mtok") is not None:
+        facts["total_per_mtok"] = round(float(p["total_per_mtok"]), 4)
+    if p.get("money_refusal"):
+        facts["no_money"] = p["money_refusal"]
+    status = OK if p.get("total_per_hour") is not None else SOFT
+    unit = f"{p.get('currency', 'CNY')}/h"
+    return Verdict(
+        id="saving_estimate", question="先改哪里、能省多少钱", status=status, facts=facts,
+        value=facts.get("total_per_hour"), unit=unit if facts.get("total_per_hour") else "",
+        provenance="estimated", premises=[],
+        metrics=("ks__prescription_total_saving_per_hour",),
+        next="按 Priority 顺序改一处再重跑同一条命令；用 kernoscope diff 确认变化超过 MDD，"
+             "再用 ks__cost_per_mtok 看钱有没有降",
+        claim=(f"头寸 {len(ranked)} 条：最大一条是 {facts.get('top_kernel')}"
+               f"（保守 {facts.get('top_pct_lo')}%~上界 {facts.get('top_pct_hi')}%）"
+               + (f"，合计可省 {facts.get('total_per_hour')} {unit}"
+                  if facts.get("total_per_hour") else "；钱给不出（缺价格或份额）")))
+
+
 def _verdict_over_peak(rep: Any) -> Verdict | None:
     warn = metric_value(rep, "ks__over_peak_warning")
     if not warn:
@@ -641,6 +697,7 @@ VERDICT_IDS: tuple[str, ...] = (
     "kernel_time",
     "cost_per_token",
     "truth_vs_substitute",
+    "saving_estimate",
     "dram_bytes",
     "dram_bytes_per_launch",
     "dram_bytes_trace",
@@ -653,8 +710,8 @@ VERDICT_IDS: tuple[str, ...] = (
     "static_mix",
 )
 
-BUILDERS = (_verdict_kernel_time, _verdict_cost, _verdict_truth, _verdict_dram_total,
-            _verdict_per_launch,
+BUILDERS = (_verdict_kernel_time, _verdict_cost, _verdict_truth, _verdict_saving,
+            _verdict_dram_total, _verdict_per_launch,
             _verdict_trace, _verdict_ledger, _verdict_occupancy, _verdict_roofline,
             _verdict_issue_slot, _verdict_l2, _verdict_over_peak, _verdict_static_mix)
 
@@ -1321,6 +1378,33 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
                 + ("；" + "，".join(f"{k} {v}%" for k, v in mix.items()) if mix else ""))
     if fid == "over_peak":
         return "达成值超过本机实测峰值：本次百分比不成立，先查标定与工作量输入"
+    if fid == "cost_per_token":
+        # C1：把成本判词说成人话。单位成本与"每小时成本"是两个不同的口径，缺哪个说哪个 ——
+        # 只印 id（旧行为）会让一屏上出现一行光秃秃的 "cost_per_token"。
+        bits = []
+        if f.get("tokens_s"):
+            bits.append(f"{float(f['tokens_s']):,.0f} token/s")
+        if f.get("j_per_token") is not None:
+            bits.append(f"{float(f['j_per_token']):.3g} J/token")
+        if f.get("per_mtok") is not None:
+            bits.append(f"单位成本 {f['per_mtok']} {v.get('unit', '')}".strip())
+        elif f.get("per_hour") is not None:
+            bits.append(f"每小时成本 {f['per_hour']} {v.get('unit', '')}".strip())
+        if f.get("top_kernel"):
+            bits.append(f"最贵的是 {f['top_kernel']}"
+                        f"（{f.get('top_kernel_per_hour')} {v.get('unit', '')}/h 量级）".strip())
+        return "；".join(bits) or "成本账"
+    if fid == "saving_estimate":
+        if f.get("top_pct_lo") is not None:
+            return (f"先改 {f.get('top_kernel')}（保守可省 {f['top_pct_lo']}%"
+                    f"~上界 {f['top_pct_hi']}%）"
+                    + (f"；合计可省 {f['total_per_hour']} {f.get('currency', 'CNY')}/h"
+                       if f.get("total_per_hour") is not None else "；钱给不出"))
+        return f"头寸 {f.get('n')} 条，但都还没有可辩护的区间"
+    if fid == "truth_vs_substitute":
+        return (f"与 ncu {f.get('ncu', '?')} 的真值对拍 {f.get('compared')}/{f.get('pairs')} 条"
+                + (f"，最大相对偏差 {f['max_abs_err_pct']}%"
+                   if f.get("max_abs_err_pct") is not None else ""))
     return v.get("id", "")
 
 

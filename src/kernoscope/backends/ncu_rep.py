@@ -42,7 +42,10 @@ Python API 的最小面（Nsight Compute 2025.3.1 实测，见 tests/test_ncu_re
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -376,3 +379,108 @@ def to_metrics(data: NcuRepData) -> list[tuple[str, float, str]]:
         for raw_name, value in action.metrics.items():
             out.append((NCU_METRIC_PREFIX + raw_name, float(value), source))
     return out
+
+# --------------------------------------------------------------------------- #
+# 子进程隔离读取（**CLI 必须用这条路径**）
+# --------------------------------------------------------------------------- #
+# 为什么不能在主进程里读：真机实测（RTX 4090 / Nsight Compute 2025.3.1 / miniconda python）
+#   kernoscope --ks-ncu-rep <样例>            -> Segmentation fault (core dumped)，rc=139
+#   faulthandler 栈：ncu_report.py:3235 get_version <- ncu_rep.py:316 load
+# 同一份文件、同一个解释器，**单独跑 load() 却完全正常**。差别在主进程已经 import 了 torch
+# （它的 CUDA 运行时与 `_ncu_report` 是两套 CUDA 绑定）—— 两个原生模块在同一地址空间里
+# 调 CUDA，崩在 Nsight Compute 那一侧。段错误**无法用 try/except 捕获**，所以这里不做
+# "尽力而为的进程内读取 + 失败回退"，而是直接把读取放进一个干净的子进程：
+# 子进程只 import 本模块（不 import torch），因此那条崩溃路径在结构上不存在。
+
+ISOLATED_TIMEOUT_S = 180
+ISOLATED_UNAVAILABLE_RC = 3
+ISOLATED_ERROR_RC = 4
+
+
+def to_dict(data: NcuRepData) -> dict:
+    """序列化成朴素 JSON（子进程 -> 父进程的唯一通道）。"""
+    return {
+        "path": data.path,
+        "tool_version": data.tool_version,
+        "provider": data.provider,
+        "num_ranges": data.num_ranges,
+        "comment": data.comment,
+        "actions": [
+            {"kernel_name": a.kernel_name, "grid": list(a.grid), "block": list(a.block),
+             "metrics": {k: float(v) for k, v in a.metrics.items()},
+             "rules": [[n, float(v)] for n, v in a.rules],
+             "function_name": a.function_name, "demangled_name": a.demangled_name,
+             "skipped_metrics": a.skipped_metrics}
+            for a in data.actions
+        ],
+    }
+
+
+def from_dict(d: dict) -> NcuRepData:
+    return NcuRepData(
+        path=str(d.get("path", "")),
+        actions=[NcuRepAction(kernel_name=str(a.get("kernel_name", "")),
+                              grid=tuple(a.get("grid") or (0, 0, 0)),
+                              block=tuple(a.get("block") or (0, 0, 0)),
+                              metrics={k: float(v) for k, v in (a.get("metrics") or {}).items()},
+                              rules=[(str(n), float(v)) for n, v in (a.get("rules") or [])],
+                              function_name=str(a.get("function_name", "")),
+                              demangled_name=str(a.get("demangled_name", "")),
+                              skipped_metrics=int(a.get("skipped_metrics") or 0))
+                  for a in (d.get("actions") or [])],
+        tool_version=str(d.get("tool_version", "")),
+        provider=str(d.get("provider", "")),
+        num_ranges=int(d.get("num_ranges") or 0),
+        comment=str(d.get("comment", "")),
+    )
+
+
+def load_isolated(path: str, *, timeout: float = ISOLATED_TIMEOUT_S,
+                  python: str | None = None, env: dict | None = None) -> NcuRepData:
+    """在**干净的子进程**里读 `.ncu-rep`，把结果当 JSON 取回来。
+
+    失败一律翻译成 `NcuRepUnavailable`（缺 Nsight Compute 的 Python 模块）或
+    `NcuRepError`（文件/报告本身有问题），并把子进程 stderr 带进消息里 —— 崩溃、
+    缺模块、坏文件三种情况对使用者来说处置完全不同，不能混成一句"读取失败"。
+    """
+    cmd = [python or sys.executable, "-m", "kernoscope.backends.ncu_rep", "--json", str(path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              env=env if env is not None else os.environ.copy())
+    except subprocess.TimeoutExpired as exc:
+        raise NcuRepError(
+            f"读 {path} 超时（>{timeout:.0f}s）：报告异常大或 reader 卡住") from exc
+    if proc.returncode == ISOLATED_UNAVAILABLE_RC:
+        raise NcuRepUnavailable(proc.stderr.strip() or "ncu_report is not importable")
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"rc={proc.returncode}"
+        if "ncu_report" in detail and "importable" in detail:
+            raise NcuRepUnavailable(detail)
+        raise NcuRepError(f"子进程读取失败（rc={proc.returncode}）：{detail}")
+    try:
+        return from_dict(json.loads(proc.stdout))
+    except (ValueError, TypeError) as exc:
+        raise NcuRepError(f"子进程输出无法解析：{type(exc).__name__}: {exc}") from exc
+
+
+def _main(argv: list[str]) -> int:
+    """`python -m kernoscope.backends.ncu_rep [--json] <path>` —— 隔离读取的入口。"""
+    args = [a for a in argv if a != "--json"]
+    if not args:
+        print("usage: python -m kernoscope.backends.ncu_rep [--json] <report.ncu-rep>",
+              file=sys.stderr)
+        return 2
+    try:
+        data = load(args[-1])
+    except NcuRepUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return ISOLATED_UNAVAILABLE_RC
+    except NcuRepError as exc:
+        print(str(exc), file=sys.stderr)
+        return ISOLATED_ERROR_RC
+    print(json.dumps(to_dict(data), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - 子进程入口
+    raise SystemExit(_main(sys.argv[1:]))

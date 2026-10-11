@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -470,3 +471,101 @@ def test_ncu_prefixed_names_are_publishable_as_exact():
         assert m.provenance is Provenance.EXACT
         assert not name.startswith(("dram__", "sm__", "launch__"))
         assert m.render_value()
+
+
+# --------------------------------------------------------------------------- #
+# 子进程隔离读取（**CLI 用的就是这条路径**）
+# --------------------------------------------------------------------------- #
+# 真机实测：主进程 import 了 torch 之后再读 .ncu-rep，会在 ncu_report.get_version() 里
+# Segmentation fault（rc=139）；同一份文件单独读却完全正常。段错误抓不住，所以读取被放进
+# 子进程。这里用"临时目录里放一个假 ncu_report"的方式，把隔离通道真的跑一遍。
+_FAKE_REPORT_MODULE = '''
+class _M:
+    def __init__(self, v): self._v = v
+    def has_value(self, *a): return True
+    def value(self, idx=None): return self._v
+    def num_instances(self): return 0
+    def kind(self, *a): return 4
+    def unit(self): return ""
+
+
+class _A:
+    NameBase_FUNCTION = 0
+    NameBase_DEMANGLED = 1
+    NameBase_MANGLED = 2
+    def __init__(self): self._m = {"sm__throughput.avg.pct_of_peak_sustained_elapsed": _M(31.5),
+                                   "launch__registers_per_thread": _M(16.0)}
+    def name(self, base=None): return "fake_kernel" if base != 1 else "fake_kernel(int)"
+    def metric_names(self): return tuple(self._m)
+    def metric_by_name(self, n): return self._m.get(n)
+    def rule_results(self): return ()
+    def workload_type(self): return 0
+
+
+class _R:
+    def num_actions(self): return 1
+    def action_by_idx(self, i): return _A()
+    def __len__(self): return 1
+
+
+class _C:
+    def num_ranges(self): return 1
+    def range_by_idx(self, i): return _R()
+    def get_version(self): return "2025.3.1"
+
+
+def load_report(path):
+    return _C()
+'''
+
+
+def _fake_report_dir(tmp_path):
+    d = tmp_path / "fakereport"
+    d.mkdir()
+    (d / "ncu_report.py").write_text(_FAKE_REPORT_MODULE, encoding="utf-8")
+    return d
+
+
+def test_load_isolated_round_trips_through_a_clean_subprocess(tmp_path, monkeypatch):
+    """隔离通道的完整往返：子进程读 -> JSON -> 父进程重建（含 grid/block/规则字段）。"""
+    fake = _fake_report_dir(tmp_path)
+    report = tmp_path / "r.ncu-rep"
+    report.write_bytes(b"NVR\x00" + b"\x00" * 8)      # 内容由假模块决定，这里只要存在
+    monkeypatch.setenv("PYTHONPATH", str(fake) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    data = ncu_rep.load_isolated(str(report))
+    assert data.tool_version == "2025.3.1"
+    assert len(data.actions) == 1
+    action = data.actions[0]
+    assert action.kernel_name == "fake_kernel"
+    assert action.metrics["sm__throughput.avg.pct_of_peak_sustained_elapsed"] == 31.5
+    assert action.metrics["launch__registers_per_thread"] == 16.0
+
+
+def test_load_isolated_translates_each_failure_to_its_own_exception(tmp_path, monkeypatch):
+    """三种失败要能被区分：缺模块 / 文件不存在 / 报告没有 action —— 处置完全不同。"""
+    empty_path = str(tmp_path / "nothing.ncu-rep")
+    with pytest.raises(NcuRepUnavailable):
+        ncu_rep.load_isolated(empty_path)
+
+    fake = _fake_report_dir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(fake) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    with pytest.raises(NcuRepError) as e:
+        ncu_rep.load_isolated(empty_path)            # 模块在，文件不在
+    assert "not found" in str(e.value)
+
+
+def test_cli_uses_the_isolated_reader(monkeypatch):
+    """接线断言：CLI 必须走 load_isolated（走回 load 就等于把真机 rc=139 的崩溃带回来）。"""
+    from kernoscope import cli as cli_mod
+
+    calls = []
+    monkeypatch.setattr(ncu_rep, "load_isolated",
+                        lambda path, **kw: (calls.append(path),
+                                            NcuRepData(path=path, actions=[]))[1])
+    monkeypatch.setattr(ncu_rep, "load", lambda path: pytest.fail("不该在进程内读 .ncu-rep"))
+
+    class FakeRep:
+        kernels, meta = [], {}
+
+    cli_mod._attach_truth(FakeRep(), "/tmp/whatever.ncu-rep", lambda *_: None)
+    assert calls == ["/tmp/whatever.ncu-rep"]

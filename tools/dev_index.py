@@ -53,6 +53,8 @@ GATES = [
          "COVERAGE.md 与 capabilities 同源"),
     Gate("agentrefs", "uv run python tools/gen_agent_refs.py --check", 0.2,
          "references/*.md 与拒绝码/判词同源"),
+    Gate("playbook", "uv run python tools/gen_playbook.py --check", 0.2,
+         "references/diagnosis-playbook.md 与拒绝码/路由/能力层同源"),
     Gate("index", "uv run python tools/dev_index.py --check", 0.1,
          "本索引与仓库现状同源"),
     Gate("tasks", "uv run python eval/make_tasks.py --check", 0.1,
