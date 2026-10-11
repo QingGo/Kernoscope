@@ -649,6 +649,15 @@ kernoscope mcp --stdio
   这条证据依然成立。`references/refusal-codes.md`、`diagnosis-playbook.md` 与
   `eval/tasks/*.json` 已按新 code 重生成。
 
+### 又一条"只在某种机器上成立"的测试（第七轮 X-3）
+
+`test_export_substitute_empty_launch_table_has_its_own_error` 原来直接跑 `-- true`，于是它的
+结果取决于**机器上有没有 nsys**：没有 nsys ⇒ 走设备级降级（空 launch 表）到导出分支；有 nsys
+⇒ nsys 先报 sqlite 里没有 `CUPTI_ACTIVITY_KIND_KERNEL` 表，走的是另一条分支（验收方在真机上
+就红在这条）。现在拆成两条**机器无关**的用例：一条打桩成"没有 nsys"（覆盖 W-2 的
+`没有可导出的 kernel`），一条打桩成"装了 nsys 但这次零 kernel"（覆盖它自己的
+`没有采到任何 kernel 活动`）。两条产品分支都测到，且都不依赖环境。
+
 ### 包预算与前提门禁的三条不变量（第七轮 X-15 / X-17 / X-20 / X-22）
 
 - **守卫判词的身份与结论四条同列保护级**（X-15）：`over_peak` 的 facts 装的是"这次超峰属于

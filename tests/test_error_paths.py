@@ -308,14 +308,45 @@ def test_no_target_command_error_survives_quiet(capsys):
     assert "no target command" in err, err
 
 
-def test_export_substitute_empty_launch_table_has_its_own_error(capsys, tmp_path: Path):
+def test_export_substitute_empty_launch_table_has_its_own_error(monkeypatch, capsys,
+                                                                 tmp_path: Path):
     """W-2 的复现值：空 launch 表 + `--export-ncu-rep`（受限机主推路径）。
 
     **不带** `--ks-synthetic`：带了就永远有 kernel，那个分支就全仓零覆盖（第六轮报告原话）。
+
+    ⚠️ 这里把 nsys 后端**打桩**成"装了 nsys，但这份采集里一个 kernel 都没有"（X-3）：
+    旧版本直接跑 `-- true`，于是结果取决于**机器上有没有 nsys** —— 没有 nsys 时走到降级路径
+    （表为空），有 nsys 时 nsys 会先报 sqlite 里没有 `CUPTI_ACTIVITY_KIND_KERNEL` 表 ⇒
+    同一个用例在两种机器上测的是**两条不同的路径**（验收方在真机上就红在这条）。
+    打桩后它测的仍然是"空 launch 表 + 导出"这条产品分支，且与机器无关。
     """
+    from kernoscope.backends import nsys as N
+
+    # 机器无关地拿到"零 kernel 但仍然继续跑"的状态：**没有 nsys** ⇒ 走设备级降级路径
+    monkeypatch.setattr(N, "find_nsys", lambda: None)
+
     rc, out, err = run(capsys, "--export-ncu-rep", str(tmp_path / "x.ncu-rep"), "--", "true")
     assert_own_error(rc, out, err)
     assert "没有可导出的 kernel" in err, err
+
+
+def test_nsys_present_but_zero_kernels_has_its_own_error(monkeypatch, capsys, tmp_path: Path):
+    """X-3：**装了 nsys** 但这次采集里一个 kernel 都没有 —— 它有自己的错误行。
+
+    为什么单列一条：旧用例把两种机器状态混在一起（见上一条的说明），于是"有 nsys"时它红在
+    sqlite/CUPTI 那条分支上。两条路径的产品行为**都**要能红、都要机器无关地测：
+    这一条打桩成"nsys 装了，`parse_kernels` 返回空"，断言它的自家错误 + rc=1 + 无 traceback。
+    """
+    from kernoscope.backends import nsys as N
+
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+    monkeypatch.setattr(N, "run_profile", lambda *a, **k: str(tmp_path / "fake.nsys-rep"))
+    monkeypatch.setattr(N, "export_sqlite", lambda *a, **k: str(tmp_path / "fake.sqlite"))
+    monkeypatch.setattr(N, "parse_kernels", lambda *a, **k: [])
+
+    rc, out, err = run(capsys, "--export-ncu-rep", str(tmp_path / "x.ncu-rep"), "--", "true")
+    assert_own_error(rc, out, err)
+    assert "没有采到任何 kernel 活动" in err, err
 
 
 def test_attach_truth_says_its_own_error_instead_of_nameerror(tmp_path, capsys):
