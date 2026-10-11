@@ -413,25 +413,51 @@ def test_calibration_excerpt_gate_can_go_red(monkeypatch, tmp_path):
     assert mod.render() not in text, "换了产物值之后，节选文本必须与文档里的不同（否则门禁是摆设）"
 
 
-def test_every_registered_artifact_band_is_quoted_in_the_readme():
-    """R-56/D27：README 说"更早的运行是多少"时，**每一次**已登记产物的误差带都要出现。
-
-    旧散文写"更早的两次运行里分别是 −4.3% ~ +9.0% 与 −4.3% ~ +12.7%"，而 −4.3~+9.0
-    其实是**本次**运行；更早那次是 −4.1 ~ +12.5（细则完全对不上）。逐产物的带是可算的
-    （`_ledger_error`），所以这一条能把它钉住：想改散文就必须让每一份产物的带都出现。
-    """
-    arts = _artifact_dirs()
-    if len(arts) < 2:
-        pytest.skip("只有一个产物，谈不上「更早的运行」")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    missing: list[str] = []
-    for art in arts:
+def _bands_by_artifact() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for art in _artifact_dirs():
         errs = [e for e in (_ledger_error(art, k) for k in ("copy", "read", "write"))
                 if e is not None]
-        if len(errs) < 3:
-            continue
-        band = f"{min(errs):+.1f}% ~ {max(errs):+.1f}%"
-        if band not in readme and band.replace("-", "\u2212") not in readme:
-            missing.append(f"{art.name}: {band}")
-    assert not missing, ("README 要写出每个已登记产物的误差带（散文里的「更早的运行」必须"
-                         "能追到产物）：\n  - " + "\n  - ".join(missing))
+        if len(errs) == 3:
+            out[art.name] = f"{min(errs):+.1f}% ~ {max(errs):+.1f}%"
+    return out
+
+
+def test_every_band_quoted_in_the_readme_comes_from_a_registered_artifact():
+    """R-56/D27：README 里的每一个误差带都必须能追到**某一份已登记的产物**。
+
+    旧散文写"更早的两次运行里分别是 −4.3% ~ +9.0% 与 −4.3% ~ +12.7%"，而 −4.3~+9.0
+    其实是**本次**运行；更早那次是 −4.1% ~ +12.5%。逐产物的带是可算的，所以散文里
+    引用的带必须落在"已登记产物给出的带 ∪ 它们的并集"里 —— 引用不到的就得删掉或标注来源。
+
+    只要求"引用得到"，不要求"把所有历史都列出来"：历史产物会一直留着（误差带的另一侧
+    需要它），但读者并不需要每次运行都在散文里补一行。
+    """
+    bands = _bands_by_artifact()
+    if len(bands) < 2:
+        pytest.skip("只有一个可比对的产物")
+    errs_all = []
+    for art in _artifact_dirs():
+        errs_all += [e for e in (_ledger_error(art, k) for k in ("copy", "read", "write"))
+                     if e is not None]
+    known = set(bands.values()) | {f"{min(errs_all):+.1f}% ~ {max(errs_all):+.1f}%"}
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    quoted = {m.group(0) for m in re.finditer(r"[-\u2212]\d+\.\d+%\s*~\s*[-\u2212+]?\d+\.\d+%", readme)}
+    norm = {q.replace("\u2212", "-").replace(" ", "") for q in quoted}
+    known_norm = {k.replace("\u2212", "-").replace(" ", "") for k in known}
+    bad = sorted(norm - known_norm)
+    assert not bad, ("README 里这些误差带追不到任何已登记产物（写错或引用了没入库的运行）：\n  - "
+                     + "\n  - ".join(bad) + f"\n已登记产物给出的带：{sorted(known)}")
+
+
+def test_a_new_bench_run_forces_the_docs_to_follow():
+    """产物一变，文档就必须跟着变 —— 用"当前最新产物的带"和"上一次的带"对照说明这条链是活的。"""
+    bands = _bands_by_artifact()
+    if len(bands) < 2:
+        pytest.skip("只有一个产物")
+    newest = _newest().name
+    assert newest in bands, "最新产物应当能算出误差带"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    band = bands[newest]
+    assert band in readme or band.replace("-", "\u2212") in readme, \
+        f"README 的「本次」误差带必须是 {band}"
