@@ -930,7 +930,29 @@ def _protocol_meta(args: argparse.Namespace, peaks: Any, peak_gbs: float) -> dic
                                if peaks is not None and peaks.compute_tflops else None),
         },
         "calibration": _calibration_identity(args.ks_calibration) if args.ks_calibration else None,
+        # R-75：轨迹口径的**同一份轨迹**要能比对 —— 指纹 + 采集方式（完整标记）。
+        # 只放稳定量：文件名与内容指纹，不含绝对路径。
+        "memtrace": _memtrace_identity(getattr(args, "memtrace", None)),
     }
+    return out
+
+
+def _memtrace_identity(path: str | None) -> dict[str, Any] | None:
+    """轨迹身份：文件名 + 内容指纹 + 是否有结束标记（R-75/R-76）。
+
+    没有它，两次 diff 用了不同轨迹（不同采样范围/不同 kernel 子集）也会被当成同协议。
+    """
+    if not path:
+        return None
+    import os
+
+    from .backends.memtrace import trace_fingerprint
+
+    out: dict[str, Any] = {"name": os.path.basename(path)}
+    try:
+        out["sha256"], _ends_nl = trace_fingerprint(path)
+    except OSError:
+        out["sha256"] = None
     return out
 
 

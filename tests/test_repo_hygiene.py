@@ -53,7 +53,10 @@ def test_tracked_files_have_no_platform_identity():
     banned = [
         re.compile(r"\bautodl-[a-z0-9-]+", re.I),          # 平台容器名
         re.compile(r"\bssh\s+-p\s+\d+\s+\w+@"),            # 带端口与用户的 ssh 命令
-        re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),        # 裸 IPv4
+        # 裸 IPv4。**版本号形状相同**，所以文档里写 NVBit 版本要写成 `v1.7.7.3`
+        # （多一个 v 就不匹配）—— 这是有意的取舍：宁可让作者多打一个字母，
+        # 也不放过一个真的裸 IP（脱敏脚本只处理产物，源码/文档靠这条兜）。
+        re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
     ]
     files = (_git("ls-files") or "").split()
     offenders: list[str] = []

@@ -46,6 +46,28 @@
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
   其中**读者面 9 条**逐字执行并断言结论（比例 9/34，不是"每条都断言"）。
 
+### 访存轨迹口径（NVBit）
+
+- **按访存类型分流（R-73）**：全局口径只用 `LDG/STG`（含 PTX 的 `.global`）；
+  `LDS/STS/LDSM`（共享）与 `LDL/STL`（本地）不再进入 `sectors/request`、合并效率、
+  工作集与 L2 模型 —— Triton 的 `tl.dot` 会产生海量共享访存（一个 FlashAttention 轨迹里
+  1,282,048 条记录只有 8,192 条是全局的），混进来会把合并效率算成 **>100%**（物理不可能）。
+  新增指标 `meas__trace_records_global`（全局口径的记录数），并保留 `min(100, …)` 兜底 +
+  `coalescing_clamped` 标记。
+- **opcode 尺寸解析（R-73）**：SASS 的 `STS.U16` / `LDG.E.U8` 与 PTX 的 `v4.f32` 都能算对
+  （旧实现只认 PTX 的 `.<宽度>`：`STS.U16` 回落 4 B、`v4.f32` 漏乘向量宽度）。
+- **替换策略上下界（R-77）**：新增 `est__dram_bytes_per_launch_trace_bounds`（强制缺失下界
+  ~ 完全不复用上界），并在正文里点明"**地址部分是 measured 级算术，只有谁命中 L2 是模型**"。
+- **`--ks-max-accesses`（R-74）**：拒绝文案给出**具体该设多大**（"把 --ks-max-accesses 提到 ≥ N"）。
+- **轨迹自证（R-75/R-76）**：解析器给每条轨迹记 `trace_sha256` 与完整性
+  （`yes`/`no`/`unknown`）；`collect.sh` 追加 `KS-TRACE-COMPLETE` 哨兵（官方格式没有结束标记，
+  被 `ulimit`/磁盘截断时察觉不到，报告里两次因此拿到低于物理下界的数）；结尾不是换行一律按
+  截断处理；**协议哈希新增 `memtrace` 身份**（文件名 + 指纹），换了轨迹不再被当成同协议。
+- 依赖说明（`tools/probes/nvbit_memtrace/README.md` + `collect.sh`）改成**版本×构建矩阵**：
+  v1.8.1 走 CMake（本仓库真机验证）、v1.7.7.3 走老 Makefile（第四轮真机验证），
+  并写明"不要 make 整个 tools / 架构变量用裸数字 / 必须 NO_EAGER_LOAD=0"。
+  新增 `tests/test_nvbit_smoke.py`：按文档真采一段轨迹并核对版本号（无 NVBit 时跳过）。
+
 ### 测量口径（重要）
 
 - **per-launch 的分母落在积分窗口内**：过去分子是窗口内字节、分母是**整段运行**的 launch

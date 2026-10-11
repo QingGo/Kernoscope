@@ -13,6 +13,20 @@
 | L1/L2 命中率 | **LRU 模型的上界**（`estimated`） | `lts__t_sector_hit_rate.pct` |
 | DRAM 字节/launch | 模型 L2 miss × 32B × 采样放大（`estimated`） | `dram__bytes.sum` |
 
+## NVBit 版本与构建布局（R-72：这两件事必须配对写）
+
+历史上这里只写了"NVBit 1.8.1"，却让人跑 1.7.x 的 `make -C tools/mem_trace` —— **版本号与
+布局互相矛盾**，照抄的人会失败。可用组合实测如下（都能产出 `tools/build/mem_trace/mem_trace.so`）：
+
+| NVBit | 构建方式 | 备注 |
+|---|---|---|
+| **v1.8.1** | CMake：`cmake -S tools -B build && cmake --build build --target mem_trace`（或新版 `make --target mem_trace`） | 本仓库真机（CUDA 13 + sm_89 + 驱动 580）跑通的就是这条。⚠ **不要** `make` 整个 `tools`：`mem_trace_tma` 用 `%cluster_ctaid` 要求 sm_90+，会把整棵树带崩；架构变量写**裸数字**（`89`，不是 `sm_89`） |
+| **v1.7.7.3** | 老 Makefile：`make -C $NVBIT_PATH/tools/mem_trace ARCH=sm_89` | 验收报告第四轮在另一台上走通的组合（那台上 1.8.1 的整树 make 失败） |
+
+两条都必须 `NO_EAGER_LOAD=0`（1.8 默认懒加载会让插桩错过时机：程序跑完但零记录）。
+`tests/test_nvbit_smoke.py` 会**按本文件的说明**真采一段轨迹，并把这里写的版本号与
+`$NVBIT_PATH/core/nvbit.h` 里的 `NVBIT_VERSION` 对拍 —— 文档与实物不一致会红。
+
 ## 依赖与许可
 
 * 需要 **NVBit**（NVIDIA 专有许可）。本项目**不分发** NVBit 本体，也不分发用它构建的二进制；

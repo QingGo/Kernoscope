@@ -5,8 +5,15 @@
 #   NVBIT_MEMTRACE_SO=/path/to/mem_trace.so KS_MEMTRACE_OUT=t.txt \
 #       ./collect.sh -- ./your_app args
 #
-# 为什么用官方工具而不是本目录那个：本环境（NVBit 1.8.1 + 驱动 580 + CUDA 13 + sm_89）
-# 实测官方 mem_trace 能正常出记录，而我们的工具插桩调用不执行（见 README「状态」）。
+# 工具选择与版本（R-72：以前这里把"布局"和"版本号"写成了互相矛盾的一对）：
+#   * 本仓库实测**可用**的组合：NVBit **1.8.1** + CMake 构建（`cmake --build … --target mem_trace`
+#     或新版 `make --target mem_trace`）→ `tools/build/mem_trace/mem_trace.so`（本脚本的默认路径）。
+#     注意 1.8.1 里**不要** `make` 整个 tools：`mem_trace_tma` 用 `%cluster_ctaid` 要求 sm_90+，
+#     会把整棵树带崩；架构变量要**裸数字**（写 `89`，不是 `sm_89`）。
+#   * 另一条实测可用的组合：NVBit **v1.7.7.3** + 老 Makefile 布局
+#     （`make -C $NVBIT_PATH/tools/mem_trace ARCH=sm_89`，产出 tools/build/mem_trace/mem_trace.so）。
+#     验收报告第四轮在那台上是这么跑通的（1.8.1 的整树 make 会失败）。
+#   * 两条都要求 `NO_EAGER_LOAD=0`：1.8 默认懒加载会让插桩错过时机（程序跑完但零记录）。
 # 官方工具产出的是"一行 = 一条 warp 访存指令 + 全部 lane 地址"，粒度刚好够用。
 #
 # ⚠️ 必须 NO_EAGER_LOAD=0：NVBit 1.8 默认懒加载模块，会让插桩错过时机，
@@ -51,6 +58,10 @@ if [ "$RC" -ne 0 ]; then
   tail -5 "$OUT" >&2
   exit "$RC"
 fi
+
+# R-76：官方格式**没有结束标记**，被 ulimit/磁盘写满截断时工具察觉不到（验收报告里
+# 两次因此拿到低于物理下界的数）。我们自己采集的轨迹补一个哨兵，解析器据此判定完整性。
+echo "MEMTRACE: KS-TRACE-COMPLETE" >> "$OUT"
 
 N=$(grep -c 'MEMTRACE:.*warp ' "$OUT" 2>/dev/null || true)
 N=${N:-0}

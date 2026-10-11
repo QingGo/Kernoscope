@@ -360,3 +360,105 @@ def test_official_converter_attributes_and_filters_kernels(tmp_path):
     # 过滤不中：报错并列出实际看到的 kernel（可操作）
     with pytest.raises(MemTraceError, match="k_A"):
         load_official_memtrace(str(p), sm_count=4, kernel_filter="k_ZZZ")
+
+
+# --------------------------------------------------------------------------
+# R-73：轨迹口径必须按访存类型分流（共享/本地不许进入全局口径）
+# --------------------------------------------------------------------------
+def test_size_from_opcode_knows_sass_widths_and_ptx_vectors():
+    """SASS 的 `STS.U16` / `LDG.E.U8` 与 PTX 的 `v4.f32` 都要算对。
+
+    旧实现只认 PTX 风格的 `.<宽度>`：`STS.U16` 匹配不上 → 回落默认 4 B（应为 2 B），
+    而 `ld.global.v4.f32` 被当成 4 B（应为 16 B）。两者都会把合并效率算歪。
+    """
+    from kernoscope.backends.memtrace import size_from_opcode
+
+    cases = {"LDG.E": 4, "LDG.E.128": 16, "STG.E.64": 8, "STS.U16": 2, "STS.U8": 1,
+             "LDG.E.U8": 1, "LDS.64": 8, "ld.global.f32": 4, "ld.global.v4.f32": 16,
+             "ld.shared.v2.b32": 8, "ld.global.u16": 2}
+    for op, want in cases.items():
+        assert size_from_opcode(op) == want, (op, size_from_opcode(op), want)
+
+
+def test_access_kind_splits_global_from_shared_and_local():
+    """`kind` 分类是 R-73 的第一道门：LDS/STS/LDL/STL 不许进全局口径。"""
+    from kernoscope.backends.memtrace import access_kind
+
+    for op, want in (("LDG.E.128", "global"), ("STG.E", "global"),
+                     ("LDS", "shared"), ("STS.U16", "shared"), ("LDSM.16.M88.4", "shared"),
+                     ("LDL", "local"), ("STL", "local"),
+                     ("ld.global.v4.f32", "global"), ("st.shared.f32", "shared"),
+                     ("ld.local.f32", "local"), ("LD.E", "unknown"), ("BAR.SYNC", "other")):
+        assert access_kind(op) == want, (op, access_kind(op), want)
+
+
+def test_shared_memory_records_do_not_inflate_coalescing(tmp_path):
+    """真机原形（验收报告 §10.3）：`STS.U16` 让合并效率变成 **104.4%**（物理上不可能）。
+
+    一个 FlashAttention 轨迹里 1,282,048 条记录只有 8,192 条是全局的。修法是把共享/本地
+    访存剔出全局口径（`LDG/STG` 之外不算），并保留 `min(100, …)` 兜底。
+    这里按报告的最小复现构造：32 lane × 4 B 连续（4 sector，100%）+
+    32 lane × 2 B 共享写（1 sector）—— 旧代码把两者混在一起就会 >100%。
+    """
+    path = tmp_path / "mixed.txt"
+    glob = (0x100, "LDG.E.128", 32, 16, 0, [0x1000 + 16 * i for i in range(32)])
+    shm = (0x200, "STS.U16", 32, 2, 0, [0x100 + i for i in range(32)])
+    _mk_trace(path, [glob, shm])
+    st = analyze_memtrace(load_memtrace(str(path)))
+    assert st.kind_counts == {"global": 1, "shared": 1}
+    assert st.records_global == 1 and st.records == 2
+    assert st.coalescing_pct <= 100.0 + 1e-9, st.coalescing_pct
+    assert not st.coalescing_clamped, "正常路径应当是分流把输入挡掉，而不是靠夹紧"
+    # 全局那一条：32 lane × 16 B = 512 B 有用字节 / 16 个 sector × 32 B = 512 B → 100%
+    assert st.sectors_per_request == pytest.approx(16.0)
+    assert st.coalescing_pct == pytest.approx(100.0)
+
+
+def test_l2_model_ignores_shared_memory_traffic(tmp_path):
+    """共享访存的地址与 L2 无关：混进来会污染命中率与 DRAM 字节。"""
+    path = tmp_path / "shm.txt"
+    rows = [(0x100, "LDG.E.128", 32, 4, 0, [0x2000 + 16 * i for i in range(32)]),
+            (0x200, "STS.U16", 32, 2, 0, [0x10 + i for i in range(32)])]
+    _mk_trace(path, rows)
+    st = analyze_memtrace(load_memtrace(str(path)))
+    assert st.working_set_mb == pytest.approx(16 * 32 / 1e6)   # 只算全局那 16 个 sector
+    assert st.accesses == 16
+
+
+def test_max_accesses_refusal_names_the_concrete_number(tmp_path):
+    """R-74：拒绝是对的，但文案必须给出**具体要设多大**。
+
+    真机原形（验收报告 §10.7）：R=16384 那次需要 11.17M 次访问，默认 4M ⇒ 报告给 n/a。
+    工具当时说"只分析了 4M/11.17M 次访问"，但没说"把 --ks-max-accesses 提到 ≥ 11.17M"。
+    """
+    path = tmp_path / "many.txt"
+    rows = [(0x100, "LDG.E", 32, 4, 0, [0x1000 + 4 * i for i in range(32)])] * 50
+    _mk_trace(path, rows)
+    st = analyze_memtrace(load_memtrace(str(path)), max_accesses=10)
+    reason = st.dram_bytes_unavailable_reason or ""
+    assert st.dram_bytes_per_launch is None and reason
+    need = int(st.accesses)
+    assert f"--ks-max-accesses` 提到 ≥ {need}" in reason or f"≥ {need}" in reason, reason
+
+
+def test_trace_bounds_bracket_the_cache_model_value(tmp_path):
+    """R-77：同一份轨迹要给出替换策略的**上下界**，模型值必须落在中间。
+
+    地址部分本来就是算术（可逐条复核），只有"谁命中 L2"是模型；界的存在让读者能判断
+    结论对模型有多敏感（报告 §10.5 手算过这两个界）。
+    """
+    path = tmp_path / "reuse.txt"
+    base = 0x10000
+    # 同一个 sector 被访问 4 次（有复用）+ 另外 4 个只访问一次
+    rows = [(0x100, "LDG.E", 32, 4, 0, [base]) for _ in range(4)]
+    rows += [(0x100, "LDG.E", 32, 4, 0, [base + 32 * (i + 1)]) for i in range(4)]
+    _mk_trace(path, rows)
+    st = analyze_memtrace(load_memtrace(str(path)))
+    assert st.dram_bytes_lower is not None and st.dram_bytes_upper is not None
+    assert st.dram_bytes_lower <= st.dram_bytes_per_launch <= st.dram_bytes_upper
+    from kernoscope.analyze.memtrace import to_metrics
+
+    names = {m[0] for m in to_metrics(st)}
+    assert "est__dram_bytes_per_launch_trace_bounds" in names
+    note = next(m[4] for m in to_metrics(st) if m[0] == "est__dram_bytes_per_launch_trace")
+    assert "measured 级算术" in note and "模型" in note

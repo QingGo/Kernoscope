@@ -29,6 +29,7 @@ NVBit 本体是 NVIDIA 专有许可、**不得随本项目分发**，所以本�
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -38,13 +39,70 @@ SECTOR_BYTES = 32
 
 # opcode 后缀 -> 每 lane 访问字节数（与工具侧 size_from_opcode 保持同一套规则）
 _SIZE_RULES = ((".128", 16), (".64", 8), (".32", 4), (".16", 2), (".8", 1))
+# SASS 宽度：`STS.U16` / `LDG.E.U8` / `ST.E.S8` —— 旧实现只认 PTX 风格的 ".16"，
+# 于是 `STS.U16` 匹配不上、回落默认 4 B（应为 2 B），合并效率被算成 400%（R-73 根因②）。
+_SASS_WIDTH = re.compile(r"\.([USBFE]?)(128|64|32|16|8)(?![0-9])", re.I)
+# PTX 风格的向量宽度：`ld.global.v4.f32` 每 lane 是 4×4 B，不是 4 B
+_VEC = re.compile(r"(?:^|\.)v([2-4])(?=[.a-z0-9])", re.I)
+
+
+COMPLETE_SENTINEL = "KS-TRACE-COMPLETE"
+
+
+def trace_fingerprint(path: str, head: int = 1 << 20) -> tuple[str, bool]:
+    """轨迹的（内容指纹, 是否以换行结尾）。
+
+    R-75：同条件对拍需要一个"这是哪份轨迹"的标识 —— 指纹让"两次 diff 用的是不是同一份
+    轨迹"可比对。R-76：官方格式**没有结束标记**，被 `ulimit`/磁盘截断时工具察觉不到
+    （验收报告里两次拿到低于物理下界的数），所以：
+      * 我们自己采集的轨迹由 `collect.sh` 追加 `KS-TRACE-COMPLETE` 哨兵；
+      * 手动重定向的文件按"**无法确认完整**"处理，并在 note 里明说；
+      * 结尾不是换行 = 铁定被截断（最后一行不完整）。
+    """
+    h = hashlib.sha256()
+    tail = b""
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+            tail = chunk[-1:]
+    return h.hexdigest()[:16], tail == b"\n"
 
 
 def size_from_opcode(op: str) -> int:
+    base = 0
     for suffix, size in _SIZE_RULES:
         if suffix in op:
-            return size
-    return 4
+            base = size
+            break
+    if not base:
+        m = _SASS_WIDTH.search(op)
+        base = int(m.group(2)) // 8 if m else 4
+    v = _VEC.search(op)
+    return base * int(v.group(1)) if v else base
+
+
+# ---------------------------------------------------------------- 访存类型分流
+# R-73 根因①：共享/本地访存被当成全局访存喂进 L2 模型与合并效率 —— 而 Triton 的 `tl.dot`
+# 会产生海量共享内存指令（一个 FlashAttention 轨迹里 1,282,048 条记录只有 8,192 条是全局的）。
+# 所以每条记录带一个 kind，全局口径只用 global。
+def access_kind(op: str) -> str:
+    """`LDG/STG` → global；`LDS/STS/LDSM` → shared；`LDL/STL` → local；其余按状态空间词判定。"""
+    o = op.upper()
+    if o.startswith(("LDS", "STS")) or "LDSM" in o:
+        return "shared"
+    if o.startswith(("LDL", "STL")):
+        return "local"
+    if o.startswith(("LDG", "STG")):
+        return "global"
+    if "GLOBAL" in o:
+        return "global"
+    if "SHARED" in o:
+        return "shared"
+    if "LOCAL" in o:
+        return "local"
+    if o.startswith(("LD", "ST", "ATOM", "RED", "CAS", "MULTIMEM")):
+        return "unknown"        # 没有状态空间信息：**不并入全局口径**，而是计数报出来
+    return "other"
 
 
 class MemTraceError(ValueError):
@@ -61,6 +119,7 @@ class MemRecord:
     size: int            # 每 lane 字节数
     smid: int
     sectors: list[int]   # 去重、32B 对齐的地址
+    kind: str = "global"  # global / shared / local / unknown / other（见 access_kind）
 
     @property
     def useful_bytes(self) -> int:
@@ -142,6 +201,13 @@ class MemTrace:
     def truncated(self) -> bool:
         return self._get_int("truncated") == 1
 
+    @property
+    def complete(self) -> str:
+        """`"yes"`（有结束标记）/ `"no"`（明确截断）/ `"unknown"`（没法判断，例如手动重定向）。"""
+        if self.truncated:
+            return "no"
+        return {"1": "yes", "0": "unknown"}.get(self.header.get("complete", "0"), "unknown")
+
 
 def _parse_header_line(line: str) -> tuple[str, str] | None:
     body = line[1:].strip()
@@ -200,7 +266,8 @@ def load_memtrace(path: str) -> MemTrace:
                         f"{path}:{lineno}: 工具报 sectors={claimed}，但 addrs 去重后是 "
                         f"{len(sectors)} —— 工具与解析器的口径不一致，不能继续（请检查插桩代码）")
             records.append(MemRecord(pc=pc, op=parts[1], lanes=lanes, size=size,
-                                     smid=smid, sectors=sectors))
+                                     smid=smid, sectors=sectors,
+                                     kind=access_kind(parts[1])))
 
     if not saw_tag:
         raise MemTraceError(f"{path}: 缺少首行 '# {FORMAT_TAG}'（轨迹格式标识）")
@@ -251,6 +318,7 @@ def load_official_memtrace(path: str, sm_count: int = 0, l2_bytes: int = 0,
     header: dict[str, str] = {}
     records: list[MemRecord] = []
     opcode_ids: dict[str, int] = {}
+    saw_complete = False
     ctas: set[int] = set()
     launches = 0
     kernel = ""
@@ -300,6 +368,9 @@ def load_official_memtrace(path: str, sm_count: int = 0, l2_bytes: int = 0,
                     launches += 1
                     kernel, grid, block = cur_kernel, cur_grid, cur_block
                 continue
+            if COMPLETE_SENTINEL in line:
+                saw_complete = True
+                continue
             if not keep_current:
                 continue
 
@@ -327,7 +398,8 @@ def load_official_memtrace(path: str, sm_count: int = 0, l2_bytes: int = 0,
             sectors = sorted({a & ~(SECTOR_BYTES - 1) for a in addrs})
             smid = (cta % sm_count) if sm_count else 0
             records.append(MemRecord(pc=opcode_ids[op], op=op, lanes=len(addrs),
-                                     size=size_from_opcode(op), smid=smid, sectors=sectors))
+                                     size=size_from_opcode(op), smid=smid, sectors=sectors,
+                                     kind=access_kind(op)))
 
     if not records:
         hint = (f"（本次输出里的 kernel: {' | '.join(kernels_seen[:5]) or '无 LAUNCH 行'}）"
@@ -336,6 +408,11 @@ def load_official_memtrace(path: str, sm_count: int = 0, l2_bytes: int = 0,
             f"{path}: 没有解析到任何 MEMTRACE 数据行{hint}。若用官方 mem_trace 产出："
             f"① 本环境需要 NO_EAGER_LOAD=0；② 若过滤了 kernel，确认名字匹配")
     header["source"] = "official-nvbit-mem-trace"
+    header["complete"] = "1" if saw_complete else "0"
+    fp, ends_nl = trace_fingerprint(path)
+    header["trace_sha256"] = fp
+    if not ends_nl:
+        header["truncated"] = "1"          # 结尾不是换行 ⇒ 最后一行不完整，铁定被截断
     header["kernel"] = kernel or "<unknown>"
     header["grid"] = str(grid)
     header["block"] = str(block)
