@@ -266,18 +266,31 @@ kernoscope --ks-ncu-rep other.ncu-rep --ks-synthetic --set basic -o rep
 kernoscope --export-ncu-rep out.ncu-rep -o rep -- python bench.py
 ```
 
-写出一份**合法的 `.ncu-rep`**（官方 reader 能按名字读回值、`ncu --import` 能打开、
-ncu-ui 能打开），**同时**写 `out.ncu-rep.ATTRIBUTION.txt` 旁路署名。三条门禁：
+写出一份**合法的 `.ncu-rep`**（官方 reader 能按名字读回值、`ncu --import` / `ncu-ui` 能打开），
+**同时**写 `out.ncu-rep.ATTRIBUTION.txt` 旁路署名。三条门禁：
 
 1. **署名是强制的**：文件内 `provider`/`comment` 为空 → 拒绝生成（`build_report` 抛错）；
    `comment` 里写明"这不是硬件计数器读数"、每个值的出处、以及它的前提。
 2. **前提不成立的值不写**：决策包里任何 `status=refused` 的判词所引用的指标名都不许进文件。
 3. **一个值都不剩时拒绝生成**：生成一个空的/全是垃圾的"ncu 报告"比不生成更糟。
 
-只写**自有命名空间**（`ks__`/`est__`/`meas__`）与"两边单位语义一致"的计数量白名单
-（`launch__registers_per_thread`、`launch__shared_mem_per_block_static`、`launch__grid_size`、
-`launch__block_size`）。**不写 `gpu__time_duration.sum`**：我们是 ms、ncu 是 ns，
-写进去会让读的人差 10⁶（仓库付过一次同类代价：MB 被当字节，7.27 TB 写成 7.3 MB）。
+#### 哪些名字写 ncu 名下、哪些留在自有命名空间
+
+规则只有一条：**同源才写 ncu 名下，且必须按 ncu 的单位与标签写**。
+
+| 类型 | 例子 | 写在 | 谁能看到 |
+|---|---|---|---|
+| 同源（CUPTI activity / cubin，语义与 ncu 一致） | `gpu__time_duration.sum`、`launch__grid_size`、`launch__block_size`、`launch__registers_per_thread`、`launch__shared_mem_per_block_{static,dynamic}`、`launch__thread_count` | ncu 的节（`SpeedOfLight` / `LaunchStats`），名字、单位、显示标签都按 ncu | `--page details` 的节标题与文本、`--page raw`、ncu-ui、Python API |
+| 替代口径（NVML 采样 / 轨迹 / 模型 / 成本） | `ks__*`、`est__*`、`meas__*` | 自有节 `KernoscopeMetrics` | `--page raw`、Python API、旁路署名、文件内 RuleResult |
+
+**单位换算发生在写文件那一刻，且只发生一次**（`ncrep/ncu_rows.py` 是唯一的白名单与系数表）：
+`gpu__time_duration.sum` 我们是 ms、ncu 是 ns ⇒ **×10⁶** 后写入。
+之所以要写而不是略过：略过是把**单位问题**当成了**身份问题** —— 同源量只要换算正确，
+写在 ncu 名下恰恰是它该在的地方（用户要的就是在 ncu-ui 里看到 Duration）。
+旁路署名会同时给出"文件里的值"和"我们的原值"（如 `37,501,500 ns（我们的值 37.5015 ms × 1e6）`）。
+
+两条纪律仍然不变：**绝不占用硬件计数器命名空间**（`dram__`/`sm__`/`lts__`… 一律不写），
+**绝不为没有的量编造行**（ncu 节里只列我们真有值的行，缺的行不写而不是写 0）。
 
 ### 4.5 与 nsys / NVTX
 
@@ -776,9 +789,14 @@ DRAM 字节代理 = 显存忙碌时间 × 本机实测峰值带宽。`utilizatio
 ### ⑧ 导出的 `.ncu-rep` 的已知边界
 
 - 官方 Python API 能按**名字与值**读回我们写的指标，`ncu --import` 能认出 kernel 行与几何，
-  但 `--page details` 在我们的文件上**不渲染指标表**（它把设备读成未知，怀疑缺
-  `DeviceAttributes`/`DeviceProperties`）。也就是说：**ncu-ui 的表格视图对我们的文件还不完整**，
-  这一点只做了无头验证，人眼验收（M5）尚未完成。
+  ncu-ui 能在无头 X（Xvfb + 软件渲染）里打开我们的文件并在结果表里显示
+  `Duration`/`# Registers`/`Grid Size`（M5 已用人眼截图验收）。
+- `--page details` 的机制在原厂报告上是"**按 rule 驱动**"：某个节只有当 `RuleResults[].SectionIdentifier`
+  指向它时才会被渲染（我们按这个机制为每个节写了一条 rule，所以**节标题与我们的数都能显示成文本**）。
+  但那个页面的**表格行**只在报告的指标集"完整到能被 ncu 自己的节定义解析"时才出现 ——
+  在替代口径报告上不可能满足，**也没打算靠编造计数器行去满足**。所以详情页给的是
+  "节标题 + 同源值文本 + 署名/WRN"，完整的逐指标数值在 `--page raw`、Python API 与旁路署名里。
+  这三条路径都有真机输出钉住（README §12 的运行记录）。
 - 官方 `IMetric.unit()` 对我们写的指标返回空串：**单位在文件里，但不参与回读** ——
   所以"可回读的那一对"是名字 + 值，单位要看旁路署名。
 - 文件内的 `Comment`/`Provider` 是我们**唯一**的署名载体之一（Python API 读不到 comment），

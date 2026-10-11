@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### 导出的 `.ncu-rep`：同源行改用 ncu 的单位/标签，并让 `--page details` 显示出来
+
+- **会改变外部消费者看到的东西**：`gpu__time_duration.sum` 现在**会**写进导出文件，
+  单位是 **ns**（我们的内部值是 ms，写文件时 ×10⁶，只换算一次）。同时新增
+  `launch__thread_count`、`launch__shared_mem_per_block_dynamic` 两行。
+  以前这几行被整体略过（"单位不同就不写"）——现在按"同源 + 换算"的规则写。
+- 新增 `ncrep/ncu_rows.py`：白名单行表（名字 → ncu 显示标签 / 单位 / 换算系数 / 所属节）
+  与节表（`SpeedOfLight`、`LaunchStats`）。**标签必须逐字取自 ncu 自带的节定义**，
+  否则 `--page details` 会整行不渲染（真机二分实验结论）。
+- 文件结构新增：`RuleResults`（每个节一条 + 一条署名 `Warning`）、`SourceData.CudaSmVersion`
+  与 `SessionDetails.DeviceAttributes`。`--page details` 是**按 rule 驱动**的页面：
+  没有 rule 指向某个节，那一节连标题都不显示；所以每个节都配了一条 rule，
+  同源值同时以文本形式写进 rule 的 Message（表格行在替代口径报告上无法渲染，
+  原因见 README §11⑧）。
+- 旁路署名（`<path>.ATTRIBUTION.txt`）新增 `unit` 与"表格"两列，并给出换算说明
+  （`37,501,500 ns（我们的值 37.5015 ms × 1e6）`）。
+- 读这些文件的脚本若按 `gpu__time_duration.sum` 取值，需按 **ns** 理解（此前该名字不存在）。
+
+
 修掉第三轮验收报告里的阻塞缺陷。**两处会改变外部消费者看到的东西**，逐条列在下面。
 
 ### 决策包（`--packet`）

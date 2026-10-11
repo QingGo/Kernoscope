@@ -562,7 +562,8 @@ def test_report_carries_ncu_sections_with_ncu_labels_and_units():
     data = build_report(
         RepSource("k(float *)", (1024, 1, 1), (256, 1, 1)),
         [RepMetric("gpu__time_duration.sum", 95.1), RepMetric("launch__grid_size", 1024.0),
-         RepMetric("launch__registers_per_thread", 96.0), RepMetric("ks__cost_per_mtok", 12.5)],
+         RepMetric("launch__registers_per_thread", 96.0),
+         RepMetric("launch__thread_count", 262144.0), RepMetric("ks__cost_per_mtok", 12.5)],
         provider="kernoscope", comment="not counters", disclosure="substitute calibers",
         device_name="RTX 4090", compute_capability="8.9")
     blocks = _split_blocks(data)
@@ -592,11 +593,22 @@ def test_report_carries_ncu_sections_with_ncu_labels_and_units():
     # 替代口径留在自有命名空间的节里（details 表认不出它，但 raw/Python API 能读）
     own = sections["KernoscopeMetrics"]["Header"]["Metrics"]
     assert [m["Name"] for m in own] == ["ks__cost_per_mtok"]
-    # RuleResult 是 details 页唯一会渲染散文的通道
-    rule = result["RuleResults"][0]
-    assert rule["Identifier"] == "KernoscopeSubstituteCalibers"
-    assert rule["Body"]["Items"][0]["Message"]["Type"] == 2      # Warning
-    assert "substitute calibers" in rule["Body"]["Items"][0]["Message"]["Message"]
+    # RuleResult 是 details 页唯一会渲染散文的通道，而且 **details 页是按 rule 驱动的**：
+    # 没有 rule 指向某个节，那一节连标题都不印（真机实验：去掉 rule 后整页只剩 kernel 行）。
+    # 所以每个 ncu 节都要有自己的一条 rule，署名那条挂在自有节上。
+    rules = {r["Identifier"]: r for r in result["RuleResults"]}
+    assert set(rules) == {"KernoscopeSpeedOfLight", "KernoscopeLaunchStats",
+                          "KernoscopeSubstituteCalibers"}
+    assert rules["KernoscopeLaunchStats"]["SectionIdentifier"] == "LaunchStats"
+    assert rules["KernoscopeSpeedOfLight"]["SectionIdentifier"] == "SpeedOfLight"
+    # 同源节那条 rule 的文本里要有换算后的值（表格不渲染时，读者至少能在文本里看到数）
+    text = rules["KernoscopeSpeedOfLight"]["Body"]["Items"][0]["Message"]["Message"]
+    assert "Duration 95,100,000 ns" in text
+    launch_text = rules["KernoscopeLaunchStats"]["Body"]["Items"][0]["Message"]["Message"]
+    assert "Grid Size 1,024" in launch_text and "Registers Per Thread 96 register/thread" in launch_text
+    own_rule = rules["KernoscopeSubstituteCalibers"]
+    assert own_rule["Body"]["Items"][0]["Message"]["Type"] == 2      # Warning
+    assert "substitute calibers" in own_rule["Body"]["Items"][0]["Message"]["Message"]
 
 
 def test_cuda_sm_version_parsing_is_conservative():

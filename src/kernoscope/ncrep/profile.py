@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from .ncu_rows import NCU_SECTIONS, convert, section_of
+from .ncu_rows import NCU_SECTIONS, convert, row_for, section_of
 from .schema import Field, Message
 from .writer import (DEVICE_ATTRIBUTES, SESSION_DETAILS, block_bytes, file_header_bytes)
 
@@ -385,14 +385,19 @@ def _source_block(compute_capability: str | int | None) -> bytes | None:
     return block_bytes(header, frame)
 
 
+def _fmt_value(value: float) -> str:
+    """给人看的数值：整数不带科学计数法（`9.51e+07` 在 details 页里很难读）。"""
+    if value == int(value) and abs(value) < 1e15:
+        return f"{int(value):,}"
+    return f"{value:.6g}"
+
+
 def _section_metrics(names: Sequence[str]) -> list[dict]:
     """按 ncu 的行定义（名字/标签/单位）构造 ``Header.Metrics``。
 
     **Label 必须来自 ncu 自己的节定义**：details 页按 Label 查它内置的表，认不出来的行
     整行不渲染（真机二分实验：把 Label 换成我们的指标名 → 表格里那一行立刻消失）。
     """
-    from .ncu_rows import row_for
-
     cells = []
     for name in names:
         row = row_for(name)
@@ -404,6 +409,7 @@ def _section_metrics(names: Sequence[str]) -> list[dict]:
 
 def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
                     name_ids: Sequence[int], *, disclosure: str = "") -> bytes:
+
     ncu_names = {m.name for m in metrics if section_of(m.name)}
     sections: list[dict] = []
     for spec in NCU_SECTIONS:
@@ -420,6 +426,30 @@ def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
             "Sets": [{"Identifier": s} for s in ("basic", "detailed", "full")],
             "Header": {"Rows": len(cells), "Metrics": cells},
         })
+    ncu_rules: list[dict] = []
+    for spec in NCU_SECTIONS:
+        names = [n for n in spec.rows if n in ncu_names]
+        if not names:
+            continue
+        by_name = {m.name: m for m in metrics}
+        facts = []
+        for n in names:
+            row = row_for(n)
+            value = by_name[n].value * row.scale
+            unit = f" {row.unit}" if row.unit else ""
+            facts.append(f"{row.label} {_fmt_value(value)}{unit}")
+        ncu_rules.append({
+            "Identifier": f"Kernoscope{spec.identifier}",
+            "DisplayName": f"{spec.display_name} — same source as Nsight Compute",
+            "SectionIdentifier": spec.identifier,
+            "Body": {"Items": [{"Message": {
+                "Message": ("kernoscope (same source as Nsight Compute, exact): "
+                            + "; ".join(facts)
+                            + ". Nsight Compute does not render substitute-caliber rows in this "
+                              "table; see `--page raw` and the sidecar attribution file."),
+                "Type": 1}}]},
+        })
+
     own = [m for m in metrics if not section_of(m.name)]
     if own:
         cells = [{"Name": m.name, "Label": m.name, "Unit": m.unit or None} for m in own]
@@ -457,12 +487,13 @@ def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
         # 署名/结论走 RuleResult 的 Message：这是 details 页**会渲染**散文的唯一通道
         # （实测 `--page details` 把没有标签的表行丢掉，但会把 rule 的 Message 打成
         #  INF/WRN/OPT 块）。
-        "RuleResults": [{
+        # 顺序：每个 ncu 节一条（details 页按 rule 渲染节标题与文本），最后是我们的署名条。
+        "RuleResults": (ncu_rules + ([{
             "Identifier": "KernoscopeSubstituteCalibers",
             "DisplayName": "Kernoscope: substitute calibers (NOT hardware counters)",
             "SectionIdentifier": SECTION_ID,
             "Body": {"Items": [{"Message": {"Message": disclosure, "Type": 2}}]},
-        }] if disclosure else None,
+        }] if disclosure else [])) or None,
     }
     return PROFILE_RESULT.encode(values)
 

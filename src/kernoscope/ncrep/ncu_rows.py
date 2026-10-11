@@ -71,6 +71,9 @@ NCU_ROWS: tuple[NcuRow, ...] = (
            "LaunchStats"),
     NcuRow("launch__shared_mem_per_block_static", "Static Shared Memory Per Block",
            "byte/block", 1.0, "LaunchStats"),
+    NcuRow("launch__thread_count", "Threads", "thread", 1.0, "LaunchStats"),
+    NcuRow("launch__shared_mem_per_block_dynamic", "Dynamic Shared Memory Per Block",
+           "byte/block", 1.0, "LaunchStats"),
 )
 
 #: 我们会生成的 ncu 节（只列我们能填的行；ncu 的节定义里有更多行，我们没有就不写）。
@@ -80,7 +83,8 @@ NCU_SECTIONS: tuple[NcuSection, ...] = (
                ("gpu__time_duration.sum",)),
     NcuSection("LaunchStats", "Launch Statistics", 70,
                ("launch__grid_size", "launch__block_size", "launch__registers_per_thread",
-                "launch__shared_mem_per_block_static")),
+                "launch__shared_mem_per_block_static",
+                "launch__shared_mem_per_block_dynamic", "launch__thread_count")),
 )
 
 _BY_NAME: dict[str, NcuRow] = {row.name: row for row in NCU_ROWS}

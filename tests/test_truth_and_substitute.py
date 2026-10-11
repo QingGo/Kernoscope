@@ -232,9 +232,14 @@ def test_same_source_ncu_rows_are_written_with_ncu_units_and_labels():
     metrics, _, units, dropped, by_ns, _ = select_metrics(kr)
     by_name = {m.name: m for m in metrics}
     assert "gpu__time_duration.sum" in by_name and "gpu__time_duration.sum" not in by_ns
-    assert by_name["gpu__time_duration.sum"].value == pytest.approx(0.089728 * 1e6)  # ms → ns
+    # 选择阶段**不改值**（换算只允许在 build_report 一处发生；双换算曾把 ms→ns 变成 ×1e12）
+    assert by_name["gpu__time_duration.sum"].value == pytest.approx(0.089728)
     assert units["gpu__time_duration.sum"] == "ns"
     assert units["launch__registers_per_thread"] == "register/thread"
+    # 写文件时换算一次，且只有一次
+    from kernoscope.ncrep.profile import build_report
+    from kernoscope.ncrep.ncu_rows import convert
+    assert convert("gpu__time_duration.sum", 0.089728) == pytest.approx((89728.0, "ns"))
     plan = build_plan(kr, packet={"verdicts": []}, tool_version="0.2.0")
     assert "written in ncu units" in plan.comment
 

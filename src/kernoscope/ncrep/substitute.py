@@ -88,19 +88,6 @@ def assert_writable(metrics: Sequence[RepMetric]) -> None:
             "把替代值挂在这些名字下面就是在伪造 ncu 读数".format(", ".join(sorted(bad)[:6])))
 
 
-def _for_ncu(m: RepMetric) -> tuple[RepMetric, str]:
-    """同源行按 ncu 单位换算后再进文件；返回 (metric, 单位)。
-
-    为什么必须在**写文件时**换算而不是在别处：`ncu --import`/ncu-ui/Python API 都会按 ncu 的
-    单位约定理解这个名字。我们的内部值是 ms、ncu 要 ns —— 少乘 1e6 就是 R-51 那类错误的翻版。
-    """
-    row = row_for(m.name)
-    if row is None:
-        return RepMetric(m.name, m.value, m.unit), m.unit
-    value, unit = convert(m.name, m.value)
-    return RepMetric(m.name, value, unit), unit
-
-
 def _provenance_rank(p: Provenance) -> int:
     """截断顺序：与 ncu 同源的 exact 最该保留（可对拍），estimated 最后。"""
     return {Provenance.EXACT: 0, Provenance.MEASURED: 1, Provenance.DERIVED: 2,
@@ -155,12 +142,10 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
     uniq.sort(key=lambda r: (_provenance_rank(r[0]), r[1]))
     over = max(0, len(uniq) - limit)
     uniq = uniq[:limit]
-    metrics: list[RepMetric] = []
-    units: dict[str, str] = {}
-    for _, name, value, _, _ in uniq:
-        m, unit = _for_ncu(RepMetric(name, value, ""))
-        metrics.append(m)
-        units[name] = unit
+    # **值保持我们的单位**：ncu 单位的换算只允许在 `build_report` 那一处发生
+    # （早先这里也换一次，于是 ×1e6 变成了 ×1e12 —— 真机 raw 页抓到 3.75e13 ns）。
+    metrics = [RepMetric(name, value, "") for _, name, value, _, _ in uniq]
+    units = {m.name: (row_for(m.name).unit if row_for(m.name) else "") for m in metrics}
     prov = {row[1]: row[0].value for row in uniq}
     return metrics, prov, units, dropped, by_namespace, over
 
@@ -272,8 +257,13 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
     lines.append("| metric | value | unit | provenance | 表格 |")
     lines.append("|---|---|---|---|---|")
     for m in plan.metrics:
-        where = "ncu（同源）" if section_of(m.name) else "raw/本工具"
-        lines.append(f"| `{m.name}` | {m.value:.6g} | {plan.unit_by_name.get(m.name, '') or '—'} "
+        row = row_for(m.name)
+        where = "ncu（同源）" if row is not None else "raw/本工具"
+        value = convert(m.name, m.value)[0] if row is not None else m.value
+        note = (f"（我们的值 {m.value:.6g} ms × {row.scale:g}）"
+                if row is not None and row.scale != 1.0 else "")
+        lines.append(f"| `{m.name}` | {value:.6g}{note} | "
+                     f"{plan.unit_by_name.get(m.name, '') or '—'} "
                      f"| {plan.provenance_by_name.get(m.name, '')} | {where} |")
     lines.append("")
     lines.append("同源行（`launch__*` / `gpu__time_duration.sum`）会出现在 `ncu --import "
