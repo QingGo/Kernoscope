@@ -22,10 +22,29 @@ bash bench/preflight-first-run.sh          # 期望：PREFLIGHT OK 6/6
 |---|---|---|
 | 1 | **维护者** | 仓库转公开：GitHub → Settings → Danger Zone → Change visibility → Public（或 `gh repo edit QingGo/Kernoscope --visibility public --accept-visibility-change-consequences`） |
 | 2 | 任何人 | 公开后立刻复核：`git clone` 到一个干净目录、按 README §2 走一遍、确认 `bench/`、`skills/`、`NON-GOALS.md`、`PROVENANCE.md`、`COVERAGE.md` 都在 |
-| 3 | **维护者** | 在 PyPI 建 API token（**只授 `kernoscope` 这一个项目**，不要账号级 token），存到 `~/.pypirc` 或 `UV_PUBLISH_TOKEN` |
-| 4 | **维护者** | 打 tag 并发布：`git tag -a v0.2.0 -m "0.2.0 alpha"` → `git push origin v0.2.0` → `uv build && uv publish`（或 `twine upload dist/*`） |
-| 5 | 任何人 | 发布后验证**发布物**而不是工作树：`uv tool install kernoscope`（新环境）→ `kernoscope doctor; echo $?` → `bash bench/preflight-first-run.sh` |
+| 3 | **维护者** | 一次性：在 PyPI 配 **Trusted Publisher（OIDC）**，**不需要任何 token**。项目还不存在时配的是 pending publisher，四个字段必须与仓库里 `publish.yml` 逐字一致：`owner=QingGo`、`repo=Kernoscope`、`workflow=publish.yml`、`environment=pypi`（`https://pypi.org/manage/account/publishing/`），并在 GitHub 建同名 environment `pypi`（可挂保护规则：仅允许 `v*` tag、需要 reviewer） |
+| 4 | **维护者** | 打 tag 即发布（**密钥为零**，由 CI 用 OIDC 换短时 token）：`git tag -a v0.2.0 -m "0.2.0 alpha"` → `git push origin v0.2.0`。⚠️ tag 指向的提交里必须**已经**有 `publish.yml`。CI 会先跑门禁与元数据断言，再 `uv publish --trusted-publishing always` |
+| 5 | 任何人 | 发布后验证**发布物**而不是工作树：`bash bench/release-dry-run.sh --from-pypi`（从 PyPI 隔离安装 + 首用三连 + 预算），或手工 `uv tool install kernoscope`（新环境）→ `kernoscope doctor; echo $?` |
 | 6 | 维护者 | GitHub Release：贴 §0 的 preflight 结果 + CHANGELOG 的 Unreleased 段 + 「接口会变」声明 |
+
+### 1.1 为什么不用 API token（以及什么时候仍然用）
+
+**日常发布走 Trusted Publisher**：没有长期密钥可泄露，每次运行由 GitHub 换一个 ~15 分钟的
+短时 token，绑定 `owner/repo/workflow/environment`；而且 PyPI 会自动为这类上传附
+**attestation（PEP 740）**，用户可验证"这个 wheel 确实由这个仓库的这次构建产出"。
+
+顺带一个**首次发布的现实理由**：项目还不存在时，PyPI **建不了** project-scoped token，
+只能先用**账号级** token（权限大得多：能往你任意项目发包、能建新项目）——而 pending publisher
+恰恰在项目不存在时就能配好。所以"零密钥"这条路在第一次发布时反而更干净。
+
+**仍然需要 token 的场合**（应急，不是日常）：CI 挂了但必须立刻发版、或要往 TestPyPI 演练。
+那时：① 首次用账号级 token，发完**立刻**换成 project-scoped（Scope = Project: kernoscope）并删掉
+账号级的；② 只放在环境变量 `UV_PUBLISH_TOKEN` 或 CI secret 里，绝不进仓库；③ token 只显示一次。
+
+```bash
+# 应急路径（日常不要用）
+uv build && UV_PUBLISH_TOKEN=pypi-XXXXXXXX uv publish
+```
 
 ## 2 版本与兼容策略
 

@@ -738,6 +738,25 @@ kernoscope mcp --stdio
   `degradation-check.sh` / `issue_probe.sh` 共 9 处，并加两条门禁：静态扫描（**任何** shell 脚本里
   `$VAR` 紧跟非 ASCII ⇒ 红）＋ 在 `LC_ALL=C` 下逐个 `bash -n`。
 
+### 发布走 Trusted Publisher（OIDC）：`.github/workflows/publish.yml`
+
+- **无长期密钥**：推 tag（`git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0`）触发 CI，
+  由 GitHub 换一个短时 token 上传，PyPI 自动附 **attestation（PEP 740）**。PyPI 侧登记的是
+  pending publisher（项目还不存在时也能配），四个字段必须与仓库逐字一致：
+  `owner=QingGo`、`repo=Kernoscope`、`workflow=publish.yml`、`environment=pypi`。
+- 工作流的形状本身有测试：只允许 `v*` tag 触发、**没有** `pull_request_target`/`workflow_dispatch`、
+  `id-token: write` **只在 publish job**（build job 没有）、`environment` 名与 RELEASING 同源、
+  `uv publish --trusted-publishing always`（拿不到 OIDC 就红，**不静默退化成 token**）。
+- 发布前先拦便宜的错误：tag 与 `pyproject` 版本必须一致 → 该提交**自己跑一遍门禁** →
+  `uv build` → 元数据断言 → 才上传。
+- **元数据断言只有一份**：新增 `bench/check_dist_metadata.py`（名字/版本/许可/Alpha 分类器/
+  Python 下限/console script 入口点/测试没被打进包/README 渲染类型），本地预演
+  `bench/release-dry-run.sh` 与 CI 工作流调用的是**同一个脚本** —— 两处各写一份就一定会漂，
+  而漂的那份正好是发布那一刻在跑的那份。它有两条测试：真 wheel 走通、假 wheel（错版本/缺许可/
+  缺入口点/夹带 tests）必须 rc=1 并逐条点名。
+- RELEASING §1 改成 OIDC 流程（§1.1 说明为什么不用 token，以及**应急**路径：CI 挂了才用
+  project-scoped token，且首次发布只能先用账号级、随后必须换掉）。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

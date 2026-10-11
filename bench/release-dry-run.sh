@@ -60,37 +60,14 @@ else
   ok "$(basename "$WHEEL")（$(wc -c < "$WHEEL" | tr -d ' ') B）"
   SRC="$WHEEL"
 
-  python3 - "$WHEEL" "$VERSION" <<'PY'
-import sys, zipfile
-wheel, version = sys.argv[1], sys.argv[2]
-z = zipfile.ZipFile(wheel)
-names = z.namelist()
-problems = []
-meta = z.read([n for n in names if n.endswith("METADATA")][0]).decode()
-def has(prefix):
-    return any(l.startswith(prefix) for l in meta.splitlines())
-if f"Name: kernoscope" not in meta.splitlines():
-    problems.append("包名不是 kernoscope")
-if f"Version: {version}" not in meta.splitlines():
-    problems.append(f"版本不是 {version}")
-for prefix, what in (("License-Expression: Apache-2.0", "许可"),
-                     ("Classifier: Development Status :: 3 - Alpha", "Alpha 分类器"),
-                     ("Requires-Python: >=3.10", "Python 下限")):
-    if not has(prefix):
-        problems.append(f"{what}没写（{prefix}）")
-eps = [n for n in names if n.endswith("entry_points.txt")]
-if not eps or "kernoscope = kernoscope.cli:main" not in z.read(eps[0]).decode():
-    problems.append("console script 入口点丢了")
-leaked = [n for n in names if "/tests/" in n or n.startswith("tests/")]
-if leaked:
-    problems.append(f"测试被打进包：{leaked[:3]}")
-for p in problems:
-    print(f"  ✗ {p}")
-print("  ✓ 元数据：名字/版本/许可/Alpha/Python 下限/入口点/不含测试"
-      if not problems else "  ✗ 元数据有问题")
-sys.exit(1 if problems else 0)
-PY
-  [ $? -eq 0 ] || fail=1
+  # 元数据断言是**一份共用脚本**（`publish.yml` 在 CI 里调用的也是它）：
+  # 发布前预演、CI 发布、发布后验证三处只有一组判据，不会再漂。
+  if python3 "$ROOT/bench/check_dist_metadata.py" "$WHEEL" --expect-version "$VERSION"; then
+    :
+  else
+    fail=1
+  fi
+
 fi
 
 if [ "$MODE" = "meta" ]; then
@@ -146,8 +123,11 @@ if [ "$MODE" = "pypi" ]; then
   say "==> 发布后验证通过：PyPI 上的 kernoscope==$VERSION 能装、能跑、首屏在预算内"
 else
   say "==> 预演通过：本地 wheel 能装、能跑、首屏在预算内"
-  say "    发布命令（需要你的 PyPI token）："
-  say "      git tag -a v$VERSION -m \"v$VERSION\" && uv build && uv publish"
+  say "    发布命令（Trusted Publisher / OIDC：推 tag → CI 发，无需任何密钥）："
+  say "      git tag -a v${VERSION} -m \"v${VERSION}\" && git push origin v${VERSION}"
+  say "      （tag 指向的提交里要已经有 .github/workflows/publish.yml）"
+  say "    应急（CI 不可用时才用项目级 token；见 RELEASING §1.1）："
+  say "      uv build && UV_PUBLISH_TOKEN=pypi-… uv publish"
   say "    发布后跑同一条命令的另一半：bash bench/release-dry-run.sh --from-pypi"
 fi
 [ "$fail" -eq 0 ] && say "RELEASE OK" || say "RELEASE FAIL"

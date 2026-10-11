@@ -16,6 +16,7 @@ from __future__ import annotations
 import pathlib
 import re
 import subprocess
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "bench" / "release-dry-run.sh"
@@ -93,3 +94,118 @@ def test_shell_scripts_parse_under_a_c_locale():
     for script in _shell_files():
         r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, env=env)
         assert r.returncode == 0, f"{script}: {r.stderr}"
+
+
+# --------------------------------------------------------------------------
+# 发布工作流（Trusted Publisher / OIDC）：形状本身也要有测试
+# --------------------------------------------------------------------------
+WF = ROOT / ".github" / "workflows" / "publish.yml"
+
+
+def _workflow() -> str:
+    assert WF.exists(), "发布工作流不见了（PyPI 上登记的就是这个文件名）"
+    return WF.read_text(encoding="utf-8")
+
+
+def test_publish_workflow_triggers_only_on_version_tags():
+    wf = _workflow()
+    assert re.search(r"tags:\s*\[?\"?v\*", wf), "只允许 tag 触发（推 main 不该发版）"
+    # 注意：要查的是**触发器**（行首的 YAML 键），不是正文里有没有出现这个词 ——
+    # 注释里写着"不用 pull_request_target"是完全正常的（第一版测试就栽在这个区别上）。
+    assert not re.search(r"^\s*pull_request_target\s*:", wf, re.M), \
+        "pull_request_target + OIDC = 给别人发版的机会"
+    assert not re.search(r"^\s*workflow_dispatch\s*:", wf, re.M), \
+        "手动触发会让'发版只由 tag 决定'这句话变假"
+
+
+def test_oidc_permission_is_only_on_the_publish_job():
+    wf = _workflow()
+    build, _, publish = wf.partition("  publish:")
+    assert "id-token" not in build, "build job 不该有 id-token（最小权限）"
+    assert "id-token: write" in publish, "publish job 必须有 id-token: write 才能走 OIDC"
+    assert "contents: read" in wf, "顶层权限应当只有 contents: read"
+
+
+def test_publish_workflow_environment_matches_what_pypi_registered():
+    """`environment:` 必须与 PyPI 上登记的一致，否则 OIDC 交换失败。
+
+    这里只钉"仓库这一侧写了 pypi"以及"文档里写了同一件事"——PyPI 侧的值我读不到，
+    所以两处必须同源：workflow 里的 `environment:` 与 RELEASING 里登记说明。
+    """
+    wf = _workflow()
+    m = re.search(r"^\s*environment:\s*(\S+)", wf, re.M)     # 允许行尾注释
+    assert m, "publish job 没写 environment（PyPI 那边登记了 environment 就必须对上）"
+    env_name = m.group(1)
+    assert env_name == "pypi", env_name
+    rel = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+    assert f"environment={env_name}" in rel or f"environment `{env_name}`" in rel, \
+        "RELEASING 必须把登记用的 environment 名写出来（照抄才不会错）"
+
+
+def test_publish_workflow_never_silently_falls_back_to_a_token():
+    """`--trusted-publishing always`：拿不到 OIDC 就红，不许静默用某个 token 顶替。"""
+    wf = _workflow()
+    assert "--trusted-publishing always" in wf, wf
+    assert "UV_PUBLISH_TOKEN" not in wf, "工作流里不该出现任何 token 兜底"
+
+
+def test_publish_workflow_guards_tag_version_and_reuses_the_metadata_checker():
+    wf = _workflow()
+    assert "pyproject version" in wf, "没有 tag↔版本护栏：v0.3.0 的 tag 可能发出 0.2.0 的包"
+    assert "check_dist_metadata.py" in wf, \
+        "CI 必须调用与本地预演**同一份**元数据断言脚本（各写一份就一定会漂）"
+    assert "dev_index.py --gates" in wf, "要发布的那个提交自己必须先全绿"
+
+
+def test_releasing_documents_the_oidc_path_and_the_emergency_token_path():
+    rel = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+    assert "Trusted Publisher" in rel and "pending publisher" in rel
+    assert "publish.yml" in rel, "文档要写清 PyPI 那边登记的 workflow 文件名"
+    assert "UV_PUBLISH_TOKEN" in rel, "应急 token 路径也要留着（CI 挂了还能发版）"
+    assert "账号级" in rel and "project-scoped" in rel, \
+        "首次发布只能用账号级 token、随后必须换项目级 —— 这条坑要写在文档里"
+
+
+# --------------------------------------------------------------------------
+# 元数据断言脚本：能红才有意义
+# --------------------------------------------------------------------------
+def test_metadata_checker_goes_red_on_a_bad_wheel(tmp_path):
+    """喂一个"元数据不对"的假 wheel ⇒ 必须 rc=1 并逐条点名。
+
+    真 wheel 由 `--metadata-only` 那条用例覆盖（它每次都现场构建）；这条钉的是**判据本身**
+    会不会失效 —— 没有它，判据被删空也照样绿。
+    """
+    import zipfile
+
+    wheel = tmp_path / "kernoscope-9.9.9-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as z:
+        z.writestr("kernoscope-9.9.9.dist-info/METADATA",
+                   "Name: kernoscope\nVersion: 9.9.9\n")          # 缺许可/Alpha/Python 下限
+        z.writestr("kernoscope/cli.py", "")
+        z.writestr("tests/test_leak.py", "")                        # 测试被打进包
+    r = subprocess.run([sys.executable, str(ROOT / "bench" / "check_dist_metadata.py"),
+                        str(wheel), "--expect-version", "0.2.0"],
+                       capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+    for needle in ("版本不是 0.2.0", "Alpha", "Python 下限", "entry_points", "测试被打进包"):
+        assert needle in r.stdout, (needle, r.stdout)
+
+
+def test_metadata_checker_passes_on_a_minimal_correct_wheel(tmp_path):
+    import zipfile
+
+    wheel = tmp_path / "kernoscope-0.2.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as z:
+        z.writestr("kernoscope-0.2.0.dist-info/METADATA",
+                   "Name: kernoscope\nVersion: 0.2.0\n"
+                   "License-Expression: Apache-2.0\n"
+                   "Classifier: Development Status :: 3 - Alpha\n"
+                   "Requires-Python: >=3.10\n"
+                   "Description-Content-Type: text/markdown\n")
+        z.writestr("kernoscope-0.2.0.dist-info/entry_points.txt",
+                   "[console_scripts]\nkernoscope = kernoscope.cli:main\nksc = kernoscope.cli:main\n")
+        z.writestr("kernoscope/cli.py", "")
+    r = subprocess.run([sys.executable, str(ROOT / "bench" / "check_dist_metadata.py"),
+                        str(wheel), "--expect-version", "0.2.0"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr

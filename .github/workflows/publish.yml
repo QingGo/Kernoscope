@@ -1,0 +1,63 @@
+name: publish
+
+# 发布走 **Trusted Publisher（OIDC）**：没有长期密钥 —— 每次运行由 GitHub 换一个短时 token，
+# 并且 PyPI 会自动附带 attestation（PEP 740），用户可验证"这个 wheel 确实由这个仓库的这次
+# 构建产出"。这比把项目级 token 放进 CI secret 更契合本仓库"每个数字/动作都能追到产物"的气质。
+#
+# ⚠️ PyPI 侧登记的 pending publisher 必须与这里的**四样东西**逐字一致，否则 OIDC 交换会失败：
+#      owner = QingGo ／ repo = Kernoscope ／ **本文件名 publish.yml** ／ **environment 名 pypi**
+#    改文件名或 environment 名，就要去 https://pypi.org/manage/account/publishing/ 同步改。
+#
+# 触发方式只有一种：推 tag
+#     git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+# tag 指向的那个提交里**必须**已经有这个 workflow —— 先提交它，再打 tag。
+#
+# 不用 `pull_request_target`（它会拿到可写的 token，配上 OIDC 就是给别人发版的机会）。
+permissions:
+  contents: read
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 门禁里有几处用 `git ls-files`（文档扫描、脱敏检查）
+      - uses: astral-sh/setup-uv@v5
+      - name: tag 与 pyproject 版本必须一致（便宜的错误先拦下来）
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(sed -n 's/^version *= *"\(.*\)"/\1/p' pyproject.toml | head -1)"
+          [ "$tag" = "$ver" ] || { echo "tag v$tag ≠ pyproject version $ver"; exit 1; }
+      - name: Install
+        run: uv sync --locked
+      - name: Gates（要发布的那个提交自己必须全绿）
+        run: uv run python tools/dev_index.py --gates
+      - name: Build
+        run: uv build
+      - name: 产物元数据（与本地预演 `bench/release-dry-run.sh` 是**同一份**断言脚本）
+        run: uv run python bench/check_dist_metadata.py dist/*.whl --expect-version "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi               # ← 必须与 PyPI 上登记的一致；也在这里挂保护规则（见 RELEASING）
+    permissions:
+      id-token: write               # ← OIDC 只在这一个 job 上开，build job 没有这个权限
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: astral-sh/setup-uv@v5
+      - name: Publish（trusted publishing）
+        # `always` = 拿不到 OIDC 就**失败**，绝不静默退化成某个 token（那会让"没有密钥"这句话变假）
+        run: uv publish --trusted-publishing always
