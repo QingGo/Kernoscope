@@ -1,0 +1,25 @@
+name: gates
+
+# D12⑤：文档里的命令门禁（以及其余全部"声明与实现同源"的检查）此前**没有任何 CI 入口** ——
+# 只在维护者记得的时候手跑。这里把 `dev_index.py --gates` 挂到 push/PR 上，8 条门禁一把跑。
+#
+# 只跑不需要 GPU 的部分：pytest 里依赖真机/nsys/ncu 的用例自带 skip，
+# `bench/run.sh` **不在这里跑**（它要 GPU，由 `bench/artifacts/` 的登记表记录每次运行）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 门禁里有几处用 `git ls-files`（文档扫描、脱敏检查）
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync
+      - name: Gates
+        run: uv run python tools/dev_index.py --gates
