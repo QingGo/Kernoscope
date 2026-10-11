@@ -209,10 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--packet", default=None,
                    help="写出决策包 JSON（判词/前提/未测到/代价，默认 <4 KB）；"
                         "`-` 表示写到 stdout。比完整报告小两个数量级，给 agent 用")
-    k.add_argument("--screen", default="auto", choices=["auto", "only", "off"],
-                   help="结论优先的一屏：auto=铺在完整报告前面（默认；--csv/--launch-csv/"
-                        "--packet - 时自动关闭以保持机器格式纯净）；only=只打一屏；"
-                        "off=只打完整报告。与 --packet 同一证据模型（同一份判词）")
+    k.add_argument("--screen", default=None, choices=["auto", "only", "off"],
+                   help="结论优先的一屏。**默认（不给）**：在终端上只打一屏（人读），"
+                        "管道/重定向/CSV 里仍然是一屏 + 完整报告（机器格式一字不变）。"
+                        "显式 auto=总是铺在完整报告前面；only=只打一屏；off=只打完整报告。"
+                        "与 --packet 同一证据模型（同一份判词）")
     k.add_argument("--ks-selfcheck", default=None,
                    help="本机自检文件（kernoscope selftest 产出）：给判词带上误差带与 MDD，"
                         "diff 才能区分真改进与噪声")
@@ -1927,7 +1928,14 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
 
     # ---------- W2/W4：决策包（机器视图）与一屏（人视图）----------
     # 两者都由同一份 packet 渲染：人视图只是 packet 的一种排版，不是另一条代码路径。
-    screen = getattr(args, "screen", "auto")
+    screen = getattr(args, "screen", None) or "auto"
+    # M14「首用 ≤1 屏」：README 承诺"一屏"，而 auto 的语义是"一屏 **+** 完整报告"——
+    # 实测 `--set basic` 21.6 KB / 200+ 行，与承诺不符（易用性实测的 #3）。
+    # 默认（没显式给 --screen）在**终端**上收敛成 only；管道/重定向/CSV 保持完整报告，
+    # 所以脚本、agent、CI 看到的字节一个都不变。要老行为就显式写 `--screen auto`。
+    if (getattr(args, "screen", None) is None and sys.stdout.isatty()
+            and not (args.csv or getattr(args, "launch_csv", False))):
+        screen = "only"
     if getattr(args, "packet", None) == "-" and screen == "auto":
         # stdout 上不能混着两种格式：要包就只给包
         screen = "off"

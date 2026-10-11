@@ -1,6 +1,8 @@
 """CLI 端到端测试（用 --ks-synthetic，无需 GPU）。"""
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -382,3 +384,65 @@ def test_strict_section_gate_is_data_driven(capsys, tmp_path: Path):
     assert rc_ok == 0, err_ok
     assert "est__issue_slot_utilization_pct" in out_ok
     assert "needs hardware counters" not in err_ok
+
+
+# ---------------------------------------------------------------------------
+# M14「首用 ≤1 屏」：默认在**终端**上只给一屏，管道/重定向仍是完整报告。
+# 为什么：README 承诺"一屏"，而 auto 的语义是"一屏 + 完整报告"（实测 21.6 KB / 200+ 行）。
+# ---------------------------------------------------------------------------
+class _FakeStdout:
+    def __init__(self, tty: bool):
+        self._buf = io.StringIO()
+        self._tty = tty
+
+    def write(self, s):        # print() 只要求 write/flush
+        self._buf.write(s)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return self._tty
+
+    def getvalue(self):
+        return self._buf.getvalue()
+
+
+def _run_with_stdout(tty: bool, *argv):
+    fake = _FakeStdout(tty)
+    real = sys.stdout
+    sys.stdout = fake                      # type: ignore[assignment]
+    try:
+        try:
+            rc = main(list(argv))
+        except SystemExit as e:            # argparse 正常退出
+            rc = e.code or 0
+    finally:
+        sys.stdout = real
+    return rc, fake.getvalue()
+
+
+def test_default_stdout_on_a_terminal_is_one_screen():
+    rc, out = _run_with_stdout(True, "--ks-synthetic", "--set", "basic")
+    assert rc == 0
+    assert len(out.encode("utf-8")) <= 8192, f"终端上默认 {len(out.encode('utf-8'))} B 不是一屏"
+    assert "结论：" in out or "发现" in out
+
+
+def test_piped_stdout_keeps_the_full_report():
+    """机器格式与日志一个字都不该变：管道里仍然是"一屏 + 完整报告"。"""
+    rc, out = _run_with_stdout(False, "--ks-synthetic", "--set", "basic")
+    assert rc == 0
+    assert len(out.encode("utf-8")) > 8192, "管道里被缩成一屏了（脚本/CI 会少东西）"
+
+
+def test_explicit_screen_auto_keeps_the_old_behaviour_even_on_a_terminal():
+    rc, out = _run_with_stdout(True, "--ks-synthetic", "--set", "basic", "--screen", "auto")
+    assert rc == 0
+    assert len(out.encode("utf-8")) > 8192, "显式 --screen auto 必须保持老行为"
+
+
+def test_explicit_screen_off_prints_only_the_report():
+    rc, out = _run_with_stdout(True, "--ks-synthetic", "--set", "basic", "--screen", "off")
+    assert rc == 0
+    assert len(out.encode("utf-8")) > 8192

@@ -40,7 +40,7 @@ bash bench/preflight-first-run.sh          # 期望：PREFLIGHT OK 6/6
 ```bash
 uv run python tools/dev_index.py --gates     # 9 条门禁（含 sanitize 与 sdist/wheel 构建）
 bash bench/preflight-first-run.sh            # 陌生首跑路径（G1）
-uv run kernoscope doctor; echo "rc=$?"       # 期望 rc=0（诊断完成）
+uv run kernoscope doctor                 # 期望 rc=0（诊断完成；"诊断是否完成"是退出码的含义）
 uv run kernoscope capabilities --brief       # 期望 ≤1.2 KB 且带 next[]
 git status --porcelain                       # 期望为空（发布物必须来自被跟踪的提交）
 ```
