@@ -38,10 +38,10 @@
 | `static_resources` | 静态寄存器/共享内存，以及谁是 occupancy 限制因素 | 不答 | 不答 | 能答 | 能答 | 能答 |
 | `theoretical_occupancy` | occupancy 理论上界是多少 | 不答 | 不答 | 能答 | 能答 | 能答 |
 | `device_busy` | 这段时间 GPU 显存子系统有多忙（实测） | 不答 | 能答 | 能答 | 能答 | 能答 |
-| `dram_bytes` | DRAM 搬了多少字节 / 是不是 DRAM bound（NVML 代理口径） | 不答 | 更弱 | 能答 | 能答 | 能答 |
+| `dram_bytes` | DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级） | 不答 | 更弱 | 能答 | 能答 | 能答 |
 | `roofline` | 离 roofline 多远、compute 还是 memory bound | 不答 | 更弱 | 能答 | 能答 | 能答 |
 | `achieved_occupancy` | 实际达到的 occupancy（不是上界） | 不答 | 不答 | 不答 | 能答 | 能答 |
-| `dram_bytes_trace` | DRAM 字节的第二条口径（访存轨迹 + 缓存模型） | 不答 | 不答 | 不答 | 能答 | 能答 |
+| `dram_bytes_trace` | DRAM 字节的**首选**口径（访存轨迹：地址是算术，只有缓存替换是模型） | 不答 | 不答 | 不答 | 能答 | 能答 |
 | `issue_slot` | 发射槽用了多少、瓶颈方向是 latency 还是 throughput | 不答 | 不答 | 不答 | 能答 | 能答 |
 | `l2_locality` | L1/L2 命中率与工作集是否驻留 | 不答 | 不答 | 不答 | 能答 | 能答 |
 | `static_mix` | 静态 SASS 指令混合（哪些指令占多数） | 不答 | 不答 | 能答 | 能答 | 能答 |
@@ -82,10 +82,10 @@
 | `static_resources` — 静态寄存器/共享内存，以及谁是 occupancy 限制因素 | yes | 2 | `ks__registers_used_for_occupancy`, `ks__occupancy_limiter` |
 | `theoretical_occupancy` — occupancy 理论上界是多少 | yes | 2 | `ks__theoretical_occupancy_pct`, `ks__blocks_per_sm` |
 | `device_busy` — 这段时间 GPU 显存子系统有多忙（实测） | yes | 1 | `meas__nvml_mem_busy_mean_pct`, `meas__device_energy_j` |
-| `dram_bytes` — DRAM 搬了多少字节 / 是不是 DRAM bound（NVML 代理口径） | yes | 1 | `est__dram_bytes_total`, `ks__sampler_window_coverage_pct` |
+| `dram_bytes` — DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级） | yes | 1 | `est__dram_bytes_total`, `ks__sampler_window_coverage_pct` |
 | `roofline` — 离 roofline 多远、compute 还是 memory bound | yes | 1 | `est__achieved_gbs`, `est__bound`, `est__roofline_efficiency_pct` |
 | `achieved_occupancy` — 实际达到的 occupancy（不是上界） | yes | 3 | `meas__achieved_occupancy_pct` |
-| `dram_bytes_trace` — DRAM 字节的第二条口径（访存轨迹 + 缓存模型） | yes | 3 | `est__dram_bytes_per_launch_trace`, `meas__sectors_per_request` |
+| `dram_bytes_trace` — DRAM 字节的**首选**口径（访存轨迹：地址是算术，只有缓存替换是模型） | yes | 3 | `est__dram_bytes_per_launch_trace`, `meas__sectors_per_request` |
 | `issue_slot` — 发射槽用了多少、瓶颈方向是 latency 还是 throughput | yes | 3 | `est__issue_slot_utilization_pct`, `est__stall_direction` |
 | `l2_locality` — L1/L2 命中率与工作集是否驻留 | yes | 3 | `est__l2_hit_rate_pct`, `est__working_set_bytes` |
 | `static_mix` — 静态 SASS 指令混合（哪些指令占多数） | yes | 2 | `ks__static_sass_instructions`, `ks__static_sass_share_*` |
