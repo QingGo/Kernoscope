@@ -79,6 +79,49 @@
 - 顺修脚本层 `$VAR（中文括号` 展开（非 UTF-8 locale 下 `unbound variable`）：
   `collect.sh` / `bench/run.sh` / `bench/degradation-check.sh` / `remedy.sh`。
 
+### P2 收尾（第五轮 V-4、R-75/R-76）
+
+- **per-kernel 报告不再借用别的 kernel 的读数（V-4）**：`report_md._metric_index` 此前从
+  **所有** kernel 兜底取数，于是主体 `synthetic_gemm` 的报告里会出现 `synthetic_elementwise`
+  的 `ks__over_peak_warning=1`（16361.8 TFLOPS = 峰值 9779.9%），读者会去查错 kernel。
+  现在本 kernel 优先、缺失时**只允许 `(device)` 兜底**（NVML/窗口级读数是"这次测量"的属性）。
+- **`ks-memtrace v1` 轨迹补齐指纹与截断判定（R-75/R-76）**：v1 路径此前只认工具自己写的
+  `# truncated 1` —— 手动重定向/被 `ulimit` 截断的轨迹照样给数，且不写指纹。
+  现在与官方路径同一纪律：内容指纹进报告与协议哈希；**结尾不是换行 ⇒ `truncated=1` ⇒
+  拒绝给 DRAM 字节**；只有显式结束标记（`KS-TRACE-COMPLETE` 或 `# complete 1`）才算完整。
+  真机复核：截断的 v1 轨迹现在给 `n/a [unavailable] code=trace_unavailable` + 截断原因。
+
+### P2 二批（第五轮 V-18、V-22…V-30、R-60/R-62/R-68）
+
+- **`--plan` 的声明必须等于磁盘实得（V-18）**：`effects.OPERATIONS` 9 → 14，新增
+  `write_report_md` / `write_ncu_rep`（含 `.ATTRIBUTION.txt`）/ `write_ncu_truth` /
+  `write_name_map` / `write_log_file`；`write_outputs` 从一句散文改成**逐条具体路径**
+  （案件目录逐文件、`--launch-csv`、perfetto、`--packet`）。旧声明 5 项 vs 实跑 14 个文件。
+  顺带修掉两处原有不实声明（nsys 中间产物的落点与保留语义、`--ks-nsys-rep` 的 sqlite 位置）。
+- **不再有裸 traceback（V-25）**：新增 `CliInputError` + 一个**窄**的顶层兜底
+  （`OSError`/`JSONDecodeError`/`sqlite3.DatabaseError` → `error: <人话>（<怎么修>）` + rc=1，
+  保留异常类型名）；点名接线：只读目录写 `-o`/`--packet`/`--report-md`/`--export-ncu-rep`/
+  `--export-name-map`/`--log-file`、`--ks-calibration`/`-i`/`--ks-achieved-occupancy` 的不存在或坏
+  JSON、坏 sqlite。`ValueError` 等程序 bug **继续裸抛**（不把 bug 说成用户错误）。
+  另：`error:` 行**不再被 `--quiet` 吞**（quiet 是"别啰嗦"，不是"别报错"）。
+- **门禁不再自我满足（V-22/V-23/V-24、R-68）**：
+  - V-22：开关门禁改成**结构性**校验（围栏代码块里的命令行，或「命令|开关|作用」表的开关列
+    + 同行说明列非空）；散文里提一句不再算登记；
+  - V-23：文档命令扫描从 `bash`/`sh` 扩到 `console`/`text`/无标签等围栏，并写清三条明确排除
+    （数据语言标签、`{`/`[` 开头的数据块、行首锚定 + 中文标点=散文）；
+  - V-24：空输入集（无 `.git`/无 tracked 文档/扫不到围栏）**fail 并说清原因**，
+    唯一出口 `KS_ALLOW_EMPTY_DOC_SCAN=1`（只有字面 "1" 算同意）；旧行为是整族静默 skip；
+  - R-68：门禁清单从 `EXPECTED_GATES` 派生 + 显式集合断言（旧参数化漏了 `playbook`）。
+- **子命令级 P2（V-26…V-30）**：案件目录 `manifest.protocol_inputs` 真的带输入指纹
+  （新增 `packet.protocol.calibration/memtrace`，扁平形状与消费者一致）、`next_actions`
+  与 `next.md` 同源、argv 路径脱敏、`--screen off`/`--csv`/`--launch-csv` 不再静默不写 case；
+  `issue` 缺时钟打 `n/a` 而不是 `0`；**新增拒绝码 `no_nvtx`**（无 NVTX 区间不再错报
+  `metric_absent`，处方指向"重采时带 `--trace=nvtx`"）；`route` 的"会被拒的条件"从真源派生
+  并全部渲染（旧实现只列 4 条、只印前 3 条，读者第一脚就踩到没列出的 `no_nvml_samples`）；
+  `skill --apply --source <不存在>` 报错而不是 rc=0 说"已经是目标状态"。
+- **R-62**（部分）：新增 L2 读峰值 needle（`l2_read_peak_gbs` 此前没有任何 needle）；
+  完全穷尽的"每个公开数字都能追到产物"仍未做到，如实记在这里。
+
 ### 新增能力：窗口的环境证据
 
 - `meas__sm_clock_p50_mhz`（只在**活跃**采样点上统计时钟驻留，含空闲点中位数同时给出）、

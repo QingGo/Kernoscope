@@ -132,6 +132,57 @@ def test_json_output_is_machine_readable(tmp_path, capsys):
     assert payload["applied"] is True and payload["result"]["status"] == "installed"
 
 
+def test_source_that_does_not_exist_fails_instead_of_claiming_up_to_date(tmp_path, capsys):
+    """V-30：源目录不存在/不是目录 ⇒ 自家 `error:` + 非零退出，且不许说"已经是目标状态"。
+
+    修前：`skill --apply --source /nonexistent/dir` → rc=0、打「结论：已经是目标状态，无需改动」
+    「已是最新」，而目标目录**根本没建** —— 一个 agent 会以为装好了。
+    """
+    target = tmp_path / "dest"
+    missing = tmp_path / "nope"
+    rc, out, err = _run(capsys, "skill", "--apply", "--source", str(missing),
+                        "--target", str(target))
+    assert rc != 0, out
+    assert "error:" in err, err
+    assert "已经是目标状态" not in out and "已是最新" not in out, out
+    assert not target.exists(), "源都没有，绝不该建目标"
+
+    not_a_dir = tmp_path / "a-file.txt"
+    not_a_dir.write_text("x", encoding="utf-8")
+    rc2, out2, err2 = _run(capsys, "skill", "--apply", "--source", str(not_a_dir),
+                           "--target", str(target))
+    assert rc2 != 0 and "error:" in err2, (out2, err2)
+    assert not target.exists()
+
+    # 只算计划（不加 --apply）也必须失败：计划本身就算不出来
+    rc3, out3, err3 = _run(capsys, "skill", "--source", str(missing), "--target", str(target))
+    assert rc3 != 0 and "error:" in err3, (out3, err3)
+
+    # 源目录存在但是空的：也是缺陷（不是"已经是最新"）
+    empty = tmp_path / "empty-src"
+    empty.mkdir()
+    rc4, out4, err4 = _run(capsys, "skill", "--apply", "--source", str(empty),
+                           "--target", str(target))
+    assert rc4 != 0 and "error:" in err4, (out4, err4)
+    assert not target.exists()
+
+
+def test_empty_source_plan_never_reports_up_to_date(tmp_path):
+    """`render_plan`/`apply_install` 层同一条语义：空计划 ≠ 已经是最新。"""
+    from kernoscope.skill_cmd import FileAction, SkillPlan, render_plan
+
+    empty = SkillPlan(source=str(tmp_path / "empty"), target=str(tmp_path / "dest"))
+    text = render_plan(empty)
+    assert "已经是目标状态" not in text and "已是最新" not in text
+    assert "没有可安装的文件" in text
+    assert apply_install(empty)["status"] == "failed"
+    # 有文件、且与目标一致时才是真的"已经是目标状态"
+    same = SkillPlan(source=str(tmp_path), target=str(tmp_path / "d"),
+                     actions=[FileAction(rel="SKILL.md", operation="unchanged", bytes_=1)])
+    assert "已经是目标状态" in render_plan(same)
+    assert apply_install(same)["status"] == "unchanged"
+
+
 # --------------------------------------------------------------------------
 # I3：Markdown 报告接线
 # --------------------------------------------------------------------------
@@ -225,10 +276,14 @@ def test_nvtx_phases_section_and_meta(tmp_path, capsys):
 
 
 def test_nvtx_phases_without_nvtx_gives_na_rows_not_silence(tmp_path, capsys):
-    """没有 --trace=nvtx 的库：那一节必须**存在**并说明原因（消失的行会被误读成没这功能）。"""
+    """没有 --trace=nvtx 的库：那一节必须**存在**、带对的 code，并给对的处置（V-28）。
+
+    修前这一行的 code 是 `metric_absent`，于是报告里的 `fix:` 是"用 --json 看有哪些指标"——
+    读者会去查指标名，而真正该做的是**重采时带 `--trace=nvtx`**。
+    """
     db = _nvtx_db(tmp_path / "nonvtx.sqlite", with_nvtx=False)
-    rc, _, err = _run(capsys, "--ks-sqlite", db, "--ks-nvtx-phases", "--set", "basic",
-                      "--screen", "off", "-o", str(tmp_path / "rep2"), "-f")
+    rc, out, err = _run(capsys, "--ks-sqlite", db, "--ks-nvtx-phases", "--set", "basic",
+                        "--screen", "off", "-o", str(tmp_path / "rep2"), "-f")
     assert rc == 0
     assert "不给阶段数字" in err
     payload = json.loads((tmp_path / "rep2.ksreport.json").read_text(encoding="utf-8"))
@@ -236,6 +291,10 @@ def test_nvtx_phases_without_nvtx_gives_na_rows_not_silence(tmp_path, capsys):
     sec = next(s for s in dev["sections"] if s["name"] == "NvtxPhases")
     row = sec["metrics"][0]
     assert row["provenance"] == "unavailable" and row["refusal"]["code"]
+    assert row["refusal"]["code"] == "no_nvtx", row["refusal"]
+    # 人看的报告里，这一行的处置必须指向"重采时带 --trace=nvtx"
+    assert "[no_nvtx]" in out and "--trace=nvtx" in out
+    assert "[metric_absent]" not in out
 
 
 def test_skill_and_report_flags_are_documented_in_changelog():

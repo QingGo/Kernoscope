@@ -13,8 +13,9 @@ import pytest
 
 from kernoscope.capabilities import QUESTIONS, Env
 from kernoscope.refusals import DEFAULT_REMEDIES, RefusalCode
-from kernoscope.route_cmd import (CALIBER_NOTE, COMMANDS, FAILURE_HINTS, ROUTES, build_parser,
-                                 render_text, route)
+from kernoscope.route_cmd import (CALIBER_NOTE, COMMANDS, DRAM_BYTES_REFUSALS, FAILURE_HINTS,
+                                 ROUTES, build_parser, dram_bytes_refusal_codes, render_text,
+                                 route)
 
 
 def test_every_route_targets_a_real_question():
@@ -77,6 +78,72 @@ def test_route_carries_command_caliber_and_failure_modes():
     assert "share_too_low" in codes                # 会被拒的条件也要给出
     text = render_text(r)
     assert "命令：" in text and "可能被拒：" in text and "走哪条口径" in text
+
+
+# --------------------------------------------------------------------------
+# V-29：`dram_bytes` 的拒绝条件必须**从真源派生**，且**全部**渲染
+# --------------------------------------------------------------------------
+def test_dram_failure_list_is_derived_not_handwritten():
+    """表里那条 `dram_bytes` 就是 `analyze/dram.py` 现算的结果，不是另一份手抄。
+
+    修前它只有 4 条（`share_too_low/coverage_too_low/below_resolution/no_calibration`），
+    而这条路实际会报出 9 条 —— 验收时按它给的命令跑，首先撞到的 `no_nvml_samples`
+    恰好不在列表里。
+    """
+    derived = dram_bytes_refusal_codes()
+    assert len(derived) == len(set(derived)) and derived, derived
+    assert set(derived) == set(FAILURE_HINTS["dram_bytes"]) == set(DRAM_BYTES_REFUSALS)
+    # 报告里 agent 首先撞到的那 5 个（修前全部缺失）必须都在
+    for code in ("no_nvml_samples", "share_unknown", "multi_kernel_window",
+                 "window_launch_unaligned", "trace_unavailable"):
+        assert code in derived, f"{code} 没被派生出来：{derived}"
+
+
+def test_derived_set_covers_every_code_dram_can_actually_emit():
+    """派生集合 ⊇ 实际可达集合：用真的 `DramEstimate` 把拒绝构造点跑一遍逐个对。
+
+    这是"同源"的判据：派生不是靠读文档，而是拿真对象把 `_total_refusals()` /
+    `_attribution_refusals()` / `_trace_refusal()` 的输出收上来，看有没有漏。
+    """
+    from kernoscope.analyze.dram import estimate
+
+    from test_dram import _samples, _uniform_run
+
+    samples40, spans40 = _uniform_run(seconds=40.0, launches=200)
+    scenarios = [
+        estimate([], peak_gbs=0.0, window_s=2.0, launches=0),
+        estimate(_samples(10, mem=0.0, sm=99.0), peak_gbs=900.0, window_s=2.0, launches=10),
+        estimate(_samples(10, mem=6.3, sm=0.0), peak_gbs=900.0, window_s=2.0,
+                 window_mode="full"),
+        estimate(_samples(10), peak_gbs=900.0, window_s=2.0, launches=100),
+        estimate(samples40, peak_gbs=900.0, window_s=40.0, launches=200, window_mode="full",
+                 launch_spans=spans40, matched_kernel_ns=int(16.0e9),
+                 other_kernels_ns=int(24.0e9), other_kernel_count=3),
+        estimate(_samples(200, dt=0.2), peak_gbs=900.0, window_s=40.0, launches=200,
+                 window_mode="full", window_limit_s=20.0, matched_kernel_ns=int(20.0e9)),
+    ]
+    reachable: set[str] = set()
+    for est in scenarios:
+        for r in (*est._total_refusals(), *est._attribution_refusals(), est._trace_refusal()):
+            reachable.add(r.code.value)
+    derived = set(dram_bytes_refusal_codes())
+    assert reachable, "场景没造对：一个拒绝都没触发，这条测试就白测了"
+    assert reachable <= derived, f"实际可达但没登记：{sorted(reachable - derived)}"
+    # 反向也要有信息量：派生集合不许是"把所有 code 都抄一遍"
+    assert derived - reachable == set(), f"派生里有没有可达来源的 code：{derived - reachable}"
+
+
+def test_route_text_renders_every_possible_refusal_not_just_the_first_three():
+    """文本渲染不许截断：`--json` 里有几条，人视图里就要有几条（修前只印前 3 条）。"""
+    r = route("DRAM 搬了多少字节")
+    top = r["routes"][0]
+    codes = [f["code"] for f in top["failures"]]
+    assert len(codes) > 3, codes
+    text = render_text(r)
+    rendered = [ln for ln in text.splitlines() if "可能被拒：" in ln]
+    assert len(rendered) == len(codes), (len(rendered), len(codes))
+    for code in codes:
+        assert f"可能被拒：{code}" in text, code
 
 
 def test_route_json_is_machine_readable():

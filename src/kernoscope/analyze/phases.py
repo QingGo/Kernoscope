@@ -386,12 +386,18 @@ def _fmt_ms(x: float) -> str:
 def _refusal_code(reason: str) -> RefusalCode:
     """reason 前缀 → refusals 闭集里的 code。
 
-    这个模块**不新增**拒绝码（那要改 `refusals.py`，属于单一真源）。所以映射到语义最近的
-    现成 code：没有 kernel 活动 = nsys.py 自己的 `no_launch_activity`；NVTX 缺失 = 请求的
-    指标在这次报告里不存在（`metric_absent`）。
+    这个模块**不新增**拒绝码（那要改 `refusals.py`，属于单一真源），只用已经登记的那两个：
+
+    * 没有 kernel 活动 = nsys.py 语义里的 `no_launch_activity`；
+    * 没有 NVTX 区间 = `no_nvtx`（V-28）。它**不是** `metric_absent`：指标名没错、工具没坏，
+      缺的是**采集时没打开的采集通道**（`--trace=nvtx`），处置是重采一遍 —— 用
+      `metric_absent` 会把读者送去"用 --json 看有哪些指标"，那是一条死路。
+      它也**不能**复用 `no_launch_activity`：那是"没有一个 kernel"，处置是补 `--trace=cuda`，
+      而这里的 kernel 时间通常好好的，只是没有任何区间可归因 —— 两个原因必须两个 code，
+      读者才知道该补哪一趟采集。
     """
     return (RefusalCode.NO_LAUNCH_ACTIVITY if reason.startswith(REASON_NO_KERNELS)
-            else RefusalCode.METRIC_ABSENT)
+            else RefusalCode.NO_NVTX)
 
 
 # ---------------------------------------------------------------------------

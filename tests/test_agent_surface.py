@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -310,35 +311,163 @@ def test_nothing_promises_selftest_output_as_a_calibration():
                            + "\n  - ".join(offenders))
 
 
-def test_every_subcommand_flag_is_documented():
-    """R-67/P5：`capabilities`/`selftest`/`diff` 的每个长开关都必须写进 CHANGELOG。
+_FLAG_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")
+# 「命令 | 开关 | 作用」表：表头里要同时有**开关列**与**说明列**，同一行的说明列非空
+# 才算一次登记（开关名 + 一句话说明）。
+_TABLE_FLAG_HEADER = "开关"
+_TABLE_PURPOSE_HEADER = ("作用", "说明", "意义")
 
-    本文件开头自己定的判据是"外部消费者要改代码或改解析逻辑，就必须写在这里" ——
-    而 `diff --fail-on`（唯一能卡 CI 退出码的开关）在包里出现 0 次、任何文档里 0 次。
+# 与 `tests/test_documented_commands.py` 同一个出口（V-24）：导出树里的显式降级开关。
+EMPTY_DOC_SCAN_ENV = "KS_ALLOW_EMPTY_DOC_SCAN"
+
+# argparse 在每个解析器上**自动**加的开关：不是我们声明的接口，因此不要求逐条登记。
+# （旧实现里 capabilities/selftest/diff 的 `--help` 是靠 CHANGELOG **散文**里两处
+# `` `--help` `` 才"满足"的 —— 那正是 V-22 说的自我满足。）
+PARSER_BUILTIN_FLAGS = frozenset({"--help"})
+
+
+def _fenced_texts(text: str) -> list[str]:
+    """``` 围栏里的内容（只看围栏，不看散文）。"""
+    out: list[str] = []
+    inside = False
+    buf: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            if inside:
+                out.append("\n".join(buf))
+                inside, buf = False, []
+            else:
+                inside = True
+            continue
+        if inside:
+            buf.append(line)
+    return out
+
+
+def _table_documented_flags(text: str) -> dict[str, str]:
+    """「命令 | 开关 | 作用」表里登记过的开关 → 那一行的说明。
+
+    只有"开关列里有名字 **且** 说明列非空"才算登记 —— 空说明的表格行不构成声明。
+    """
+    out: dict[str, str] = {}
+    flag_col: int | None = None
+    purpose_col: int | None = None
+    for row in text.splitlines():
+        s = row.strip()
+        if not s.startswith("|"):
+            flag_col = purpose_col = None            # 表格结束，重新找表头
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if flag_col is None:
+            if any(_TABLE_FLAG_HEADER in c for c in cells):
+                flag_col = next(k for k, c in enumerate(cells) if _TABLE_FLAG_HEADER in c)
+                purpose_col = next((k for k, c in enumerate(cells)
+                                    if any(w in c for w in _TABLE_PURPOSE_HEADER)), None)
+            continue
+        if set(s) <= set("|-: "):                    # 对齐行
+            continue
+        purpose = cells[purpose_col] if (purpose_col is not None
+                                         and purpose_col < len(cells)) else ""
+        if not purpose or flag_col >= len(cells):
+            continue
+        for f in _FLAG_RE.findall(cells[flag_col]):
+            out.setdefault(f, purpose)
+    return out
+
+
+def _structurally_documented_flags(text: str) -> dict[str, str]:
+    """**结构化**登记过的开关 → 出处形状：围栏代码块里的命令，或「命令|开关|作用」表。
+
+    散文里的 `` `--fail-on` `` **不进来** —— V-22 的原形就是"散文里留一句就永远满足"。
+    """
+    found = {f: "围栏代码块里的命令" for f in _FLAG_RE.findall("\n".join(_fenced_texts(text)))}
+    for f, purpose in _table_documented_flags(text).items():
+        found.setdefault(f, f"「命令|开关|作用」表：{purpose[:40]}")
+    return found
+
+
+def test_every_subcommand_flag_is_documented():
+    """R-67/P5 + **V-22**：新子命令（`capabilities`/`selftest`/`diff`）的每个长开关都要
+    **结构化登记**在 CHANGELOG 里；其余子命令的开关至少要出现在某份被跟踪文档的
+    围栏/表格里。
+
+    旧实现是 `flag not in changelog_text` —— 整文件子串匹配，于是把真说明删掉、只在散文里
+    留一句 `` `--fail-on` `` 就永远满足（报告 V-22）。这里只认**解析出来的结构**：
+    围栏代码块里的命令行，或「命令|开关|作用」表里"开关名 + 一句话说明"的那一行。
     """
     from kernoscope import cli
 
-    import subprocess
-
     root = Path(__file__).resolve().parents[1]
-    ch = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    docs = subprocess.run(["git", "ls-files", "*.md", "*.txt"], cwd=root,
-                          capture_output=True, text=True).stdout.split()
-    all_text = "\n".join((root / d).read_text(encoding="utf-8", errors="replace")
-                         for d in docs)
+    ch_text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    ch_flags = _structurally_documented_flags(ch_text)
+    assert ch_flags, "CHANGELOG 里一个结构性登记都没解析出来 —— 解析逻辑退化了"
+
+    tracked = subprocess.run(["git", "ls-files", "*.md", "*.txt"], cwd=root,
+                             capture_output=True, text=True).stdout.split()
+    if not tracked:
+        # V-24 的同一原则：空输入集**失败**并说清出口，不静默通过、也不静默 skip
+        msg = ("`git ls-files` 没列出任何文档 —— 这层门禁需要在 git 仓库里跑"
+               "（`git archive` 导出的树拿不到清单）。若确实要在无 .git 的树里跑，"
+               f"显式设置 {EMPTY_DOC_SCAN_ENV}=1 表示接受这次降级。")
+        if os.environ.get(EMPTY_DOC_SCAN_ENV, "").strip() == "1":
+            pytest.skip(msg)
+        pytest.fail(msg)
+    repo_flags: dict[str, str] = {}
+    for d in tracked:
+        if d.startswith("bench/artifacts/"):
+            continue          # 入库产物是证据不是文档（与 test_documented_commands 同口径）
+        p = root / d
+        if not p.exists():
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for flag, why in _structurally_documented_flags(text).items():
+            repo_flags.setdefault(flag, f"{d}：{why}")
+
     missing: list[str] = []
     for sub in cli.SUBCOMMANDS:
         for a in cli.subcommand_parser(sub)._actions:
             for flag in a.option_strings:
-                if not flag.startswith("--"):
+                if not flag.startswith("--") or flag in PARSER_BUILTIN_FLAGS:
                     continue
                 if sub in ("capabilities", "selftest", "diff"):
                     # 新子命令的开关是**接口**：必须写进 CHANGELOG（本文件的判据）
-                    if flag not in ch:
-                        missing.append(f"{sub} {flag}（不在 CHANGELOG）")
-                elif flag not in all_text:
-                    missing.append(f"{sub} {flag}（任何 tracked 文档里都没有）")
+                    if flag not in ch_flags:
+                        missing.append(f"{sub} {flag}（CHANGELOG 里没有结构化登记：既不在"
+                                       f"围栏代码块，也不在「命令|开关|作用」表里）")
+                elif flag not in repo_flags:
+                    missing.append(f"{sub} {flag}（任何被跟踪文档的围栏/表格里都没有）")
     assert not missing, "这些子命令开关没有任何文档：\n  - " + "\n  - ".join(missing)
+
+
+def test_the_changelog_flag_guard_is_structural():
+    """V-22 的负样本：散文里提一句**不**算登记；围栏/表格里的才算。
+
+    旧守卫（整文件子串）在这段负样本上会全绿 —— 这就是"自我满足"的形状。
+    """
+    from kernoscope import cli
+
+    prose = "- 顺手记一句：`--fail-on` 是唯一能卡 CI 退出码的开关（这只是散文）。\n"
+    assert "--fail-on" not in _structurally_documented_flags(prose)
+
+    fenced = "```console\nkernoscope diff a.json b.json --fail-on regressed\n```\n"
+    assert "--fail-on" in _structurally_documented_flags(fenced)
+
+    table = ("| 命令 | 开关 | 作用 |\n|---|---|---|\n"
+             "| `diff` | `--selfcheck <f>` / `--fail-on {none,regressed,change}` | 误差带对拍 |\n")
+    assert "--fail-on" in _structurally_documented_flags(table)
+
+    # 开关列有名字、说明列是空的 ⇒ 不构成"开关名 + 一句话说明"，不算登记
+    silent = "| 命令 | 开关 | 作用 |\n|---|---|---|\n| `diff` | `--fail-on` |  |\n"
+    assert "--fail-on" not in _structurally_documented_flags(silent)
+    # 没有说明列的表也不算（避免"把开关塞进任意表格"就成了登记）
+    no_purpose = "| 命令 | 开关 |\n|---|---|\n| `diff` | `--fail-on` |\n"
+    assert "--fail-on" not in _structurally_documented_flags(no_purpose)
+
+    # `--help` 被排除是有依据的：argparse 在每个子命令解析器上都自动加了它
+    for sub in cli.SUBCOMMANDS:
+        flags = {s for a in cli.subcommand_parser(sub)._actions for s in a.option_strings}
+        assert "--help" in flags, f"{sub} 的解析器上没有 argparse 自动加的 --help？"
+        assert "-h" in flags, sub
 
 
 def test_skill_scripts_resolve_python_without_relying_on_path(tmp_path):

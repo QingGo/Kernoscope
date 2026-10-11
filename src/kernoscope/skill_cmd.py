@@ -11,6 +11,9 @@
      会让 agent 后续每一轮都用错指令。
   4. **幂等**：内容相同就是 `unchanged`（不重写、不改 mtime），第二次 `--apply` 必须
      没有任何写入。
+  5. **装不了就说装不了**（V-30）：源目录不存在/不是目录/里面没有文件时，`plan_install`
+     直接报错（`error:` + 非零退出），**绝不**算出一个空计划然后说"已经是目标状态"——
+     后者会让 `--apply --source /nonexistent` 以 rc=0 结束、且目标目录根本没建。
 
 skill 的来源是仓库/包里的 `skills/kernoscope/`（`SKILL.md` + `references/` + `scripts/`）。
 目标目录按 client 约定：
@@ -34,6 +37,15 @@ SKILL_NAME = "kernoscope"
 BACKUP_SUFFIX = ".kernoscope.backup"
 # 与 effects.OPERATIONS["skill_install"] 同名：这是同一个操作，副作用声明只有一处。
 OPERATION_ID = "skill_install"
+
+
+class SkillSourceError(RuntimeError):
+    """源目录不可用（不存在/不是目录/里面没有文件）—— 装不了，不是"无事可做"。
+
+    与"源目录里的文件已经和目标一样"（`unchanged`）是两件事：后者是幂等成功，前者是失败。
+    把前者说成「已经是目标状态」（V-30）会让 `--apply --source /nonexistent` 以 rc=0
+    收场，而目标目录连建都没建。
+    """
 
 
 def skill_source_root() -> Path | None:
@@ -108,15 +120,30 @@ def _iter_source(src: Path) -> list[tuple[str, Path]]:
 
 def plan_install(source: Path | None = None, target: Path | None = None,
                  client: str = "claude", home: str | None = None) -> SkillPlan:
-    """算出这次安装会做什么（纯函数：只读，不写）。"""
+    """算出这次安装会做什么（纯函数：只读，不写）。
+
+    源目录不可用就**报错**（V-30）：`--source /nonexistent/dir` 曾经会算出"0 个文件"的计划，
+    于是 `--apply` 打一句「已经是目标状态」并以 rc=0 退出 —— 目标目录根本没建。空计划与
+    「已经是最新」不是同一件事，所以这里不许把它俩混起来。
+    """
     src = source or skill_source_root()
     if src is None:
         raise FileNotFoundError(
             "这个安装里没有 skill：找不到 skills/kernoscope/SKILL.md。"
             "如果你是从源码跑的，请在仓库根目录下执行")
+    if not src.exists():
+        raise SkillSourceError(
+            f"源目录不存在：{src}（--source 指错了，或这个安装里没带 skill）")
+    if not src.is_dir():
+        raise SkillSourceError(f"源不是目录：{src}（--source 要指向 skills/kernoscope 目录）")
+    files = _iter_source(src)
+    if not files:
+        raise SkillSourceError(
+            f"源目录里没有可安装的文件：{src}（源是空的，或只有 {BACKUP_SUFFIX} 备份）"
+            f"—— 这是源侧的缺陷，不是「无需改动」")
     tgt = target or default_target(client, home)
     plan = SkillPlan(source=str(src), target=str(tgt))
-    for rel, sp in _iter_source(src):
+    for rel, sp in files:
         dst = tgt / rel
         data = sp.read_bytes()
         if not dst.exists():
@@ -128,8 +155,6 @@ def plan_install(source: Path | None = None, target: Path | None = None,
         plan.actions.append(FileAction(
             rel=rel, operation=op, bytes_=len(data),
             backup_path=f"{dst}{BACKUP_SUFFIX}" if op == "update" else ""))
-    if not plan.actions:
-        plan.notes.append("源目录里一个文件都没有（这是缺陷，不是正常状态）")
     plan.notes.append(f"备份策略：已存在的文件备份成 <文件>{BACKUP_SUFFIX}，"
                       f"**已存在则保留第一份快照**（不覆盖旧备份）")
     return plan
@@ -148,7 +173,15 @@ def render_plan(plan: SkillPlan) -> str:
         lines.append("")
         lines.append("注：" + n)
     lines.append("")
-    lines.append(f"结论：{'会改动 ' + str(len(plan.changed)) + ' 个文件' if plan.changed else '已经是目标状态，无需改动'}")
+    if plan.changed:
+        lines.append(f"结论：会改动 {len(plan.changed)} 个文件")
+    elif plan.actions:
+        lines.append("结论：已经是目标状态，无需改动")
+    else:
+        # 空计划 ≠ 已经是最新：它是"没有源可装"（V-30）。这里绝不说"已经是目标状态"——
+        # 目标目录可能根本不存在。
+        lines.append(f"结论：没有可安装的文件（源：{plan.source}）"
+                     f"—— 这是源侧的缺陷，不是「无需改动」")
     return "\n".join(lines)
 
 
@@ -177,6 +210,10 @@ def apply_install(plan: SkillPlan, *, dry_run: bool = False) -> dict[str, Any]:
     """执行计划：备份 → 原子写 → **回读校验**；任何一步失败按写入顺序逆序回滚。"""
     if dry_run:
         return {"status": "planned", "changed": len(plan.changed), "written": 0}
+    if not plan.actions:
+        # V-30：空计划不是"无事可做"，是"没有源可装"（源目录不可用/是空的）。
+        return {"status": "failed", "reason": f"没有可安装的文件（源：{plan.source}）",
+                "rolled_back": 0}
     if not plan.changed:
         return {"status": "unchanged", "changed": 0, "written": 0}
     src = Path(plan.source)
@@ -234,8 +271,13 @@ def skill_main(argv: list[str]) -> int:
         plan = plan_install(source=Path(args.source) if args.source else None,
                            target=Path(args.target).expanduser() if args.target else None,
                            client=args.client)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, SkillSourceError) as e:
+        # V-30：装不了就是 `error:` + 非零退出（--json 也一样 —— 拿不到计划就没有计划可报）。
         print(f"error: {e}", file=sys.stderr)
+        return 1
+    if not plan.actions:                      # 防御：空计划永远不是"已经是最新"
+        print(f"error: 源目录里没有可安装的文件（{plan.source}）—— 检查 --source 指向的目录",
+              file=sys.stderr)
         return 1
     if args.json:
         payload = plan.to_dict()

@@ -9,6 +9,7 @@
 """
 
 import json
+import re
 
 import pytest
 
@@ -102,6 +103,38 @@ def test_missing_inputs_give_a_reason_not_a_number():
     assert st.issue_slot_utilization_pct is None
     reason = st.unavailable_reason()
     assert "时长" in reason and "时钟" in reason
+
+
+def test_missing_clock_prints_na_with_a_code_not_zero(capsys, tmp_path):
+    """V-27：缺 SM 时钟读数时「发射槽上限」必须打 `n/a` + code，不许打 0。
+
+    `issue_slots` 的算术在缺前提时给出的就是 0，而 **0 会被读成「测到 0」**（本项目自己的
+    纪律：`n/a` 不是失败，是"前提不成立所以不给数"）。code 用现成的闭集
+    （缺时钟 = `no_clock_reading`），处置随 code 走。
+    """
+    p = tmp_path / "hist.txt"
+    p.write_text(HIST)
+    rc, out, _ = run(capsys, "issue", "--from", str(p), "--kernel", "copy_k",
+                     "--sm-count", "128", "--clock-mhz", "0", "--duration-ms", "2")
+    assert rc == 2
+    line = next(ln for ln in out.splitlines() if "发射槽上限" in ln)
+    assert "n/a" in line, line
+    assert "no_clock_reading" in line, line
+    assert not re.search(r"发射槽上限（本窗口）\s*:\s*0", line), line
+
+    # --json 侧同一个纪律：前提不成立时给 null，不给 0
+    rc2, out2, _ = run(capsys, "issue", "--from", str(p), "--kernel", "copy_k",
+                       "--sm-count", "128", "--clock-mhz", "0", "--duration-ms", "2", "--json")
+    assert rc2 == 2
+    doc = json.loads(out2)
+    assert doc["issue_slots"] is None, doc["issue_slots"]
+    assert doc["available"] is False and doc["unavailable_reason"]
+    # 前提齐了才是数字（这条守卫也防止把"永远打 n/a"当成修复）
+    rc3, out3, _ = run(capsys, "issue", "--from", str(p), "--kernel", "copy_k",
+                       "--sm-count", "128", "--clock-mhz", "2000", "--duration-ms", "2")
+    assert rc3 == 0
+    ok = next(ln for ln in out3.splitlines() if "发射槽上限" in ln)
+    assert "n/a" not in ok and "2.05e+09" in ok, ok
 
 
 def test_issue_subcommand_known_answer(capsys, tmp_path):

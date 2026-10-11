@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -325,7 +327,7 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
 
     cmd = _target_command(args.program)
     if not cmd:
-        log("error: no target command. Put it after '--', or use --ks-sqlite/--ks-synthetic.")
+        log_error("error: no target command. Put it after '--', or use --ks-sqlite/--ks-synthetic.")
         raise SystemExit(1)
     meta["target"] = " ".join(cmd)
 
@@ -352,7 +354,7 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
             if rc != 0:
                 log(f"warn: 目标命令退出码 {rc}；报告仍然是这台机器在运行期间的设备级读数")
         except OSError as e:
-            log(f"error: 目标命令无法执行：{e}")
+            log_error(f"error: 目标命令无法执行：{e}")
             raise SystemExit(1)
         return [], meta, rc
 
@@ -376,18 +378,23 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
 
 
 def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str, Any], int] | None:
-    """采集，并把后端异常翻译成一行可读错误（R-19）。"""
+    """采集，并把后端异常翻译成一行可读错误（R-19）。
+
+    V-25：这里的两条错误**不受 `--quiet` 影响** —— 采集失败就没有报告可看，此时
+    静默的 rc=1 比一行错误更难排查（坏 sqlite 就走这条路）。
+    """
     try:
         return collect(args, log)
     except nsys_backend.NsysError as e:
-        log(f"error: {e}")
-        log("hint: nsys 随 CUDA Toolkit 提供（或单独安装 Nsight Systems）。"
-            "若已有 .nsys-rep / sqlite，可用 --ks-nsys-rep <file> 或 --ks-sqlite <db> 跳过采集；"
-            "没有 GPU 时用 --ks-synthetic 跑通流程。")
+        print(f"error: {e}", file=sys.stderr)
+        print("hint: nsys 随 CUDA Toolkit 提供（或单独安装 Nsight Systems）。"
+              "若已有 .nsys-rep / sqlite，可用 --ks-nsys-rep <file> 或 --ks-sqlite <db> 跳过采集；"
+              "没有 GPU 时用 --ks-synthetic 跑通流程。", file=sys.stderr)
         return None
     except OSError as e:
-        log(f"error: 采集失败：{e}")
-        log("hint: 检查路径是否存在与权限；--ks-sqlite/--ks-nsys-rep 需要可读的文件。")
+        print(f"error: 采集失败：{e}", file=sys.stderr)
+        print("hint: 检查路径是否存在与权限；--ks-sqlite/--ks-nsys-rep 需要可读的文件。",
+              file=sys.stderr)
         return None
 
 
@@ -444,7 +451,109 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
             "skill": skill_main, "gate": gate_main}
 
 
+# --------------------------------------------------------------------------
+# 自家错误行（V-25 P2）
+#
+# 约定：用户输入/环境 I/O 类失败一律变成 `error: <人话>（<怎么修>）` 打到 stderr +
+# 非零退出码，**绝不**把 Python traceback 甩给用户。参照物是本来就这么做的路径：
+# `--ks-memtrace`（cli.py 里 try/except MemTraceError）、`issue/memtrace/occupancy --from`
+# （子命令里 print(f"error: {e}", file=sys.stderr)）。本轮把漏网的收进来：
+# 只读目录写产物、`--ks-calibration`/`-i`/`--ks-achieved-occupancy` 的坏 JSON、
+# `--ks-sqlite` 的坏 sqlite。
+#
+# 边界（重要）：只翻译**输入与环境**异常。`ValueError`/`TypeError`/`KeyError` 这类
+# 程序 bug 继续裸抛 —— 把 bug 说成"用户写错了"会让下一次排查更贵。
+# --------------------------------------------------------------------------
+class CliInputError(Exception):
+    """用户输入/环境 I/O 错误：由 `main()` 翻成一行 `error:` + 退出码。"""
+
+    def __init__(self, message: str, *, hint: str = "", rc: int = 1) -> None:
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+        self.rc = rc
+
+    def render(self) -> str:
+        return f"error: {self.message}" + (f"（{self.hint}）" if self.hint else "")
+
+
+def _io_remedy(exc: OSError) -> str:
+    """按 errno 给一句"怎么修"（不是复述"哪里错了"）。"""
+    if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+        return "目标位置不可写：换到可写目录（如 /tmp 下）或修正权限后重试"
+    if exc.errno == errno.ENOENT:
+        return "路径不存在或拼错：确认文件与父目录都已建好"
+    if exc.errno == errno.EISDIR:
+        return "这是一个目录：产物要写的是文件路径，不是目录"
+    if exc.errno == errno.ENOSPC:
+        return "磁盘空间不足：清理后重试"
+    return "检查路径与读写权限后重试"
+
+
+def _read_json_or_fail(path: Any, *, what: str, hint: str = "") -> Any:
+    """读 JSON；读不了/不是合法 JSON 就抛 `CliInputError`（rc=1），不裸 traceback。"""
+    p = str(path)
+    try:
+        text = Path(p).read_text(encoding="utf-8")
+    except FileNotFoundError as e:
+        raise CliInputError(f"{what}不存在：{p}", hint=hint or _io_remedy(e)) from e
+    except OSError as e:
+        raise CliInputError(f"读不了{what} {p}：{e.strerror or e}",
+                            hint=hint or _io_remedy(e)) from e
+    except UnicodeDecodeError as e:
+        raise CliInputError(f"{what} {p} 不是文本文件（{e}）",
+                            hint=hint or "它应该是 JSON 文本，不是二进制") from e
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise CliInputError(
+            f"{what} {p} 不是合法 JSON：{e.msg}（第 {e.lineno} 行第 {e.colno} 列）",
+            hint=hint or "确认文件没被截断/手改坏；用生成它的命令重新生成一份") from e
+
+
+def _require_object(value: Any, path: Any, *, what: str, hint: str = "") -> dict:
+    """JSON 合法但顶层不是对象（数组/数字/字符串）时也给自家错误。"""
+    if not isinstance(value, dict):
+        raise CliInputError(
+            f"{what} {path} 的顶层应该是 JSON 对象，实际是 {type(value).__name__}",
+            hint=hint or "用生成它的命令重新生成一份，别手改结构")
+    return value
+
+
+def _write_text_or_fail(text: str, path: Any, *, what: str, logged: list[str] | None = None,
+                        hint: str = "") -> None:
+    """写文本产物；失败抛 `CliInputError`（I/O 错 rc=1），不裸 traceback。"""
+    p = str(path)
+    try:
+        _ensure_parent(p, logged)
+        Path(p).write_text(text, encoding="utf-8")
+    except OSError as e:
+        raise CliInputError(f"写不了{what}：{p}（{e.strerror or e}）",
+                            hint=hint or _io_remedy(e)) from e
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    """CLI 入口：把输入/环境类异常翻译成一行 `error:`，其余照旧抛出。
+
+    窄兜底只收三类：`OSError`（读/写文件）、`json.JSONDecodeError`（坏 JSON）、
+    `sqlite3.DatabaseError`（坏 sqlite）。`KeyboardInterrupt`/`SystemExit`/`MemoryError`
+    以及 `ValueError`/`TypeError`/`KeyError` 这类程序 bug **不吞** —— 报文里也保留异常
+    类型名，这样"用户写错了"与"我们写错了"在读日志时仍然分得开。
+    """
+    try:
+        return _main(argv)
+    except CliInputError as e:
+        print(e.render(), file=sys.stderr)
+        return e.rc
+    except (OSError, json.JSONDecodeError, sqlite3.DatabaseError) as e:
+        print(f"error: {type(e).__name__}: {e}"
+              f"（这是输入/环境问题（文件路径、权限、格式）；确认命令里给的文件存在、可读、"
+              f"格式正确后重试。若文件都没问题，那就是我们漏了这条路径，请带上下文报 bug）",
+              file=sys.stderr)
+        return 1
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # 子命令（不属于 ncu 兼容面）：**名字只有这一处**。文档命令门禁、--help、
@@ -463,6 +572,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         logged.append(msg)
         if not args.quiet:
             print(msg, file=sys.stderr)
+
+    def log_error(msg: str) -> None:
+        """`error:` 行**永远**打出来（不受 --quiet 影响）。
+
+        为什么：`--quiet` 是"别啰嗦"，不是"别报错"。被吞掉的错误会让脚本层拿到 rc≠0
+        却没有任何线索 —— 而 agent 恰恰只读 stderr。
+        """
+        logged.append(msg)
+        print(msg, file=sys.stderr)
 
     # ---------- 执行计划（A2）：只打印，不执行 ----------
     # 放在**所有采集之前**：`--plan` 的承诺是"没有任何副作用"，所以它必须在第一行采集
@@ -488,7 +606,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # ---------- 回读模式 ----------
     if args.import_report:
-        rep = Report.from_dict(json.loads(Path(args.import_report).read_text()))
+        # V-25：`-i /nonexistent.json` 或坏 JSON 曾经是裸 FileNotFoundError/JSONDecodeError
+        # （rc=1、无 error: 行）。这里按自家约定翻译。
+        rep = Report.from_dict(_require_object(
+            _read_json_or_fail(
+                args.import_report, what="回读报告",
+                hint="它应该是 `-o <前缀>` 写出的 .ksreport.json；路径写对，或先跑一次 "
+                     "`kernoscope --ks-synthetic -o /tmp/rep` 生成一份"),
+            args.import_report, what="回读报告"))
         used_noop_import = [f for f in NOOP_FLAGS
                             if getattr(args, f.lstrip("-").replace("-", "_"), None) is not None]
         problems = _strict_problems(rep, args, used_noop_import)
@@ -559,7 +684,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ---------- 峰值与 workload ----------
     peaks: MachinePeaks | None = None
     if args.ks_calibration:
-        prof = json.loads(Path(args.ks_calibration).read_text())
+        # V-25：标定文件读不了曾经是裸 FileNotFoundError（rc=1、无 error: 行）。
+        prof = _require_object(
+            _read_json_or_fail(
+                args.ks_calibration, what="标定文件",
+                hint="它应由 tools/machine-profile.py 生成（nvidia-smi 跑一次标定）；"
+                     "不想标定就去掉 --ks-calibration，或改用 --ks-peak-tflops/--ks-peak-gbps "
+                     "手工给峰值"),
+            args.ks_calibration, what="标定文件",
+            hint="它应是标定脚本写出的 JSON 对象（含 measured_dram/measured_matmul_tflops）")
         peaks = MachinePeaks.from_profile(prof, args.ks_dtype, profile_path=args.ks_calibration)
         if not peaks.caliber_ok:
             log(f"warn: 标定口径不可用 —— {peaks.caliber_note}")
@@ -582,13 +715,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             workload = gemm_workload(m, n, k, args.ks_dtype)
             workload_note = f"user-provided GEMM {m}x{n}x{k} ({args.ks_dtype})"
         except Exception:
-            log(f"error: bad --ks-gemm {args.ks_gemm!r}; expected M,N,K")
+            log_error(f"error: bad --ks-gemm {args.ks_gemm!r}; expected M,N,K")
             return 1
     elif args.ks_flops and args.ks_bytes:
         workload = (float(args.ks_flops), float(args.ks_bytes))
         workload_note = f"user-provided FLOPs={args.ks_flops:g} bytes={args.ks_bytes:g}"
     elif args.ks_flops or args.ks_bytes:
-        log("error: --ks-flops and --ks-bytes must be provided together")
+        log_error("error: --ks-flops and --ks-bytes must be provided together")
         return 1
 
     # ---------- 静态后端 ----------
@@ -607,7 +740,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     achieved: dict[str, dict[str, float]] = {}
     if args.ks_achieved_occupancy:
-        achieved = json.loads(Path(args.ks_achieved_occupancy).read_text())
+        # V-25：注入文件读不了也不能裸 traceback（该文件由 `occupancy --write-json` 生成）。
+        achieved = _require_object(
+            _read_json_or_fail(
+                args.ks_achieved_occupancy, what="occupancy 注入文件",
+                hint="它应由 `kernoscope occupancy --from <probe> --write-json <file>` 生成；"
+                     "确认路径写对，或去掉 --ks-achieved-occupancy"),
+            args.ks_achieved_occupancy, what="occupancy 注入文件")
 
     # ---------- 过滤 ----------
     degraded = str(meta.get("degraded") or "")
@@ -621,7 +760,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ref = Refusal(RefusalCode.NO_LAUNCH_ACTIVITY,
                           "没有采到任何 kernel 活动：确认目标命令真的在 GPU 上跑 kernel，"
                           "且采集时带上了 CUDA activity（--trace=cuda）")
-            log(f"error: {ref.message}")
+            log_error(f"error: {ref.message}")
             log(f"hint: {ref.remedy_or_default.action}"
                 + (f" [{ref.remedy_or_default.command}]" if ref.remedy_or_default.command else ""))
             return 1
@@ -629,13 +768,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             want_dev = {int(x) for x in str(args.devices).replace(" ", "").split(",") if x != ""}
         except ValueError:
-            log(f"error: --devices 需要逗号分隔的整数设备号，收到 {args.devices!r}")
+            log_error(f"error: --devices 需要逗号分隔的整数设备号，收到 {args.devices!r}")
             return 1
         before = len(launches)
         launches = [l for l in launches if l.device_id in want_dev]
         log(f"--devices {sorted(want_dev)}: 保留 {len(launches)}/{before} 条 launch 记录")
         if not launches:
-            log(f"error: 这些设备上没有 kernel activity（可用 deviceId="
+            log_error(f"error: 这些设备上没有 kernel activity（可用 deviceId="
                 f"{sorted({l.device_id for l in launches}) or '无'}）。")
             return 1
     matched = select_launches(launches, args.kernel_name, args.launch_skip,
@@ -647,7 +786,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                       f"no kernels matched {args.kernel_name!r}；可用名字示例：{names}",
                       observed={"pattern": args.kernel_name or "",
                                 "available_names": names})
-        log(f"error: {ref.message}")
+        log_error(f"error: {ref.message}")
         log(f"hint: {ref.remedy_or_default.action}")
         return 1
 
@@ -675,7 +814,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError("需要 LOW,HIGH 两个数")
             ledger_range = (min(parts) * 1e6, max(parts) * 1e6)
         except ValueError as e:
-            log(f"error: --ks-ledger-range-mb 解析失败（{e}）；应形如 LOW,HIGH")
+            log_error(f"error: --ks-ledger-range-mb 解析失败（{e}）；应形如 LOW,HIGH")
             return 1
 
     # ---------- DRAM 流量估算（NVML 代理；失败时可用轨迹口径对拍）----------
@@ -705,7 +844,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                    "，用本机 L2 容量定容；device 未报 L2 时用 --ks-l2-bytes 指定")
                 + "）")
         except (OSError, MemTraceError) as e:
-            log(f"error: 访存轨迹读取失败: {e}")
+            log_error(f"error: 访存轨迹读取失败: {e}")
             return 1
 
     issue_hist = None
@@ -717,7 +856,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             log(f"instr-hist: 载入 {len(issue_hist.launches)} 条 launch 记录，"
                 f"{len(issue_hist.kernels)} 个 kernel")
         except OpcodeHistError as e:
-            log(f"error: 指令直方图读取失败: {e}")
+            log_error(f"error: 指令直方图读取失败: {e}")
             return 1
 
     grouped_dram: dict[str, list[KernelLaunch]] = {}
@@ -1041,6 +1180,11 @@ def _stderr_log(args: argparse.Namespace, logged: list[str]):
         if not getattr(args, "quiet", False):
             print(msg, file=sys.stderr)
 
+    def log_error(msg: str) -> None:
+        logged.append(msg)
+        print(msg, file=sys.stderr)
+
+    log.log_error = log_error          # type: ignore[attr-defined]
     return log
 
 
@@ -1214,13 +1358,13 @@ def _attach_truth(rep: Report, path: str, log) -> None:
                f"（把它放进 PYTHONPATH），不需要 GPU 与计数器权限")
         rep.meta.setdefault("environment_refusals", []).append(
             Refusal(RefusalCode.NCU_REPORT_UNREADABLE, msg).to_dict())
-        log(f"error: {msg}")
+        log_error(f"error: {msg}")
         return
     except ncu_rep_backend.NcuRepError as e:
         msg = f"读不了 {path}：{e}"
         rep.meta.setdefault("environment_refusals", []).append(
             Refusal(RefusalCode.NCU_REPORT_UNREADABLE, msg).to_dict())
-        log(f"error: {msg}")
+        log_error(f"error: {msg}")
         return
 
     ours = {m.name: m.value for k in rep.kernels for s in k.sections for m in s.metrics
@@ -1349,7 +1493,7 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
     kernels = [k for k in rep.kernels
                if k.name != "(device)" and list(getattr(k, "launches", []) or [])]
     if not kernels:
-        log("error: 没有可导出的 kernel（没有 launch 记录就写不出 kernel 身份，"
+        log_error("error: 没有可导出的 kernel（没有 launch 记录就写不出 kernel 身份，"
             "编一组 grid/block 就是在造身份）")
         return 2 if args.strict else 1
     kernels.sort(key=lambda k: k.total_ns, reverse=True)
@@ -1369,8 +1513,15 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
                                compute_capability=str(getattr(dev, "compute_capability", "")
                                                       or ""))
     except SubstituteRefused as e:
-        log(f"error: 拒绝生成 .ncu-rep：{e}")
+        log_error(f"error: 拒绝生成 .ncu-rep：{e}")
         return 2 if args.strict else 1
+    except OSError as e:
+        # V-25：只读目录写 .ncu-rep（或旁路 `.ATTRIBUTION.txt`）曾经是裸 PermissionError。
+        # 错误不受 --quiet 影响（写不出产物时静默的 rc=1 更难排查）。
+        print(f"error: 写不了ncu-rep 导出（含 .ATTRIBUTION.txt 署名）：{args.export_ncu_rep}"
+              f"（{e.strerror or e}）", file=sys.stderr)
+        print(f"hint: {_io_remedy(e)}", file=sys.stderr)
+        return 1
     log(f"ncu-rep: 写出 {res.ncu_rep_path}（{res.bytes_written} B，"
         f"{res.metrics_written} 个值，全部带出处）+ 署名 {res.sidecar_path}")
     if len(kernels) > 1:
@@ -1398,8 +1549,8 @@ def _write_report_md(rep: Report, args: argparse.Namespace, packet: dict[str, An
         print(f"error: 生成 Markdown 报告失败：{exc}", file=sys.stderr)
         return 1
     out = str(args.report_md)
-    _ensure_parent(out, logged)
-    Path(out).write_text(text, encoding="utf-8")
+    # V-25：只读目录写 Markdown 报告曾经是裸 PermissionError。
+    _write_text_or_fail(text, out, what="人读报告（Markdown）", logged=logged)
     rep.meta["out_report_md"] = out
     print(f"==PROF== per-kernel 报告: {out}（{len(text.encode('utf-8'))} B）", file=sys.stderr)
     if len(kernels) > 1:
@@ -1677,12 +1828,13 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         if p.exists() and not args.force_overwrite:
             print(f"error: {json_path} exists (pass -f to overwrite)", file=sys.stderr)
             return 1
-        p.write_text(rep.to_json(include_launches=not args.ks_json_no_launches))
+        # V-25：只读目录/无权限写报告曾经是裸 PermissionError（rc=1、无 error: 行）。
+        _write_text_or_fail(rep.to_json(include_launches=not args.ks_json_no_launches),
+                            json_path, what="报告 JSON", logged=logged)
         rep.meta["out_json"] = json_path
         if getattr(args, "launch_csv", False):
             lp = base + ".launches.csv"
-            _ensure_parent(lp, logged)
-            Path(lp).write_text(render_launch_csv(rep))
+            _write_text_or_fail(render_launch_csv(rep), lp, what="逐 launch 表（CSV）", logged=logged)
             rep.meta["out_launch_csv"] = lp
         perfetto_path = args.ks_perfetto or (base + ".perfetto.json")
         _ensure_parent(perfetto_path, logged)
@@ -1690,11 +1842,12 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         if q.exists() and not args.force_overwrite:
             print(f"error: {perfetto_path} exists (pass -f to overwrite)", file=sys.stderr)
             return 1
-        q.write_text(render_perfetto(rep))
+        _write_text_or_fail(render_perfetto(rep), perfetto_path, what="时间线（Perfetto）JSON",
+                            logged=logged)
         rep.meta["out_perfetto"] = perfetto_path
     elif args.ks_perfetto:
-        _ensure_parent(args.ks_perfetto, logged)
-        Path(args.ks_perfetto).write_text(render_perfetto(rep))
+        _write_text_or_fail(render_perfetto(rep), args.ks_perfetto, what="时间线（Perfetto）JSON",
+                            logged=logged)
         rep.meta["out_perfetto"] = args.ks_perfetto
 
     # ---------- W2/W4：决策包（机器视图）与一屏（人视图）----------
@@ -1707,7 +1860,11 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         # CSV 是机器格式，前面铺一屏人话会破坏它；要一屏请显式 --screen only
         screen = "off"
     packet = None
-    if getattr(args, "packet", None) or screen != "off":
+    # V-26③：案件目录（`-o <前缀>` 默认写 `<前缀>.case/`）此前只在"要打一屏或要决策包"时
+    # 才建 —— `--screen off`/`--csv`/`--launch-csv` 会**静默不写** case，而 README 只写
+    # `--no-case` 能关。语义统一：只要没显式 `--no-case`，就把 case 写出来。
+    if (getattr(args, "packet", None) or screen != "off"
+            or (not getattr(args, "no_case", False) and getattr(args, "export", None))):
         from .packet import build, dumps, render_onepage, write_packet
 
         ctx = packet_ctx or {}
@@ -1719,7 +1876,15 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         if getattr(args, "packet", None) == "-":
             sys.stdout.write(blob + "\n")
         elif getattr(args, "packet", None):
-            write_packet(packet, args.packet)
+            # V-25：只读目录写决策包曾经是裸 PermissionError/FileNotFoundError 且崩在
+            # 写完报告之后。写不了就是一行自家错误 + rc=1。
+            _ensure_parent(str(args.packet), logged)
+            try:
+                write_packet(packet, args.packet)
+            except OSError as e:
+                raise CliInputError(
+                    f"写不了决策包：{args.packet}（{e.strerror or e}）",
+                    hint=_io_remedy(e)) from e
             print(f"==PROF== 决策包: {args.packet} "
                   f"({len(blob.encode('utf-8'))} B)", file=sys.stderr)
         if screen in ("auto", "only"):
@@ -1741,8 +1906,8 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
     # ---------- I1：真值对照产物（机器可读，可归档、可 diff）----------
     if rep.meta.get("ncu_truth") and rep.meta.get("out_json"):
         truth_path = re.sub(r"\.ksreport\.json$", "", str(rep.meta["out_json"])) + ".ncu-truth.json"
-        Path(truth_path).write_text(
-            json.dumps(rep.meta["ncu_truth"], ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_text_or_fail(json.dumps(rep.meta["ncu_truth"], ensure_ascii=False, indent=2),
+                            truth_path, what="真值对拍 JSON", logged=logged)
         rep.meta["out_ncu_truth"] = truth_path
         print(f"==PROF== 真值对拍: {truth_path}", file=sys.stderr)
 
@@ -1751,8 +1916,9 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         from .ncu_names import render_name_map
 
         fmt = "csv" if str(args.export_name_map).lower().endswith(".csv") else "json"
-        _ensure_parent(str(args.export_name_map), logged)
-        Path(str(args.export_name_map)).write_text(render_name_map(fmt), encoding="utf-8")
+        # V-25：只读目录写名字对照表曾经是裸 PermissionError。
+        _write_text_or_fail(render_name_map(fmt), args.export_name_map,
+                            what="名字对照表", logged=logged)
         rep.meta["out_name_map"] = str(args.export_name_map)
         print(f"==PROF== ncu 名字对照表: {args.export_name_map}（{fmt}）", file=sys.stderr)
 
@@ -1792,7 +1958,8 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
                   file=sys.stderr)
 
     if args.log_file:
-        Path(args.log_file).write_text("\n".join(logged) + "\n")
+        # V-25：只读目录写日志曾经是裸 PermissionError（且崩在报告已经打完之后）。
+        _write_text_or_fail("\n".join(logged) + "\n", args.log_file, what="日志文件（--log-file）")
     rep.meta["_packet"] = packet
     return 0
 

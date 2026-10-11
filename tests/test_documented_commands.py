@@ -23,13 +23,26 @@ R-55 的三处修正（旧门禁的声明比能力大得多）：
 规则表 `DOC_VERBATIM` 每条是：(文档, 文档里那一行的片段, 断言函数, 适配函数, 为什么)。
 **适配函数只做一件事**：把文档里的占位符/外部文件换成夹具（`<每次 launch 的 MB>` → 数值、
 `-- <读者自己的程序>` → `--ks-synthetic`）；开关一个都不改，`needle` 必须真的还在文档里。
+
+第五轮（V-23/V-24）的两处修正：
+
+* **扫描范围（V-23）**：旧实现只认 ```bash / ```sh 围栏 —— 实测往 ```console / ```text /
+  **无标签**围栏里注入一条编造的开关，门禁全绿。现在把命令围栏扩到读者真会照抄的那几种，
+  并把"围栏里明显不是命令的东西"（JSON/别的语言/整块输出）**逐条写清**地排除掉，
+  而不是静默丢弃。取词仍然**只在围栏内 + 行首**：报告里验收方自己写散文扫描时产生过
+  10 条假阳性（把 `入口命令：kernoscope …` 这种半截命令当成命令）。
+* **空输入集（V-24）**：旧实现在没有 `.git` 时把整族测试 `skipif` 掉，于是导出的源码树里
+  「文档命令门禁」静默失效（23 passed / 6 skipped，看起来全绿）。现在空输入集**失败**并
+  说清原因，唯一出口是显式 `KS_ALLOW_EMPTY_DOC_SCAN=1`（接受这次降级 ⇒ skip，不是假绿）。
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -48,69 +61,215 @@ DOC_EXCLUDE = ("bench/artifacts/",)
 # 允许出现在 `kernoscope` 之前的"前缀"，只有这些才说明这一行是在调用我们
 PLACEHOLDER = "PLACEHOLDER"          # 文档里的 `<真值>` 占位符归一成它
 
-# 允许的"包装形式"：这些写法都算**在调用我们**，必须被解析（不许静默丢弃）。
+# 允许的**行首**包装形式：这些写法都算在调用我们，必须被解析（不许静默丢弃）。
 #   真事（验收报告第四轮 P1）：`python -m kernoscope … --smoke` 与
 #   `xargs -n1 kernoscope … --smoke` 两条整行被丢弃，于是编出来的开关没人管。
-_WRAPPERS = r"""(?:
-      sudo\s+|time\s+|nohup\s+|command\s+|exec\s+            # 常见前缀
-    | env\s+(?:\S+\s+)*                                        # env VAR=x …
-    | uv\s+run\s+(?:--\S+\s+)*|uv\s+                            # uv run [--flags]
-    | (?:python|python3)\s+-m\s+                                # python -m <module>
-    | xargs\s+(?:-\S+\s+)*                                      # xargs -n1 <cmd>
-)?(?<![\w./-])(?P<prog>kernoscope)\b"""
-CALL_RE = re.compile(_WRAPPERS, re.X)
+#   真事（第五轮 V-23）：散文里的半截命令被当成命令（10 条假阳性），所以这里要求
+#   调用出现在**行首**，并且用 `^\s*` 锚定 —— 散文行不再参与取词。
+_PREFIX_ATOMS = (
+    r"[A-Za-z_][A-Za-z0-9_]*=\S*\s+"                    # VAR=value
+    r"|(?:\$|>|❯|%)\s+"                                  # console 提示符（`$ `）
+    r"|sudo\s+|time\s+|nohup\s+|command\s+|exec\s+"      # 常见前缀
+    r"|env\s+(?:\S+\s+)*"                                # env VAR=x …
+    r"|uv\s+run\s+(?:--\S+\s+)*|uv\s+"                   # uv run [--flags]
+    r"|(?:python|python3)\s+-m\s+"                       # python -m <module>
+    r"|xargs\s+(?:-\S+\s+)*"                             # xargs -n1 <cmd>
+)
+INVOCATION_RE = re.compile(r"^\s*(?:" + _PREFIX_ATOMS + r")*(?P<prog>kernoscope)\b(?![\w./-])")
+
+# 「行首像命令」的**弱**判据：kernoscope 出现在行首前 4 个 ASCII 词里。
+#   只用来抓"包装形式没认全"（例如 `xvfb-run kernoscope … --smoke`）。中文散文行
+#   （`入口命令：kernoscope …`）在这里不会匹配 —— 那正是 10 条假阳性的来源。
+NEAR_START_RE = re.compile(r"^\s*(?:[A-Za-z_][\w./-]*\s+){0,4}kernoscope\b(?![\w./-])")
+LONG_FLAG_RE = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]+")
+# **散文**的判据：中文标点。参数可以是中文（`route "为什么这个 kernel 慢"`），
+# 但一行里出现中文**标点**说明它是说明文字 —— 例如
+# `kernoscope selftest / kernoscope diff。不要凭印象拼子命令（先看 kernoscope --help）。`
+# 这种"命令列表写成散文"的行，正是报告里 10 条假阳性的形状。
+PROSE_PUNCT_RE = re.compile(r"[。，、；：！？（）【】「」『』〈〉《》→←…—]")
+
+# **命令围栏**的标签白名单（V-23）：读者真会照抄的那几种 + 无标签。
+#   旧实现只认 ```bash / ```sh，于是往 ```console / ```text / 无标签围栏里注入一条
+#   编造的开关，门禁全绿（报告实测）。
+COMMAND_FENCE_TAGS = frozenset({"", "bash", "sh", "shell", "zsh", "console", "text", "txt",
+                                "shell-session"})
+# **明确排除**的围栏标签（逐条写清理由，不静默丢）：
+#   json/jsonc/yaml/toml/csv… 是**数据**；python/c/cuda 是**别的语言的代码**；
+#   powershell 是**别的 shell**（这里只保证 POSIX shell 的取词规则）。
+DATA_FENCE_TAGS = frozenset({"json", "jsonc", "json5", "yaml", "yml", "toml", "ini", "csv",
+                             "tsv", "xml", "html", "python", "py", "c", "cpp", "cc", "cuda",
+                             "powershell", "ps1", "diff"})
+
+# 有意展示的**反面教材**：文档里那些"agent 凭印象编出来的命令"是**证据**，不是承诺。
+# 逐条登记（文件、那些行的特征、为什么）。豁免是**逐行**的：同一个围栏里再多出别的坏
+# 命令照样要被查（不然登记表就成了"豁免整块"的橡皮擦）。登记项必须仍然存在、确实不合法，
+# 且**文档自己说它是错的**（见 `test_registered_negative_examples_are_really_unparseable`）。
+NEGATIVE_EXAMPLES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("eval/TRIGGER-EVAL.md",
+     ("kernoscope profile -- python train.py",
+      "kernoscope compare base_run vec_run",
+      "kernoscope compare --baseline a.nsys-rep --candidate b.nsys-rep --report out.json"),
+     "A/B 轮 agent 凭印象编的子命令；同段正文紧接着说「`profile` 与 `compare` 都不存在」"),
+)
+# 反面教材还要有**文档自己的证据**：块附近 ±20 行内的散文必须说它不对。没有这句话的块
+# 不许进登记表（否则这张表就成了"随手豁免任何坏命令"的橡皮擦）。
+# 判据是**具体措辞**（不存在/编了/凭印象/反例…），不是单个"错/编/误"字 —— 后者太容易
+# 被无关句子满足。
+NEGATIVE_EVIDENCE_RE = re.compile(
+    r"不存在|不成立|编出来|编造|编了|凭印象|错例|反例|反面教材|不要照抄|别照抄|不许照抄"
+    r"|跑不通|不合法|不许静默")
+NEGATIVE_EVIDENCE_WINDOW = 20
 
 # --------------------------------------------------------------------------
-# 从文档里取命令
+# 扫描输入集：空输入必须**失败**，不许静默 skip（V-24）
 # --------------------------------------------------------------------------
-def _tracked_docs() -> list[Path]:
+ALLOW_EMPTY_DOC_SCAN = "KS_ALLOW_EMPTY_DOC_SCAN"
+
+
+def _git_ls_files(*patterns: str) -> tuple[bool, list[str]]:
+    """`git ls-files`：(git 可用吗, 被跟踪的路径)。不存在 `.git` 时第一项是 False。"""
     try:
-        r = subprocess.run(["git", "ls-files", "*.md"], cwd=ROOT, capture_output=True,
+        r = subprocess.run(["git", "ls-files", *patterns], cwd=ROOT, capture_output=True,
                            text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return False, []
     if r.returncode != 0:
+        return False, []
+    return True, [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def _tracked_docs() -> list[Path]:
+    ok, files = _git_ls_files("*.md")
+    if not ok:
         return []
-    out = []
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if not line or line.startswith(DOC_EXCLUDE):
-            continue
-        out.append(ROOT / line)
-    return out
+    return [ROOT / f for f in files if not f.startswith(DOC_EXCLUDE)]
 
 
 DOCS = _tracked_docs()
 
-needs_git = pytest.mark.skipif(not DOCS, reason="不在 git 仓库里（例如导出的源码包）")
+
+def _empty_scan_input(why: str) -> None:
+    """空输入集的唯一出口：显式 `KS_ALLOW_EMPTY_DOC_SCAN=1` ⇒ skip；否则 fail。"""
+    msg = (
+        f"文档命令门禁的输入集是空的：{why}\n"
+        "  这层门禁不能在没有输入时静默通过 —— 那正是 V-24 的原形（导出的源码树里\n"
+        "  23 passed / 6 skipped，看起来全绿，其实一条命令都没查）。两种正经出路：\n"
+        "  ① 在 **git 仓库**里跑：`git ls-files '*.md'` 必须能列出被跟踪的文档；\n"
+        f"  ② 显式接受这次降级：设置 {ALLOW_EMPTY_DOC_SCAN}=1"
+        "（此时本族测试 skip，而不是假绿）。"
+    )
+    if os.environ.get(ALLOW_EMPTY_DOC_SCAN, "").strip() == "1":
+        pytest.skip(msg)
+    pytest.fail(msg)
 
 
-def _fenced_blocks(path: Path, langs: tuple[str, ...] = ("bash", "sh")) -> list[tuple[int, str]]:
-    """带语言标签的代码块（`(起始行号, 内容)`）。
+def _scan_inputs_problem() -> str | None:
+    """扫不出输入集的**原因**（None = 有输入）：三种空输入都要能被说清。"""
+    ok, files = _git_ls_files("*.md")
+    if not ok:
+        return "这里不是 git 工作树（例如 `git archive` 导出的源码包），拿不到被跟踪的文档清单"
+    if not [f for f in files if not f.startswith(DOC_EXCLUDE)]:
+        return "git 工作树里没有 DOC_EXCLUDE 之外被跟踪的 *.md"
+    if not _total_command_blocks():
+        return f"被跟踪的 {len(DOCS)} 份 *.md 里一个命令围栏都扫不到（扫描/取词逻辑退化了？）"
+    return None
 
-    只看 ```bash / ```sh：文档里引用"别人写错的命令"时用的是无标签围栏（这是有意的豁免）。
+
+def needs_doc_scan_inputs(fn):
+    """替换旧的 `skipif(not DOCS)`：空输入集 fail 而不是 skip（V-24）。"""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        why = _scan_inputs_problem()
+        if why is not None:
+            _empty_scan_input(why)
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+# --------------------------------------------------------------------------
+# 从文档里取命令
+# --------------------------------------------------------------------------
+def _registered_negative_line(path: Path, line: str) -> bool:
+    """这一**行**是不是已登记的**反面教材**（见 `NEGATIVE_EXAMPLES`）。
+
+    逐行豁免：同围栏里别的坏命令照样要被查。
     """
+    try:
+        rel = path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    return any(rel == doc and any(snippet in line for snippet in snippets)
+               for doc, snippets, _why in NEGATIVE_EXAMPLES)
+
+
+def _scan_lines(path: Path):
+    """要校验的 `(行号, 逻辑行)` —— 命令围栏内、去掉已登记的反面教材。"""
+    for start, block in _fenced_blocks(path):
+        for offset, line in enumerate(_logical_lines(block)):
+            if _registered_negative_line(path, line):
+                continue          # 文档**有意**展示的错例（逐行登记，见上）
+            yield start + offset, line
+
+
+def _is_data_block(content: str) -> bool:
+    """整块像**数据/输出**而不是命令：首个非空行以 `{`/`[` 开头（JSON/数组输出）。
+
+    `console`/`text` 围栏里贴机器输出很常见；这类块整块排除（空块也没有命令）。
+    """
+    for line in content.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        return s.startswith("{") or s.startswith("[")
+    return True
+
+
+def _fenced_blocks(path: Path, langs: frozenset[str] | None = None) -> list[tuple[int, str]]:
+    """**命令围栏**（`(起始行号, 内容)`；V-23 起不再只认 ```bash/```sh）。
+
+    扫描范围 = COMMAND_FENCE_TAGS 里的围栏，再减掉两类**明确**排除的内容：
+
+      * 标签排除：`DATA_FENCE_TAGS`（JSON/YAML/Python/CUDA/PowerShell… 是数据或别的语言）；
+      * 整块形状排除：`_is_data_block`（整块以 `{`/`[` 开头的当输出/数据）。
+
+    （第三类排除 —— 文档有意展示的反面教材 —— 是**逐行**做的，在 `_scan_lines` 里；
+    这样同一个围栏里再多出别的坏命令照样会被查到。）
+
+    行首取词（命令必须出现在行首）不在这里做，而在 `kernoscope_argv` 里 —— 于是
+    "围栏里的散文行"自然不产生命令，而"围栏里的坏命令"一条都跑不掉。
+    """
+    langs = COMMAND_FENCE_TAGS if langs is None else langs
     if not path.exists():
         return []
     out: list[tuple[int, str]] = []
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    inside: str | None = None
+    inside = False
     buf: list[str] = []
+    tag = ""
     start = 0
     for i, line in enumerate(lines, 1):
         st = line.strip()
         if st.startswith("```"):
-            if inside is not None:
-                out.append((start, "\n".join(buf)))
-                inside, buf = None, []
+            if inside:
+                content = "\n".join(buf)
+                if tag in langs and not _is_data_block(content):
+                    out.append((start, content))
+                inside, buf = False, []
             else:
-                tag = st[3:].strip().split()[0] if st[3:].strip() else ""
-                if tag in langs:
-                    inside, start = tag, i + 1
+                inside = True
+                info = st[3:].strip()
+                tag = info.split()[0].lower() if info else ""
+                start = i + 1
+                buf = []
             continue
-        if inside is not None:
+        if inside:
             buf.append(line)
     return out
+
+
+def _total_command_blocks() -> int:
+    """全部被跟踪文档里的命令围栏总数（V-24 的"扫不到任何围栏"判据）。"""
+    return sum(len(_fenced_blocks(doc)) for doc in DOCS)
 
 
 def _logical_lines(block: str) -> list[str]:
@@ -147,11 +306,40 @@ def tokens_after(s: str, pos: int) -> list[str]:
     return _split_metachars(toks)
 
 
-def kernoscope_argv(line: str) -> list[str] | None:
-    """把一条文档行切成 **kernoscope 的 argv**；不是调用我们的一律返回 None。
+def strip_comment(s: str) -> str:
+    """剥掉 shell 注释（引号里的 `#` 不算）。
 
-    处理：环境变量前缀 / `sudo` / `time` / `uv run` / 命令替换 `$( )` / 反引号 / 管道 /
-    `#` 注释 / `-- <被测命令>`（那部分交给别人跑）。
+    必须先剥注释再判"散文"：`kernoscope doctor   # 计数器门（1 秒）` 是**命令**，
+    中文标点只出现在注释里。
+    """
+    out: list[str] = []
+    quote = ""
+    for i, ch in enumerate(s):
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            continue
+        if ch == "#" and (i == 0 or s[i - 1].isspace()):
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def kernoscope_argv(line: str) -> list[str] | None:
+    """把一条文档行切成 **kernoscope 的 argv**；不是"在调用我们"的一律返回 None。
+
+    处理：行首包装（环境变量 / 提示符 / `sudo` / `time` / `uv run` / `python -m` /
+    `xargs`）/ 命令替换 `$( )` / 反引号 / 管道 / `#` 注释 / `-- <被测命令>`（那部分交给
+    别人跑）。
+
+    关键：调用必须落在**行首**（`INVOCATION_RE` 是 `^` 锚定的）。散文里的半截命令
+    （`入口命令：kernoscope … → kernoscope diff`）不产生 argv —— 第五轮 V-23 的假阳性
+    就是这么来的。
     """
     s = line.strip()
     if not s or s.startswith("#"):
@@ -162,6 +350,12 @@ def kernoscope_argv(line: str) -> list[str] | None:
     s = re.sub(r"<[^<>]*>", PLACEHOLDER, s)
     # 命令替换与反引号：只取里面的那条命令
     s = s.replace("$(", " ").replace(")", " ").replace("`", " ")
+    # 注释先剥掉再判散文（`kernoscope doctor  # 门（1 秒）` 里的标点在注释里）
+    s = strip_comment(s)
+    # 散文行不是命令（报告里 10 条假阳性的形状）：参数可以是中文，但中文**标点**说明
+    # 这行是把命令写进了说明文字里（`… selftest / kernoscope diff。不要凭印象拼…`）。
+    if PROSE_PUNCT_RE.search(s):
+        return None
     try:
         tokens = shlex.split(s, comments=True)
     except ValueError:
@@ -172,9 +366,9 @@ def kernoscope_argv(line: str) -> list[str] | None:
         tokens.pop(0)
     if not tokens:
         return None
-    # `kernoscope` 必须出现在**调用位置**（或某种被承认的包装形式里）。
+    # `kernoscope` 必须出现在**行首的调用位置**（或某种被承认的包装形式里）。
     # 用正则定位而不是"前缀词都要在白名单里"：白名单会漏掉 `python -m`、`xargs -n1`。
-    m = CALL_RE.search(s)
+    m = INVOCATION_RE.match(s)
     if m is None:
         return None
     argv = ["kernoscope", *tokens_after(s, m.end("prog"))]
@@ -247,7 +441,7 @@ def _parse_problem(argv: list[str], sub_flags: dict[str, set[str]],
     return None
 
 
-@needs_git
+@needs_doc_scan_inputs
 def test_every_documented_command_is_parseable():
     """文档里每条 kernoscope 命令都必须能被**真实解析器**接受。
 
@@ -258,40 +452,44 @@ def test_every_documented_command_is_parseable():
     problems: list[str] = []
     seen = 0
     for doc in DOCS:
-        for start, block in _fenced_blocks(doc):
-            for offset, line in enumerate(_logical_lines(block)):
-                argv = kernoscope_argv(line)
-                if argv is None:
-                    continue
-                seen += 1
-                why = _parse_problem(argv, sub_flags, main_flags)
-                if why:
-                    problems.append(f"{doc.relative_to(ROOT)}:{start + offset}: {why}\n"
-                                    f"    {line.strip()[:110]}")
+        for lineno, line in _scan_lines(doc):
+            argv = kernoscope_argv(line)
+            if argv is None:
+                continue
+            seen += 1
+            why = _parse_problem(argv, sub_flags, main_flags)
+            if why:
+                problems.append(f"{doc.relative_to(ROOT)}:{lineno}: {why}\n"
+                                f"    {line.strip()[:110]}")
     assert seen >= 20, f"只扫到 {seen} 条文档命令 —— 扫描范围或取词逻辑退化了"
-    # P1 的第二半：**不许静默丢弃**。提到 kernoscope 又带长开关、却没被认成命令的行，
-    # 说明取词逻辑漏了一种包装形式 —— 那种行里的编造开关永远不会被查（P1 的原形）。
+    # P1 的第二半：**不许静默丢弃**。行首像命令、带长开关、却没被认成命令的行，说明
+    # 包装形式没认全 —— 那种行里的编造开关永远不会被查（P1 的原形）。散文行不算
+    # （V-23 的 10 条假阳性就是这么来的，所以这里先用 NEAR_START_RE 收窄）。
     suspicious = [f"{d.relative_to(ROOT)}:{ln}: {s.strip()[:90]}"
                   for d, ln, s in _unclassified_with_flags()]
-    assert not suspicious, ("这些行提到了 kernoscope 还带长开关，却没被当成命令解析"
+    assert not suspicious, ("这些行行首像命令、带长开关，却没被当成命令解析"
                             "（包装形式没认全）：\n  - " + "\n  - ".join(suspicious))
     assert not problems, "文档里的命令跑不通（读者会照抄失败）：\n  - " + "\n  - ".join(problems)
 
 
 def _unclassified_with_flags() -> list[tuple[Path, int, str]]:
+    """行首像在调用我们（`NEAR_START_RE`）、带长开关、却没被 `kernoscope_argv` 认出来。
+
+    只认**行首**的命令形状：散文里的 `入口命令：kernoscope … --brief` 不算 —— 报告里
+    验收方写全仓散文扫描时产生的 10 条假阳性正是这一形状。
+    """
     out = []
     for doc in DOCS:
-        for start, block in _fenced_blocks(doc):
-            for offset, line in enumerate(_logical_lines(block)):
-                s = line.strip()
-                if "kernoscope" not in s or s.startswith("#"):
-                    continue
-                if kernoscope_argv(line) is None and re.search(r"(?<![\w-])--[a-z][a-z0-9-]+", s):
-                    out.append((doc, start + offset, s))
+        for lineno, line in _scan_lines(doc):
+            s = strip_comment(line).strip()
+            if not s or PROSE_PUNCT_RE.search(s) or not NEAR_START_RE.match(s):
+                continue
+            if kernoscope_argv(line) is None and LONG_FLAG_RE.search(s):
+                out.append((doc, lineno, s))
     return out
 
 
-@needs_git
+@needs_doc_scan_inputs
 def test_no_documented_subcommand_bypasses_its_real_parser():
     """R-60：**未解析的子命令数必须为 0**。
 
@@ -302,22 +500,21 @@ def test_no_documented_subcommand_bypasses_its_real_parser():
     unparsed: list[str] = []
     seen_sub = 0
     for doc in DOCS:
-        for start, block in _fenced_blocks(doc):
-            for offset, line in enumerate(_logical_lines(block)):
-                argv = kernoscope_argv(line)
-                if not argv or argv[0] not in cli.SUBCOMMANDS:
-                    continue
-                seen_sub += 1
-                try:
-                    cli.subcommand_parser(argv[0]).parse_args(argv[1:])
-                except SystemExit as e:
-                    if e.code not in (0, None):
-                        unparsed.append(f"{doc.relative_to(ROOT)}:{start + offset}: {line.strip()[:80]}")
+        for lineno, line in _scan_lines(doc):
+            argv = kernoscope_argv(line)
+            if not argv or argv[0] not in cli.SUBCOMMANDS:
+                continue
+            seen_sub += 1
+            try:
+                cli.subcommand_parser(argv[0]).parse_args(argv[1:])
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    unparsed.append(f"{doc.relative_to(ROOT)}:{lineno}: {line.strip()[:80]}")
     assert seen_sub > 0, "文档里一条子命令都没有？扫描范围退化了"
     assert unparsed == [], ("这些子命令没有通过它自己的真实解析器：\n  - " + "\n  - ".join(unparsed))
 
 
-@needs_git
+@needs_doc_scan_inputs
 def test_the_command_checker_catches_invented_commands():
     """检查器自身的负样本：编出来的开关/子命令/续行/前缀都必须被抓到。"""
     sub_flags = _subcommand_flags()
@@ -347,11 +544,118 @@ def test_the_command_checker_catches_invented_commands():
         assert argv is not None and not _parse_problem(argv, sub_flags, main_flags), line
 
 
-@needs_git
+@needs_doc_scan_inputs
 def test_documented_commands_come_from_all_over_the_repo():
     """扫描范围必须覆盖 skills/ 与 eval/（旧门禁只扫 5 份根目录文档）。"""
     roots = {str(d.relative_to(ROOT)).split("/")[0] for d in DOCS}
     assert "skills" in roots and "eval" in roots, sorted(roots)
+
+
+def test_fence_scanner_takes_console_text_and_untagged_blocks(tmp_path):
+    """V-23 的负样本：坏命令塞进 ```console/```text/**无标签**围栏里必须被抓到。
+
+    旧实现只认 ```bash/```sh —— 报告实测：同一条 `--smoke` 注入，bash 红、其余全绿。
+    同时钉住三条**明确写清**的排除规则（JSON/别的语言、整块输出、行首不是命令），
+    它们必须是在"排除"而不是在"静默丢"。
+    """
+    sub_flags = _subcommand_flags()
+    main_flags = _main_flags()
+    bad = "kernoscope --set basic --smoke -- x.py"
+    for tag in ("bash", "sh", "console", "text", ""):
+        doc = tmp_path / f"doc-{tag or 'untagged'}.md"
+        doc.write_text(f"```{tag}\n{bad}\n```\n", encoding="utf-8")
+        blocks = _fenced_blocks(doc)
+        assert len(blocks) == 1, (tag, blocks)
+        argv = kernoscope_argv(_logical_lines(blocks[0][1])[0])
+        assert argv is not None, tag
+        assert _parse_problem(argv, sub_flags, main_flags), f"{tag} 围栏里的坏命令被放行了"
+    # 排除①：数据/别的语言的围栏不是命令（标签排除，逐条有理由）
+    for tag in ("json", "jsonc", "yaml", "python", "cuda", "powershell"):
+        doc = tmp_path / f"data-{tag}.md"
+        doc.write_text(f'```{tag}\n{{"cmd": "{bad}"}}\n```\n', encoding="utf-8")
+        assert _fenced_blocks(doc) == [], tag
+    # 排除②：整块像 JSON/数组输出（`console`/`text` 里贴机器输出很常见）
+    out = tmp_path / "output.md"
+    out.write_text(f'```console\n{{"argv": "{bad}"}}\n```\n', encoding="utf-8")
+    assert _fenced_blocks(out) == []
+    # 排除③：**只在围栏内**取词 —— 围栏外的散文行（半截命令）不算命令
+    prose = tmp_path / "prose.md"
+    prose.write_text(f"就这样写：{bad}（这行在围栏外）\n", encoding="utf-8")
+    assert _fenced_blocks(prose) == []
+    # 围栏内、但行首是散文的行也不算命令（`入口命令：kernoscope …`）
+    mixed = tmp_path / "mixed.md"
+    mixed.write_text("```text\n入口命令：kernoscope capabilities --brief → kernoscope diff\n```\n",
+                     encoding="utf-8")
+    blocks = _fenced_blocks(mixed)
+    assert len(blocks) == 1
+    assert kernoscope_argv(_logical_lines(blocks[0][1])[0]) is None
+    # 反面：`$ ` 提示符之后**才是**命令（console 围栏的标准写法，必须被取到）
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("```console\n$ kernoscope capabilities --brief\n```\n", encoding="utf-8")
+    blocks = _fenced_blocks(prompt)
+    assert kernoscope_argv(_logical_lines(blocks[0][1])[0]) == ["capabilities", "--brief"]
+
+
+def test_registered_negative_examples_are_really_unparseable():
+    """`NEGATIVE_EXAMPLES` 不许长成万能橡皮擦：登记项必须仍然存在**且确实不合法**，
+    而且**文档自己要说它是错的**（±20 行内有证据）。豁免是逐行的 —— 同围栏里多出来的
+    坏命令照样要被 `test_every_documented_command_is_parseable` 查到。"""
+    sub_flags = _subcommand_flags()
+    main_flags = _main_flags()
+    assert NEGATIVE_EXAMPLES, "反面教材登记表为空 —— 那条无标签围栏里的错例不该被静默跳过"
+    for doc, snippets, why in NEGATIVE_EXAMPLES:
+        path = ROOT / doc
+        assert path.exists(), f"登记的反面教材所在文档不存在：{doc}"
+        assert why.strip(), f"{doc} 的登记项没写理由"
+        text = path.read_text(encoding="utf-8", errors="replace")
+        blocks = _fenced_blocks(path)
+        for snippet in snippets:
+            assert snippet in text, f"{doc} 里找不到登记的片段（登记表过期）：{snippet!r}"
+            hit = next(((s, line) for s, b in blocks for line in _logical_lines(b)
+                        if snippet in line), None)
+            assert hit, f"{doc} 里那一段没有落在命令围栏里（登记的排除项过期了）：{snippet!r}"
+            _start, line = hit
+            assert _registered_negative_line(path, line), "登记行没有被 `_scan_lines` 认出来"
+            argv = kernoscope_argv(line)
+            assert argv is not None and _parse_problem(argv, sub_flags, main_flags), \
+                f"{doc} 里登记的片段其实能通过解析器 —— 它不该出现在反面教材表里：{line!r}"
+        # 文档自己的证据：那些行附近必须有一句"这是错的"
+        start, content = next(((s, b) for s, b in blocks
+                               if any(x in b for x in snippets)), (0, ""))
+        lines = text.splitlines()
+        lo = max(0, start - 1 - NEGATIVE_EVIDENCE_WINDOW)
+        hi = min(len(lines), start - 1 + len(content.splitlines()) + NEGATIVE_EVIDENCE_WINDOW)
+        window = "\n".join(lines[lo:hi])
+        assert NEGATIVE_EVIDENCE_RE.search(window), (
+            f"{doc} 里登记的排除项附近没有「这是错例」的证据"
+            f"（±{NEGATIVE_EVIDENCE_WINDOW} 行）—— 排除项不许是无依据的橡皮擦")
+
+
+def test_empty_scan_input_fails_unless_explicitly_opted_out(monkeypatch):
+    """V-24：空输入集必须 **fail**；唯一出口是显式 `KS_ALLOW_EMPTY_DOC_SCAN=1`（skip）。"""
+    monkeypatch.delenv(ALLOW_EMPTY_DOC_SCAN, raising=False)
+    with pytest.raises(pytest.fail.Exception) as e:
+        _empty_scan_input("模拟：这里没有 .git")
+    # 失败信息必须把出口写清楚（否则读者只会看到"红了"，不知道还能怎么办）
+    assert ALLOW_EMPTY_DOC_SCAN in str(e.value)
+
+    monkeypatch.setenv(ALLOW_EMPTY_DOC_SCAN, "1")
+    with pytest.raises(pytest.skip.Exception):
+        _empty_scan_input("模拟：这里没有 .git")
+
+    # 只有 "1" 算接受降级：`=0` / 空串 / 别的值都还是 fail（不许用"设了就算同意"蒙混）
+    for value in ("0", "", "yes", "true"):
+        monkeypatch.setenv(ALLOW_EMPTY_DOC_SCAN, value)
+        with pytest.raises(pytest.fail.Exception):
+            _empty_scan_input("模拟：这里没有 .git")
+
+
+def test_scan_inputs_are_not_empty_here():
+    """在这个仓库里跑时，输入集必须真的非空（空的那个分支由上面两条守）。"""
+    why = _scan_inputs_problem()
+    if why is not None:
+        _empty_scan_input(why)
+    assert DOCS and _total_command_blocks() > 0
 
 
 # --------------------------------------------------------------------------
@@ -394,12 +698,11 @@ Registered = namedtuple("Registered", "doc needle check adapt why")
 
 
 def _doc_command_line(doc: str, needle: str) -> str:
-    """在文档的 bash 块里找到含 `needle` 的**逻辑行**（续行已拼接）。"""
+    """在文档的命令围栏里找到含 `needle` 的**逻辑行**（续行已拼接）。"""
     path = ROOT / doc
-    for _start, block in _fenced_blocks(path):
-        for line in _logical_lines(block):
-            if needle in line and kernoscope_argv(line) is not None:
-                return line
+    for _lineno, line in _scan_lines(path):
+        if needle in line and kernoscope_argv(line) is not None:
+            return line
     raise AssertionError(f"{doc} 里找不到这一行（登记表过期）：{needle!r}")
 
 
@@ -650,7 +953,7 @@ DOC_VERBATIM: list[Registered] = [
 ]
 
 
-@needs_git
+@needs_doc_scan_inputs
 def test_registered_commands_are_executed_verbatim(monkeypatch, tmp_path):
     """登记的每条命令都必须①真的还写在文档里 ②逐字跑一遍 ③得到它承诺的结论。
 
@@ -682,15 +985,14 @@ def test_registered_commands_are_executed_verbatim(monkeypatch, tmp_path):
             reg.check(rc, out, err)                    # type: ignore[operator]
 
 
-@needs_git
+@needs_doc_scan_inputs
 def test_every_doc_command_is_either_parsed_or_asserted():
     """把"覆盖率"写成事实而不是印象：每条命令都过解析器，其中读者面那几条断言结论。"""
     parsed = 0
     for doc in DOCS:
-        for _start, block in _fenced_blocks(doc):
-            for line in _logical_lines(block):
-                if kernoscope_argv(line) is not None:
-                    parsed += 1
+        for _lineno, line in _scan_lines(doc):
+            if kernoscope_argv(line) is not None:
+                parsed += 1
     assert parsed >= 30, f"只扫到 {parsed} 条可检命令"
     assert len(DOC_VERBATIM) < parsed, "登记数不该超过可检命令数（那是重复计数）"
 

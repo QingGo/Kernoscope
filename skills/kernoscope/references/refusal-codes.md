@@ -2,11 +2,11 @@
 
 # 拒绝码（`refusal.code`）参考
 
-每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；51 个 code 里 33 个带可直接执行的命令、18 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
+每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；52 个 code 里 34 个带可直接执行的命令、18 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
 **硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，
 或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。
 
-共 51 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
+共 52 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
 
 | code | 什么意思 | 怎么办 | 命令 | 代价 |
 |---|---|---|---|---|
@@ -18,6 +18,7 @@
 | `cuobjdump_missing` | 没有 cuobjdump：静态资源/SASS 不可得 | 安装 CUDA Toolkit（cuobjdump 随 toolkit 提供），或用已有报告里的静态字段 |  | 需人工 |
 | `no_static_input` | 没有提供 cubin/.so | 用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS | `kernoscope --ks-cubin build/app.so ...` | 需人工 |
 | `nvbit_missing` | 未配置 NVBit：指令级/访存轨迹不可得 | 自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH |  | 需人工 |
+| `no_nvtx` | 没有 NVTX 区间（采集时没带 --trace=nvtx） | 重采时带 `--trace=nvtx`（`nsys profile --trace=cuda,nvtx -o run -- <你的命令>`）：NVTX 区间是采集当时写进 trace 的标注，事后补不了 —— 已有的库里即使有完整的 kernel 时间，也没有「哪一段」这个维度 | `nsys profile --trace=cuda,nvtx -o run -- python app.py` | ≈60s |
 | `no_memtrace` | 没有提供访存轨迹文件 | 加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响 | `kernoscope --ks-memtrace ks-memtrace.txt ...` | ≈10min |
 | `no_instr_hist` | 没有提供指令直方图 | 加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界 | `kernoscope --ks-instr-hist opcode_hist.txt ...` | ≈10min |
 | `no_occupancy_probe` | 没跑 occupancy 探针 | 跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit） | `kernoscope occupancy --from <probe-records> --write-json occ.json` | ≈10min |

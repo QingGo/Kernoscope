@@ -811,6 +811,24 @@ def group_unmeasured(rep: Any) -> list[dict[str, Any]]:
     return sorted(groups.values(), key=lambda g: (-g["count"], g["code"]))
 
 
+def _protocol_inputs(rep: Any) -> dict[str, Any]:
+    """协议输入的**可读副本**（V-26）：标定与轨迹的指纹，供案件目录等消费者直接用。
+
+    只放稳定量（文件名 + 内容指纹），不含绝对路径；没有就不放这个键。
+    """
+    meta = getattr(rep, "meta", {}) or {}
+    out: dict[str, Any] = {}
+    for key in ("calibration", "memtrace"):
+        v = meta.get(key)
+        if isinstance(v, dict) and v:
+            # `_calibration_identity` 给的是 "文件名:摘要" 这样的字符串，
+            # `_memtrace_identity` 给的是 {name, sha256} —— 两种都照带，只剥掉绝对路径。
+            out[key] = {k: v[k] for k in sorted(v) if k not in ("path", "abspath")}
+        elif isinstance(v, str) and v:
+            out[key] = v
+    return out
+
+
 def _window_mode(rep: Any) -> str:
     """只留窗口**模式**：整段窗口描述里有 wall 时间等每次都变的数字。"""
     w = str((getattr(rep, "meta", {}) or {}).get("window", ""))
@@ -988,8 +1006,12 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
         "schema_revision": PACKET_SCHEMA_REVISION,
         "tool": "kernoscope",
         "tool_version": getattr(rep, "tool_version", __version__),
+        # V-26①：`protocol_hash` 读的那批输入（标定/轨迹指纹）也要能**被消费者看到** ——
+        # 案件目录的 `manifest.protocol_inputs` 此前恒空，因为包只带了 hash 没带输入。
+        # 形状与 `case.py` 已经在读的键一致（扁平），消费者零改动。
         "protocol": {"hash": protocol_hash(rep), "basis": basis,
-                     "window_mode": _window_mode(rep)},
+                     "window_mode": _window_mode(rep),
+                     **_protocol_inputs(rep)},
         "env": env,
         "verdicts": [v.to_dict() for v in verdicts],
         "unmeasured": unmeasured,

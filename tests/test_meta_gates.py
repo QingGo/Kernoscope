@@ -122,10 +122,23 @@ def test_ci_workflow_exists_and_runs_the_gates():
     assert re.search(r"^permissions:", blob, re.M), "CI 没有声明最小 `permissions:`"
 
 
-@pytest.mark.parametrize("gate", ["pytest", "coverage", "agentrefs", "index", "tasks", "calib",
-                                  "sanitize", "build"])
+#: 期望的门禁清单（顺序无关）。加/删门禁必须同时改这里 —— 这就是"有意变更"的凭据。
+EXPECTED_GATES = frozenset({"pytest", "coverage", "agentrefs", "playbook", "index", "tasks",
+                            "calib", "sanitize", "build"})
+
+
+def test_gate_list_is_exactly_the_expected_one():
+    """R-68：参数化清单此前手抄 8 条而 `GATES` 已有 9 条（漏了 `playbook`）——
+    漏掉的那条门禁没有任何测试引用，删了也没人知道。现在显式钉住集合。"""
+    mod = _load_dev_index()
+    assert {g.key for g in mod.GATES} == set(EXPECTED_GATES), (
+        f"门禁清单变了：{sorted({g.key for g in mod.GATES})} vs "
+        f"{sorted(EXPECTED_GATES)}（改测试里的 EXPECTED_GATES 才算有意变更）")
+
+
+@pytest.mark.parametrize("gate", sorted(EXPECTED_GATES))
 def test_every_gate_is_known_to_the_index(gate: str):
-    """门禁清单本身也要有测试引用（加/删门禁必须是有意的）。"""
+    """每条门禁都要在索引里有命令与说明（清单从 EXPECTED_GATES 派生，不再手抄一份）。"""
     mod = _load_dev_index()
     assert gate in {g.key for g in mod.GATES}, f"门禁 {gate} 不在 GATES 里（清单变了？）"
     g = next(x for x in mod.GATES if x.key == gate)

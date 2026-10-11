@@ -18,7 +18,8 @@ import sqlite3
 import pytest
 
 from kernoscope.analyze.phases import (KERNEL_TABLE, NVTX_TABLE, REASON_NO_KERNELS,
-                                       REASON_NO_NVTX, PhaseError, attribute)
+                                       REASON_NO_NVTX, PhaseError, _refusal_code, attribute)
+from kernoscope.refusals import DEFAULT_REMEDIES, RefusalCode
 
 KERNEL_DDL = (f"create table {KERNEL_TABLE} "
               "(start integer, end integer, deviceId integer, streamId integer)")
@@ -80,7 +81,33 @@ def test_no_nvtx_table_is_refused_and_never_reports_zero_as_measured(tmp_path):
     metrics = att.to_metrics()
     assert metrics, "拒绝也不能让那一行消失（B1）"
     assert all(m[1] is None for m in metrics), metrics
-    assert all("code=metric_absent" in m[3] for m in metrics), metrics
+    assert all("code=no_nvtx" in m[3] for m in metrics), metrics
+
+
+def test_missing_nvtx_maps_to_its_own_code_with_a_recollect_remedy(tmp_path):
+    """V-28：没有 NVTX 区间不是 `metric_absent`（"指标不存在"），而是 `no_nvtx`。
+
+    修前它映射到 `metric_absent`，处置于是变成"用 --json 看有哪些指标"—— 而真正该做的是
+    **重采时带 `--trace=nvtx`**。三个断言把这条钉死：
+      ① 没有 NVTX ⇒ 自己的 code（不是 metric_absent）；
+      ② 这个 code 的 remedy 必须指向 `--trace=nvtx`；
+      ③ 它与"没有 kernel 活动"必须是**两个** code（否则读者不知道该补哪趟采集）。
+    """
+    db = _write(tmp_path, "no_nvtx.sqlite", kernels=[(0, 1000, 0, 7)], ranges=None)
+    att = attribute(db)
+    metrics = att.to_metrics()
+    assert all("code=no_nvtx" in m[3] for m in metrics), metrics
+    assert all("code=metric_absent" not in m[3] for m in metrics), metrics
+
+    rem = DEFAULT_REMEDIES[RefusalCode.NO_NVTX]
+    assert "--trace=nvtx" in rem.action, rem.action
+    # 可执行的命令要把 nvtx 通道真的打开（`--trace=cuda,nvtx`：kernel 与区间一起采）
+    assert "nsys" in rem.command and "nvtx" in rem.command, rem.command
+    assert rem.cost_kind == "wall_seconds" and rem.cost_s, "重采是要花时间的一件事"
+
+    assert _refusal_code(REASON_NO_KERNELS) is RefusalCode.NO_LAUNCH_ACTIVITY
+    assert _refusal_code(REASON_NO_NVTX) is RefusalCode.NO_NVTX
+    assert RefusalCode.NO_NVTX is not RefusalCode.NO_LAUNCH_ACTIVITY
 
 
 def test_nvtx_with_only_open_ranges_is_refused(tmp_path):

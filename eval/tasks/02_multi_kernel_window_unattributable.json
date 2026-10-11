@@ -11,7 +11,8 @@
       "protocol": {
         "hash": "sha256:ed24210b5b47c04b",
         "basis": "per-launch",
-        "window_mode": "auto"
+        "window_mode": "auto",
+        "calibration": "machine-profile.json"
       },
       "env": {
         "tier": 2,
@@ -222,7 +223,7 @@
         "unmeasured_metrics": 3,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 3887
+        "packet_bytes": 3924
       }
     },
     "files": {

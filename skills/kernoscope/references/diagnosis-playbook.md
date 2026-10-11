@@ -11,14 +11,14 @@
 
 三条读法：
 
-* 拒绝码是**闭集**（51 个）：见到 `n/a` 先看 `code`，再照 remedy 做 —— 不要猜原因。
+* 拒绝码是**闭集**（52 个）：见到 `n/a` 先看 `code`，再照 remedy 做 —— 不要猜原因。
 * `cost_kind=unavailable` 的 code 单独成节：它们**不是**「环境缺件」，
   在这台机器上没有任何合法补救路径（容器内 `sudo`/`setuid` 也突破不了）。
 * 每一列都注明来源；代码里算不出来的列写 `——`，不编（这一条比表格好看更重要）。
 
 ## 一、signal → cause → fix（按拒绝码）
 
-覆盖面：闭集里的 51 个 code 全部登记，其中 48 个在本机有补救路径（下表），3 个没有（见下一节）。**不做「受限机器上不可能发生」的人工筛选** —— 那需要判断，而判断题不该藏在生成器里；唯一的筛选规则就是 `cost_kind=unavailable`。
+覆盖面：闭集里的 52 个 code 全部登记，其中 49 个在本机有补救路径（下表），3 个没有（见下一节）。**不做「受限机器上不可能发生」的人工筛选** —— 那需要判断，而判断题不该藏在生成器里；唯一的筛选规则就是 `cost_kind=unavailable`。
 
 「观测到什么」这一列只给**触发路由**：数值阈值（`Refusal.threshold`）由各 builder 现算，代码里**没有**按 code 索引的静态阈值表，所以这一列给不出数字 —— 这是缺口，不是省略。
 
@@ -27,11 +27,12 @@
 | `no_gpu` | 本机没有 NVIDIA GPU | 1 条路由会报它（`device_busy`） | 换一台有 NVIDIA GPU 的机器；或在没有 GPU 时用 --ks-synthetic 跑通流程看输出形状；命令：`kernoscope --ks-synthetic --set basic` | 需人工 |
 | `pytorch_missing` | 没有安装 PyTorch | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 装 PyTorch（自检的已知答案负载只需要 torch）；命令：`pip install torch` | 需人工 |
 | `no_nvml` | nvidia-smi / pynvml 不可用 | 1 条路由会报它（`device_busy`） | 装 pynvml（pip install 'kernoscope[nvml]'）或确认 nvidia-smi 可用；命令：`pip install 'kernoscope[nvml]'` | 需人工 |
-| `no_nvml_samples` | 没有 NVML 采样点（关掉采样／不可用／稳态段短于 200 ms） | 1 条路由会报它（`device_busy`） | 去掉 --ks-no-nvml 让设备级采样生效（代价接近 0：采样在后台线程里做） | ≈0 |
+| `no_nvml_samples` | 没有 NVML 采样点（关掉采样／不可用／稳态段短于 200 ms） | 2 条路由会报它（`device_busy`、`dram_bytes`） | 去掉 --ks-no-nvml 让设备级采样生效（代价接近 0：采样在后台线程里做） | ≈0 |
 | `nsys_missing` | 没有 nsys：kernel 级数据不可得 | 1 条路由会报它（`kernel_time`） | 安装 Nsight Systems（随 CUDA Toolkit 提供），或提供已有的 .nsys-rep/.sqlite；命令：`kernoscope --ks-sqlite <kernels.sqlite>` | 需人工 |
 | `cuobjdump_missing` | 没有 cuobjdump：静态资源/SASS 不可得 | 1 条路由会报它（`static_resources`） | 安装 CUDA Toolkit（cuobjdump 随 toolkit 提供），或用已有报告里的静态字段 | 需人工 |
 | `no_static_input` | 没有提供 cubin/.so | 3 条路由会报它（`static_resources`、`theoretical_occupancy`、`static_mix`） | 用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS；命令：`kernoscope --ks-cubin build/app.so ...` | 需人工 |
 | `nvbit_missing` | 未配置 NVBit：指令级/访存轨迹不可得 | 2 条路由会报它（`dram_bytes_trace`、`issue_slot`） | 自行安装 NVBit（许可证禁止本项目随包分发）并设 NVBIT_PATH | 需人工 |
+| `no_nvtx` | 没有 NVTX 区间（采集时没带 --trace=nvtx） | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 重采时带 `--trace=nvtx`（`nsys profile --trace=cuda,nvtx -o run -- <你的命令>`）：NVTX 区间是采集当时写进 trace 的标注，事后补不了 —— 已有的库里即使有完整的 kernel 时间，也没有「哪一段」这个维度；命令：`nsys profile --trace=cuda,nvtx -o run -- python app.py` | ≈60s |
 | `no_memtrace` | 没有提供访存轨迹文件 | 2 条路由会报它（`dram_bytes_trace`、`l2_locality`） | 加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响；命令：`kernoscope --ks-memtrace ks-memtrace.txt ...` | ≈10min |
 | `no_instr_hist` | 没有提供指令直方图 | 1 条路由会报它（`issue_slot`） | 加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界；命令：`kernoscope --ks-instr-hist opcode_hist.txt ...` | ≈10min |
 | `no_occupancy_probe` | 没跑 occupancy 探针 | 1 条路由会报它（`achieved_occupancy`） | 跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）；命令：`kernoscope occupancy --from <probe-records> --write-json occ.json` | ≈10min |
@@ -45,14 +46,14 @@
 | `no_launch_activity` | 没有采到任何 kernel 活动 | 1 条路由会报它（`kernel_time`） | 确认被测命令真的在 GPU 上跑 kernel，且采集时带上了 CUDA activity（--ks-sqlite 指向的库要有 CUPTI_ACTIVITY_KIND_KERNEL 表）；命令：`nsys profile --trace=cuda -o run -- python app.py` | ≈30s |
 | `no_kernel_match` | 过滤后没有匹配的 kernel | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 放宽 -k 过滤（用更短的正则片段），或先不加 -k 看有哪些 kernel 名字；命令：`kernoscope --ks-sqlite kernels.sqlite --launch-csv` | ≈5s |
 | `no_kernels` | 报告里没有 kernel | 2 条路由会报它（`kernel_time`、`launch_configs`） | 先确认采集到了 kernel 活动（见 no_launch_activity 的补救办法） | ≈30s |
-| `multi_kernel_window` | 窗口里不止一个 kernel，per-launch 不可归因 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 用 -k 只选一个 kernel，让窗口里只有它；否则只能给整窗口总量；命令：`kernoscope -k regex:<kernel> --set detailed -- python app.py` | ≈0 |
+| `multi_kernel_window` | 窗口里不止一个 kernel，per-launch 不可归因 | 1 条路由会报它（`dram_bytes`） | 用 -k 只选一个 kernel，让窗口里只有它；否则只能给整窗口总量；命令：`kernoscope -k regex:<kernel> --set detailed -- python app.py` | ≈0 |
 | `coverage_too_low` | 采样窗口没被被测负载主导 | 1 条路由会报它（`dram_bytes`） | 把稳态循环跑长（建议 ≥20 秒），或加 --ks-window auto 只统计稳态段；覆盖率不足时窗口里大部分时间是空闲，忙碌时段是否饱和无从确认；命令：`kernoscope --ks-window auto -- python bench_loop.py` | ≈20s |
 | `share_too_low` | 被匹配的 kernel 不是窗口主角 | 1 条路由会报它（`dram_bytes`） | 份额按整段运行的 launch 表算，缩采样窗口改不动它。三条有效路径：① 让被测区间里只有这一个 kernel（改 bench 脚本单独跑它）；② 改走整窗口口径 --ks-ledger-total-mb（不要求归因）；③ 加 --ks-memtrace 换轨迹口径（只测被追踪的那个 kernel，不受窗口影响） | ≈20s |
-| `share_unknown` | 逐 launch 时长为空，份额无法判定 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库；命令：`kernoscope --ks-sqlite kernels.sqlite` | ≈5s |
-| `window_launch_unaligned` | 窗口内的 launch 数没法和采样窗口对齐 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；窗口被裁过、或忙碌段里混了不在 launch 表里的工作（斜率离 1 超出锚点不确定度）时，分母不可信，所以不给这个数。两条不需要这个分母的替代口径：整窗口口径 --ks-ledger-total-mb（对拍总量）或轨迹口径 --ks-memtrace（只测被追踪的 kernel）。要让 per-launch 口径本身成立：让采样窗口覆盖整段运行（别用 --ks-window-s 切得比 launch 表还短）并给出逐 launch 时间戳（--ks-sqlite）——**不是**把窗口切来切去（`--ks-window full` 只是换了窗口，分母口径不变，第五轮 V-32 之前这里恰恰推荐错了方向）；命令：`kernoscope --ks-ledger-total-mb 440000 -- python bench_loop.py` | ≈20s |
+| `share_unknown` | 逐 launch 时长为空，份额无法判定 | 1 条路由会报它（`dram_bytes`） | 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库；命令：`kernoscope --ks-sqlite kernels.sqlite` | ≈5s |
+| `window_launch_unaligned` | 窗口内的 launch 数没法和采样窗口对齐 | 1 条路由会报它（`dram_bytes`） | per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；窗口被裁过、或忙碌段里混了不在 launch 表里的工作（斜率离 1 超出锚点不确定度）时，分母不可信，所以不给这个数。两条不需要这个分母的替代口径：整窗口口径 --ks-ledger-total-mb（对拍总量）或轨迹口径 --ks-memtrace（只测被追踪的 kernel）。要让 per-launch 口径本身成立：让采样窗口覆盖整段运行（别用 --ks-window-s 切得比 launch 表还短）并给出逐 launch 时间戳（--ks-sqlite）——**不是**把窗口切来切去（`--ks-window full` 只是换了窗口，分母口径不变，第五轮 V-32 之前这里恰恰推荐错了方向）；命令：`kernoscope --ks-ledger-total-mb 440000 -- python bench_loop.py` | ≈20s |
 | `below_resolution` | 读数低于仪器分辨率下限 | 2 条路由会报它（`cost_per_token`、`dram_bytes`） | 让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成 0；把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup）；命令：`kernoscope --ks-window auto -- python bench_loop.py` | ≈20s |
 | `mem_busy_zero` | 显存忙碌恒为 0 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 显存忙碌恒为 0：确认被测负载真的在搬显存（而不是 L2 命中），且采样周期（200 ms）没有整段错过忙碌期 | ≈20s |
-| `trace_unavailable` | 访存轨迹给不出字节数 | 1 条路由会报它（`dram_bytes_trace`） | 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel | ≈20s |
+| `trace_unavailable` | 访存轨迹给不出字节数 | 2 条路由会报它（`dram_bytes`、`dram_bytes_trace`） | 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel | ≈20s |
 | `trace_too_many_accesses` | 访问数超过分析上限 | 1 条路由会报它（`dram_bytes_trace`） | 提高 --ks-max-accesses（内存换精度），或缩小被追踪 kernel 的迭代数：超上限时我们拒绝给一个偏小的字节数；命令：`kernoscope --ks-max-accesses 20000000 --ks-memtrace t.txt ...` | 需人工 |
 | `ledger_basis_unavailable` | 账本对拍口径不成立 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 换对拍口径：--ks-ledger-total-mb 走整窗口，--ks-ledger-mb 走 per-launch（后者要求窗口主导性达标）；命令：`kernoscope --ks-ledger-total-mb 512 -- python bench_loop.py` | ≈0 |
 | `zero_baseline` | 基线为 0，相对误差带不适用 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 基线是 0 时相对差无定义（除以 0），所以不能用相对误差带判「变了多少」。要么给出一个非零基线，要么按绝对差值自行判断 —— 我们只把绝对差值报出来，不下方向 | 需人工 |
@@ -115,7 +116,7 @@
 | occupancy 理论上界是多少 | `theoretical_occupancy` | `kernoscope occupancy --from <occupancy-records.txt> --json` | **直接跑**（层 2 的数据源在；缺件时命令会报 code） | `unknown_arch`、`no_static_input` |
 | 这段时间 GPU 显存子系统有多忙（实测） | `device_busy` | `kernoscope --set basic -o rep -- <你的命令>（只要有 NVML）` | **直接跑**（层 1 的数据源在；缺件时命令会报 code） | `no_nvml`、`no_nvml_samples`、`no_gpu` |
 | 这次推理/训练的单位成本（每百万 token 多少钱 / 每小时多少钱） | `cost_per_token` | `kernoscope --set basic --ks-tokens <每步 token 数> --ks-price-per-kwh <元/kWh> --ks-price-per-hour <元/小时> -o rep -- <你的命令>（价格给哪个就算哪个载体）` | **直接跑**（层 1 的数据源在；缺件时命令会报 code） | `no_energy`、`no_tokens`、`no_price`、`below_resolution` |
-| DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级） | `dram_bytes` | `kernoscope --set basic --ks-calibration machine-profile.json --ks-ledger-mb <每次 launch 的 MB> --ks-window auto -o rep -- <你的命令>` | **直接跑**（层 1 的数据源在；缺件时命令会报 code） | `share_too_low`、`coverage_too_low`、`below_resolution`、`no_calibration` |
+| DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级） | `dram_bytes` | `kernoscope --set basic --ks-calibration machine-profile.json --ks-ledger-mb <每次 launch 的 MB> --ks-window auto -o rep -- <你的命令>` | **直接跑**（层 1 的数据源在；缺件时命令会报 code） | `no_nvml_samples`、`no_calibration`、`below_resolution`、`coverage_too_low`、`multi_kernel_window`、`share_unknown`、`share_too_low`、`window_launch_unaligned`、`trace_unavailable` |
 | 离 roofline 多远、compute 还是 memory bound | `roofline` | `kernoscope --set basic --ks-gemm 4096,4096,4096 --ks-dtype bf16 --ks-calibration machine-profile.json -o rep -- <你的命令>` | **直接跑**（层 1 的数据源在；缺件时命令会报 code） | `no_workload`、`no_calibration`、`calibration_caliber_mismatch` |
 | 实际达到的 occupancy（不是上界） | `achieved_occupancy` | `kernoscope --set basic --ks-achieved-occupancy <occ.json> -o rep -- <你的命令>` | 先 `kernoscope capabilities --json`（层 3 需要 NVBit 自行编译（+ nvcc）） | `no_occupancy_probe`、`unknown_arch` |
 | DRAM 字节的**首选**口径（访存轨迹：地址是算术，只有缓存替换是模型） | `dram_bytes_trace` | `kernoscope memtrace --from <trace.txt> --l2-bytes <L2字节> --json` | 先 `kernoscope capabilities --json`（层 3 需要 NVBit 自行编译（+ nvcc）） | `no_memtrace`、`nvbit_missing`、`trace_unavailable`、`trace_too_many_accesses` |

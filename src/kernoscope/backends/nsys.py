@@ -87,11 +87,24 @@ def export_sqlite(rep: str, db: str | None = None, nsys: str | None = None) -> s
     return db
 
 
+def _unreadable_db_message(db: str, exc: sqlite3.DatabaseError) -> str:
+    """坏 sqlite 的人话（V-25）：说清"这不是我们能读的数据库" + 怎么拿到对的。
+
+    以前这里是裸 `sqlite3.DatabaseError: file is not a database`（rc=1、无自家 error 行）。
+    """
+    return (f"{db} 不是可读的 nsys SQLite 导出：{exc}。"
+            f"确认它是 `nsys export --type sqlite -o <db> <rep.nsys-rep>` 的产物 —— "
+            f".nsys-rep 本身不是 SQLite，要先 export；文件被截断就重新导出")
+
+
 def has_kernel_table(db: str) -> bool:
-    with sqlite3.connect(db) as con:
-        row = con.execute(
-            "select name from sqlite_master where type='table' and name=?", (KERNEL_TABLE,)
-        ).fetchone()
+    try:
+        with sqlite3.connect(db) as con:
+            row = con.execute(
+                "select name from sqlite_master where type='table' and name=?", (KERNEL_TABLE,)
+            ).fetchone()
+    except sqlite3.DatabaseError as e:
+        raise NsysError(_unreadable_db_message(db, e)) from e
     return row is not None
 
 
@@ -122,6 +135,17 @@ def _resolve(value, ids: dict[int, str]) -> str:
         return str(value)
 
 
+def _rows_or_nsys_error(con: sqlite3.Connection, q: str, db: str):
+    """流式读行（不把整表读进内存）；读到一半发现坏页/截断也要变成 `NsysError`。
+
+    V-25：`has_kernel_table` 通过之后文件仍可能在后半段坏掉。
+    """
+    try:
+        yield from con.execute(q)
+    except sqlite3.DatabaseError as e:
+        raise NsysError(_unreadable_db_message(db, e)) from e
+
+
 def parse_kernels(db: str) -> list[KernelLaunch]:
     """读取 kernel activity 记录。时间单位 ns（nsys SQLite 约定）。"""
     if not os.path.exists(db):
@@ -141,7 +165,7 @@ def parse_kernels(db: str) -> list[KernelLaunch]:
     out: list[KernelLaunch] = []
     with sqlite3.connect(db) as con:
         ids = _string_ids(con)
-        for row in con.execute(q):
+        for row in _rows_or_nsys_error(con, q, db):
             (start, end, dev, stream, demangled, short, mangled, regs,
              gx, gy, gz, bx, by, bz, ssmem, dsmem, lmem, grid_id, corr) = row
             short_s = _resolve(short, ids)

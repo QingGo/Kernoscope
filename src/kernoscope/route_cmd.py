@@ -53,7 +53,10 @@ ROUTES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("nvlink", "多卡", "通信", "nccl"), "nvlink"),
 )
 
-# 每条路由**可能拿不到**的 code（显式列出：比按名字猜准，也便于测试校验 code 真的存在）。
+# 每条路由**可能拿不到**的 code。绝大多数是显式列出的（比按名字猜准，也便于测试校验 code
+# 真的存在）；`dram_bytes` 那一条不一样 —— 它**从真源派生**（见下面的 `dram_bytes_refusal_codes`），
+# 因为手抄它必然漂移：它曾经只列 4 条，而那条路实际会报出 9 条，agent 照列表挑命令时
+# 首先撞到的就是不在表里的 `no_nvml_samples`（V-29）。
 FAILURE_HINTS: dict[str, tuple[str, ...]] = {
     "kernel_time": ("no_kernels", "no_launch_activity", "nsys_missing"),
     "launch_configs": ("mixed_launch_config", "no_kernels"),
@@ -61,7 +64,7 @@ FAILURE_HINTS: dict[str, tuple[str, ...]] = {
     "theoretical_occupancy": ("unknown_arch", "no_static_input"),
     "device_busy": ("no_nvml", "no_nvml_samples", "no_gpu"),
     "cost_per_token": ("no_energy", "no_tokens", "no_price", "below_resolution"),
-    "dram_bytes": ("share_too_low", "coverage_too_low", "below_resolution", "no_calibration"),
+    "dram_bytes": (),                        # 见下面：由 `DRAM_BYTES_REFUSALS` 填（真源派生）
     "roofline": ("no_workload", "no_calibration", "calibration_caliber_mismatch"),
     "achieved_occupancy": ("no_occupancy_probe", "unknown_arch"),
     "dram_bytes_trace": ("no_memtrace", "nvbit_missing", "trace_unavailable",
@@ -74,6 +77,73 @@ FAILURE_HINTS: dict[str, tuple[str, ...]] = {
     "pipe_utilization": ("counters_denied", "instrumentation_missing"),
     "nvlink": ("no_nvlink", "counters_denied"),
 }
+
+# 归因到 `dram_bytes` 的拒绝构造点：`analyze/dram.py` 里**真正 new 出 Refusal** 的那几个方法。
+# 改名/删掉会让派生集合变小甚至为空 —— 测试 `test_dram_failure_list_is_derived_not_handwritten`
+# 会因此变红（空集合时我们显式退回 `internal_unknown`，不假装"没有条件"）。
+_DRAM_REFUSAL_SOURCES = ("_total_refusals", "_attribution_refusals", "_share_refusal",
+                         "_trace_refusal")
+# `RefusalCode` 的成员名（派生时用来过滤 `co_names` 里的普通属性名/散文）
+_REFUSAL_CODE_NAMES = frozenset(c.name for c in RefusalCode)
+
+
+def _refusal_names_in(fn: Any, owner: Any, seen: set[int], out: list[str]) -> None:
+    """把函数（含嵌套代码对象与同模块的被调者）里引用到的 `RefusalCode.<NAME>` 名字
+    按**源码里出现的顺序**追加进 `out`（去重）。
+
+    `RefusalCode.NO_NVML_SAMPLES` 编译成一次属性访问，属性名留在 `co_names` 里（顺序就是
+    首次出现的顺序）—— 于是"这段代码引用了哪些 code、先检查哪一条前提"是**现算**的：
+    不靠人记一份会过期的清单，也不会因为改一行 `if` 就与路由/文档漂移。只收 `RefusalCode`
+    闭集里存在的名字（消息散文里的字符串自然被过滤掉）。
+    """
+    if id(fn) in seen:
+        return
+    seen.add(id(fn))
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return
+    nested = {c.co_name: c for c in code.co_consts if hasattr(c, "co_names")}
+    module = sys.modules.get(getattr(fn, "__module__", "") or "")
+    for name in code.co_names:                        # co_names 的顺序 = 首次出现的顺序
+        if name in _REFUSAL_CODE_NAMES:
+            if name not in out:
+                out.append(name)
+            continue
+        if name in nested:                            # 推导式 / 内部 def
+            _refusal_names_in(nested[name], owner, seen, out)
+            continue
+        target = getattr(owner, name, None) if owner is not None else None
+        if target is None and module is not None:     # self.<方法>() 与模块级函数
+            target = getattr(module, name, None)
+        if (getattr(target, "__code__", None) is not None
+                and getattr(target, "__module__", "") == fn.__module__):
+            _refusal_names_in(target, owner, seen, out)
+
+
+def dram_bytes_refusal_codes() -> tuple[str, ...]:
+    """`dram_bytes` 这条路**实际会报出**的拒绝码 —— 从 `analyze/dram.py` 现算（V-29）。
+
+    顺序也来自真源：按 `analyze/dram.py` 里检查前提的先后（先 `_total_refusals` 的
+    `no_nvml_samples`/`no_calibration`/…，再归因那几个），所以"你最先会撞到的那个"排在最前。
+
+    派生不出来（源码结构改了）时退回 `("internal_unknown",)`：那个 code 的处置正是
+    "这是本工具的缺陷，请按 issue 模板报告" —— 比静默少列几条诚实，且测试会红。
+    """
+    from .analyze.dram import DramEstimate
+
+    names: list[str] = []
+    for fname in _DRAM_REFUSAL_SOURCES:
+        fn = getattr(DramEstimate, fname, None)
+        if fn is not None:
+            _refusal_names_in(fn, DramEstimate, set(), names)
+    valid = {c.name: c.value for c in RefusalCode}
+    out = tuple(valid[n] for n in names if n in valid)
+    return out or (RefusalCode.INTERNAL_UNKNOWN.value,)
+
+
+DRAM_BYTES_REFUSALS = dram_bytes_refusal_codes()
+# 把派生结果填进表（**同一个对象**：路由文本/`--json`/生成文档都从这一处读）
+FAILURE_HINTS["dram_bytes"] = DRAM_BYTES_REFUSALS
 
 # 每条路由的"命令模板"：用占位符，agent 自己替换。口径选择写在 note 里（哪条优先、为什么）。
 COMMANDS: dict[str, str] = {
@@ -131,9 +201,11 @@ def _match(question: str) -> list[tuple[str, int]]:
 
 
 def _refusals_for(qid: str) -> list[dict[str, Any]]:
-    """这条路由可能拿不到的 code（显式表，带处置与代价）。
+    """这条路由可能拿不到的 code（**全部**带上处置与代价）。
 
     "可能被拒"必须写进路由：否则 agent 拿到 `n/a` 之后会开始猜 —— 那正是我们要消灭的行为。
+    文本渲染见 `render_text()`：**一条都不许省**（曾经只印前 3 条，于是"先说会被拒的条件"
+    这句承诺在真机上直接失效：agent 首先撞到的那个 code 恰好在被省掉的那 6 条里，V-29）。
     """
     out: list[dict[str, Any]] = []
     for name in FAILURE_HINTS.get(qid, ()):
@@ -201,7 +273,9 @@ def render_text(r: dict[str, Any]) -> str:
         lines.append(f"   期望看到：{', '.join(route_item['answers'])}")
         if route_item.get("alt"):
             lines.append(f"   拿不到时改问：{route_item['alt']}")
-        for f in route_item["failures"][:3]:
+        # V-29：**全部**渲染，不许只印前几条 —— "先说会被拒的条件"如果只印一部分，
+        # agent 首先撞到的 Code 往往正是被省掉的那个，这条纪律就等于没有。
+        for f in route_item["failures"]:
             lines.append(f"   可能被拒：{f['code']} → {f.get('action') or ''}"
                          + (f"  [{f['cmd']}]" if f.get("cmd") else ""))
     if r.get("env_note"):

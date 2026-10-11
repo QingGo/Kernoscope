@@ -195,6 +195,10 @@ def _doc_rules(art: Path):
     # 由 test_calibration_excerpt_is_generated_from_the_current_artifact 与门禁
     # `calib` 守 —— 所以这里不再逐条登记它的字段。手抄的 needle 只能盖住"你想到的那几个"，
     # 而混合体能同时通过全部 needle（D13 就是这么活下来的）。
+    # R-62：`l2_read_peak_gbs` 此前没有任何 needle —— 把它换成更旧产物的值，门禁全绿。
+    l2_peak = (cal.get("l2_info") or {}).get("l2_read_peak_gbs") or cal.get("l2_read_peak_gbs")
+    if l2_peak:
+        rules.append(("CALIBRATION.md", "L2 读峰值", [str(l2_peak)]))
     mm = cal.get("measured_matmul_tflops", {})
     if mm:
         bf16 = mm.get("torch.bfloat16", {})

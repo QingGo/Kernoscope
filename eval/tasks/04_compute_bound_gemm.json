@@ -11,7 +11,8 @@
       "protocol": {
         "hash": "sha256:debfbea867f94b69",
         "basis": "roofline = 工作量（--ks-gemm 给出的 FLOPs/bytes） ÷ 本机实测峰值",
-        "window_mode": "auto"
+        "window_mode": "auto",
+        "calibration": "machine-profile.json"
       },
       "env": {
         "tier": 3,
@@ -210,7 +211,7 @@
         "unmeasured_metrics": 3,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 4038
+        "packet_bytes": 4075
       }
     }
   },

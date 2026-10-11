@@ -38,6 +38,7 @@ class RefusalCode(str, Enum):
     CUOBJDUMP_MISSING = "cuobjdump_missing"   # 没有 cuobjdump -> 没有静态资源/SASS
     NO_STATIC_INPUT = "no_static_input"       # 没给 --ks-cubin，静态 section 无从下手
     NVBIT_MISSING = "nvbit_missing"           # 没有 NVBit -> 没有指令级/访存轨迹
+    NO_NVTX = "no_nvtx"                       # 库里没有 NVTX 区间（采集时没带 --trace=nvtx）
     NO_MEMTRACE = "no_memtrace"               # 没给 --ks-memtrace
     NO_INSTR_HIST = "no_instr_hist"           # 没给 --ks-instr-hist
     NO_OCCUPANCY_PROBE = "no_occupancy_probe"  # 没跑 occupancy 探针
@@ -96,6 +97,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.CUOBJDUMP_MISSING: "没有 cuobjdump：静态资源/SASS 不可得",
     RefusalCode.NO_STATIC_INPUT: "没有提供 cubin/.so",
     RefusalCode.NVBIT_MISSING: "未配置 NVBit：指令级/访存轨迹不可得",
+    RefusalCode.NO_NVTX: "没有 NVTX 区间（采集时没带 --trace=nvtx）",
     RefusalCode.NO_MEMTRACE: "没有提供访存轨迹文件",
     RefusalCode.NO_INSTR_HIST: "没有提供指令直方图",
     RefusalCode.NO_OCCUPANCY_PROBE: "没跑 occupancy 探针",
@@ -259,6 +261,14 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "（--ks-sqlite 指向的库要有 CUPTI_ACTIVITY_KIND_KERNEL 表）",
         command="nsys profile --trace=cuda -o run -- python app.py", cost_s=30.0,
         then_answers=("kernel_times",)),
+    RefusalCode.NO_NVTX: Remedy(
+        # V-28：这一条的处置**只能是重采**（`--trace=nvtx`）—— 与「没有 kernel 活动」
+        # 是两件事，所以它与 `no_launch_activity` 必须是两个 code：读者要能分清该补哪趟采集。
+        "重采时带 `--trace=nvtx`（`nsys profile --trace=cuda,nvtx -o run -- <你的命令>`）："
+        "NVTX 区间是采集当时写进 trace 的标注，事后补不了 —— 已有的库里即使有完整的 kernel "
+        "时间，也没有「哪一段」这个维度",
+        command="nsys profile --trace=cuda,nvtx -o run -- python app.py",
+        cost_kind="wall_seconds", cost_s=60.0),
     RefusalCode.NO_KERNEL_MATCH: Remedy(
         "放宽 -k 过滤（用更短的正则片段），或先不加 -k 看有哪些 kernel 名字",
         command="kernoscope --ks-sqlite kernels.sqlite --launch-csv", cost_s=5.0,

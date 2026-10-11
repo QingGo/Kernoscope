@@ -72,7 +72,9 @@ def issue_main(argv: list[str]) -> int:
             "kernel": st.kernel, "launches": st.launches, "warp_instrs": st.warp_instrs,
             "thread_blocks": st.thread_blocks, "duration_ns": st.duration_ns,
             "sm_count": st.sm_count, "clock_mhz": st.clock_mhz,
-            "issue_slots": st.issue_slots,
+            # V-27：前提不成立时 `issue_slots` 的算术结果是 0（缺时钟/缺时长），而 0 是
+            # 一个**看起来像测到 0** 的数。n/a 就是 n/a：给 null，不给 0。
+            "issue_slots": st.issue_slots if st.available else None,
             "issue_slot_utilization_pct": st.issue_slot_utilization_pct,
             "issued_ipc_per_sm": st.issued_ipc_per_sm,
             "category_pct": st.category_pct,
@@ -86,12 +88,20 @@ def issue_main(argv: list[str]) -> int:
         }, indent=2, ensure_ascii=False))
         return 0 if st.available else 2
 
+    ref = None if st.available else st.refusal()
     print("发射槽利用率（NVBit 动态指令计数，非硬件计数器）")
     print(f"  kernel                : {st.kernel}")
     print(f"  warp 级指令数          : {st.warp_instrs}")
-    print(f"  发射槽上限（本窗口）    : {st.issue_slots:.3g}")
-    if not st.available:
-        print(f"  无法计算              : {st.unavailable_reason()}")
+    if ref is None:
+        print(f"  发射槽上限（本窗口）    : {st.issue_slots:.3g}")
+    else:
+        # V-27：缺前提（最常见的是**没有 SM 时钟读数**）时 `issue_slots` 算出来是 0，
+        # 而「0 会被读成测到 0」是这个项目自己的纪律。所以这里一律打 n/a + 闭集 code +
+        # 原因：code 是现成的（`no_clock_reading` 等，见 analyze/issue.py 的 refusal()），
+        # 处置也随 code 走（`kernoscope capabilities --json` / refusals 表里能查到）。
+        print(f"  发射槽上限（本窗口）    : n/a（code={ref.code.value}：{ref.message}）")
+        print("  无法计算              : 缺前提，见上一行的 code 与原因；"
+              "0 在这里只表示『没测』，不表示『测到 0』")
         return 2
     print(f"  发射槽利用率（上界口径）: {st.issue_slot_utilization_pct:.1f} %")
     print(f"  每 SM 每周期发出指令数  : {st.issued_ipc_per_sm:.3f}")
