@@ -189,3 +189,20 @@ def test_every_gate_is_known_to_the_index(gate: str):
     assert gate in {g.key for g in mod.GATES}, f"门禁 {gate} 不在 GATES 里（清单变了？）"
     g = next(x for x in mod.GATES if x.key == gate)
     assert g.cmd and g.what, f"门禁 {gate} 缺命令或缺 what"
+
+
+def test_ci_workflow_prose_count_matches_the_gate_list():
+    """第七轮 X-11：CI 工作流里的散文写"8 条门禁"，而 `GATES` 已经是 9 条。
+
+    手写计数会漂（这个仓库已经因为手写计数红过好几次）。这里把"散文里的数字"与
+    `dev_index.GATES` 的真实条数**对拍**：以后再加一条门禁，这句话不改就红。
+    """
+    import re
+
+    wf = (ROOT / ".github" / "workflows" / "gates.yml").read_text(encoding="utf-8")
+    m = re.search(r"(\d+)\s*条门禁", wf)
+    if m is None:            # 改成"全部门禁一把跑"这种不带数字的写法也可以（那就没有漂移面）
+        assert "全部门禁一把跑" in wf, wf
+        return
+    assert int(m.group(1)) == len(dev_index.GATES), (
+        f"CI 工作流写 {m.group(1)} 条门禁，`dev_index.GATES` 实际 {len(dev_index.GATES)} 条")
