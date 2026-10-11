@@ -816,3 +816,56 @@ def test_mixed_window_still_reports_share_too_low_first():
     r = est.refusal_for("est__dram_bytes_per_launch")
     assert r.code is RefusalCode.SHARE_TOO_LOW, r.code
     assert "份额" in r.message
+
+
+# --------------------------------------------------------------------------
+# R-47 的验收工具本身（bench/window_probe.py --check）必须"能红"
+# --------------------------------------------------------------------------
+def _load_window_probe():
+    import importlib.util
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "bench" / "window_probe.py"
+    spec = importlib.util.spec_from_file_location("ks_window_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _packet_with_per_launch(tmp_path, name: str, value_mb, code: str | None = None):
+    v: dict = {"id": "dram_bytes_per_launch", "status": "refused" if code else "soft"}
+    if code:
+        v["refusal"] = {"code": code}
+    else:
+        v["value"] = value_mb * 1e6
+        v["unit"] = "B"
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps({"verdicts": [v]}), encoding="utf-8")
+    return p
+
+
+def test_window_probe_acceptance_fails_on_the_old_silent_bias(tmp_path):
+    """旧实现的形态（1.06/0.86/0.52 GB）必须被判失败 —— 判据要能红。"""
+    mod = _load_window_probe()
+    pk = [_packet_with_per_launch(tmp_path, "auto", 1063.0),
+          _packet_with_per_launch(tmp_path, "warmup10", 859.9),
+          _packet_with_per_launch(tmp_path, "warmup20", 517.3)]
+    assert mod.check(pk, analytic_mb=1073.74) == 1
+
+
+def test_window_probe_acceptance_passes_when_windows_agree(tmp_path):
+    mod = _load_window_probe()
+    pk = [_packet_with_per_launch(tmp_path, "auto", 1063.0),
+          _packet_with_per_launch(tmp_path, "warmup10", 1043.4),
+          _packet_with_per_launch(tmp_path, "warmup20", 1086.0)]
+    assert mod.check(pk, analytic_mb=1073.74) == 0
+
+
+def test_window_probe_accepts_a_clean_refusal(tmp_path):
+    """换窗口后口径被**明确拒绝**（带结构化 code）也是合格答案。"""
+    mod = _load_window_probe()
+    pk = [_packet_with_per_launch(tmp_path, "a", 0, code="window_launch_unaligned"),
+          _packet_with_per_launch(tmp_path, "b", 0, code="window_launch_unaligned"),
+          _packet_with_per_launch(tmp_path, "c", 0, code="window_launch_unaligned")]
+    assert mod.check(pk, analytic_mb=1073.74) == 0

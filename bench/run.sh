@@ -233,6 +233,37 @@ if [[ -x "$PROBE" ]]; then
       > "$HOSTDIR/rep-lowduty.ledger-line-count" || true
 fi
 
+# ------------------- 4b) R-47 验收：per-launch 的分母必须跟着窗口走
+# 同一个单 kernel 紧循环，只换窗口切法（auto / --ks-warmup 10 / --ks-warmup 20）。
+# 旧实现里分子按窗口裁、分母是整段 launch 数，于是同一负载给出 1.06 GB / 0.86 GB /
+# 0.52 GB 而**没有任何告警**；账本是 per-launch 口径，使用者会得出"账本错了 19%~51%"。
+# 这一步把"换窗口后 per-launch 必须一致（或被明确拒绝）"变成可复现的产物 + 会红的判据。
+echo "== 4b) R-47：per-launch 的分母必须落在积分窗口内 =="
+if "$PY" -c 'import torch, triton' 2>/dev/null; then
+  W_PROBE=bench/window_probe.py
+  W_ELEMS="${W_ELEMS:-134217728}"          # 2^27 个 fp32：每次 launch 读+写 ≈1073.74 MB
+  W_ANALYTIC_MB="$(awk -v n="$W_ELEMS" 'BEGIN{printf "%.6f", 2*n*4/1e6}')"
+  for W in auto warmup10 warmup20; do
+    case "$W" in
+      auto)     W_ARGS=(--ks-window auto) ;;
+      warmup10) W_ARGS=(--ks-warmup 10) ;;
+      warmup20) W_ARGS=(--ks-warmup 20) ;;
+    esac
+    KSC --set basic --ks-calibration "$CAL" -k regex:ks_window_probe \
+        "${W_ARGS[@]}" -c 20 -f -o "$HOSTDIR/window-$W" \
+        --packet "$HOSTDIR/window-$W.packet.json" \
+        -- "$PY" "$W_PROBE" --run --elems "$W_ELEMS" --target-s "$TARGET_MID" \
+        > "$HOSTDIR/window-$W.txt" 2> "$HOSTDIR/window-$W.err"
+    record "window-$W" $?
+  done
+  "$PY" "$W_PROBE" --check --analytic-mb "$W_ANALYTIC_MB" \
+      "$HOSTDIR/window-auto.packet.json" "$HOSTDIR/window-warmup10.packet.json" \
+      "$HOSTDIR/window-warmup20.packet.json" \
+      > "$HOSTDIR/window-denominator.txt" 2>&1
+  record window-denominator $?     # 期望 0：换窗口不改变 per-launch（或被明确拒绝）
+  cat "$HOSTDIR/window-denominator.txt"
+fi
+
 # ------------------------------------------------- 5) 形状扫描（多组 launch 配置）
 echo "== 5) 形状扫描：同名 kernel、三组 launch 配置 =="
 if [[ -x "$PROBE" ]]; then
