@@ -90,13 +90,15 @@ jobs:
         # 而漂的正好是给人对拍用的数字。
         run: python3 bench/pypi_digests.py "${GITHUB_REF_NAME#v}" >> /tmp/notes.md
 
-      - name: 创建 Release（tag 不移动：`--verify-tag`）
+      - name: 建 Release / 已存在则更新正文（幂等，tag 不移动）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME"             --title "$(python3 bench/release_notes.py "${GITHUB_REF_NAME#v}" --title)"             --notes-file /tmp/notes.md             --verify-tag
-      - name: 已有 Release 时改为更新正文（重试幂等）
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --notes-file /tmp/notes.md
+          title="$(python3 bench/release_notes.py "${GITHUB_REF_NAME#v}" --title)"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$title" --notes-file /tmp/notes.md
+            echo "已更新既有 Release：$GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$title" --notes-file /tmp/notes.md --verify-tag
+            echo "已创建 Release：$GITHUB_REF_NAME"
+          fi
