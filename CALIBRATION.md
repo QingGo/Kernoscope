@@ -18,84 +18,118 @@ python tools/machine-profile.py --out bench/machine-profile.json
 
 ## 产物格式
 
+<!-- calib-excerpt:begin -->
+<!-- 由 tools/gen_calibration_excerpt.py 生成（取自最新产物）；不要手改本块 -->
+
 ```jsonc
 {
   "schema_version": 2,
   "gpu": "NVIDIA GeForce RTX 4090",
-  "cc": "8.9", "sm_count": 128, "l2_mib": 72.0,
-  "nvidia_smi": "580.105.08, 3105, 450.00, 2, 16",   // driver, maxSM, power, pcie gen, width
-  "measured_dram": {"copy_gbs": 908.5, "read_gbs": 898.5, "write_gbs": 937.2},
-  "l2_info": {"l2_resident_max_mb": 64, "l2_drop_mb": 96, "l2_read_peak_gbs": 2180.1},
+  "torch": "2.12.1+cu130",
+  "ts": "2026-10-09 01:23:13",
+  "tool": "tools/machine-profile.py",
+  "measured_dram": {
+    "copy_gbs": 908.5,
+    "read_gbs": 898.5,
+    "write_gbs": 937.2
+  },
+  "l2_info": {
+    "l2_resident_max_mb": 64,
+    "l2_drop_mb": 96,
+    "l2_read_peak_gbs": 2082.8
+  },
   "measured_matmul_tflops": {
     "torch.bfloat16": {
-      "tflops": 166.2, "size": 16384, "ms": 52.9,
+      "tflops": 166.2,
+      "size": 16384,
+      "ms": 52.9354,
       "acc_caliber": "bf16 (fp32 accumulate)",
-      "tflops_protocol": "default",          // 这个头条读数**就是**哪个变体测出来的
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "none"
+      },
+      "tflops_protocol": "default",
       "tflops_is_variant_reading": true,
-      "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
-                             "fp32_precision": "none", "allow_tf32": true},
-      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
-      "caliber_variants_tflops": {"default": 166.2,
-                                  "reduced_precision_reduction_off": 166.1,
-                                  "fp32_ieee": 159.9},
-      "caliber_variant_settings": {          // 每个变体自己的设置，不再只留一个快照
-        "default": {"allow_fp16_reduced_precision_reduction": true,
-                    "fp32_precision": "none"},
-        "reduced_precision_reduction_off": {"allow_fp16_reduced_precision_reduction": false,
-                                            "fp32_precision": "none"},
-        "fp32_ieee": {"allow_fp16_reduced_precision_reduction": true,
-                      "fp32_precision": "ieee"}
+      "caliber_variants_tflops": {
+        "default": 166.2,
+        "reduced_precision_reduction_off": 166.1,
+        "fp32_ieee": 159.9
       },
       "caliber_probe_size": 16384,
-      "caliber_probe_method": "torch.matmul, 3 iters best-of, 同一尺寸 16384",
       "caliber_spread_pct": 3.8,
       "caliber_distinguishable": true
     },
     "torch.float16": {
-      "tflops": 166.9, "size": 4096, "ms": 0.82,
+      "tflops": 164.3,
+      "size": 8192,
+      "ms": 6.6923,
       "acc_caliber": "fp16 (fp32 accumulate; 允许 reduced-precision reduction)",
-      "tflops_protocol": "fp32_ieee",        // 头条可能来自任一胜出协议，必须写清
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "none"
+      },
+      "tflops_protocol": "default",
       "tflops_is_variant_reading": true,
-      "precision_settings": {"allow_fp16_reduced_precision_reduction": true,
-                             "fp32_precision": "ieee", "allow_tf32": false},
-      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
-      "caliber_variants_tflops": {"default": 144.8,
-                                  "reduced_precision_reduction_off": 159.4,
-                                  "fp32_ieee": 166.9},
-      "caliber_probe_size": 4096,
-      "caliber_spread_pct": 13.2,
-      "caliber_distinguishable": true
+      "caliber_variants_tflops": {
+        "default": 164.3,
+        "reduced_precision_reduction_off": 162.7,
+        "fp32_ieee": 163.3
+      },
+      "caliber_probe_size": 8192,
+      "caliber_spread_pct": 1.0,
+      "caliber_distinguishable": false
     },
     "torch.float32": {
-      "tflops": 54.6, "size": 8192, "ms": 19.7,
+      "tflops": 54.2,
+      "size": 8192,
+      "ms": 20.2813,
       "acc_caliber": "fp32 (fp32 accumulate)",
-      "tflops_protocol": "reduced_precision_reduction_off",
+      "precision_settings": {
+        "allow_fp16_reduced_precision_reduction": true,
+        "fp32_precision": "ieee"
+      },
+      "tflops_protocol": "fp32_ieee",
       "tflops_is_variant_reading": true,
-      "precision_settings": {"allow_fp16_reduced_precision_reduction": false,
-                             "fp32_precision": "none", "allow_tf32": false},
-      "method": "torch.matmul, 3 iters best-of, size sweep [4096, 8192, 16384]",
-      "caliber_variants_tflops": {"default": 54.4,
-                                  "reduced_precision_reduction_off": 54.6,
-                                  "fp32_ieee": 54.2},
+      "caliber_variants_tflops": {
+        "default": 53.9,
+        "reduced_precision_reduction_off": 53.8,
+        "fp32_ieee": 54.2
+      },
       "caliber_probe_size": 8192,
       "caliber_spread_pct": 0.7,
       "caliber_distinguishable": false
     }
   },
-  "precision_settings_at_end": { "...": "..." },
-  "clocks_during_measurement": {"sm_clock_min": 1815.0, "sm_clock_max": 2625.0,
-                                "sm_clock_mean": 2356.5, "power_max": 457.7,
-                                "util_mean": 89.8, "n_samples": 10},
-  "bandwidth_sweep": [{"size_mb": 128, "copy_gbs": 900.2, "...": "..."}],
-  "torch": "2.12.1+cu130",
-  "ts": "2026-10-08 23:47:41",
-  "tool": "tools/machine-profile.py"
+  "clocks_during_measurement": {
+    "sm_clock_min": 1950.0,
+    "sm_clock_max": 2595.0,
+    "sm_clock_mean": 2376.8,
+    "power_max": 461.28,
+    "util_mean": 94.0,
+    "n_samples": 11
+  },
+  "bandwidth_sweep": [
+    {
+      "size_mb": 2,
+      "copy_gbs": 237.4314438723374,
+      "read_gbs": 98.69389085226368,
+      "write_gbs": 157.1169281108881
+    },
+    {
+      "size_mb": 4,
+      "copy_gbs": 628.9943613645944,
+      "read_gbs": 211.6353208350797,
+      "write_gbs": 363.1935183363303
+    },
+    {
+      "…": "共 10 个尺寸，明细见产物"
+    }
+  ]
 }
 ```
 
-（以上是 [`bench/artifacts/20261008-235142/machine-profile.json`](bench/artifacts/) 的节选；
-原始产物与 `bandwidth_sweep` 明细见同一目录。`tflops_protocol` 与
-`caliber_variant_settings` 是后来补的字段，理由见下。）
+（以上是 [`bench/artifacts/20261009-012257/machine-profile.json`](bench/artifacts/) 的节选，**由该产物渲染**（`tools/gen_calibration_excerpt.py`）；原始产物与 `bandwidth_sweep` 明细见同一目录。新的 bench 运行会让这一段与门禁一起更新。）
+<!-- calib-excerpt:end -->
 
 ## 为什么标定必须记录"累加口径"
 

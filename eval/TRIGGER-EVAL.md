@@ -68,12 +68,18 @@ kernoscope compare --baseline a.nsys-rep --candidate b.nsys-rep --report out.jso
 kernoscope selftest / kernoscope diff。不要凭印象拼子命令（先看 kernoscope --help）。
 ```
 
-C 轮复测（同一批用例、只给这条改过的 `description`）：`made_up_command_rate` 从 **1.00 → 0.00**，
+C 轮复测（只给这条改过的 `description`）：`made_up_command_rate` 从 **1.00 → 0.00**，
 第一条命令变成 `kernoscope capabilities --brief`（入口层）与 `kernoscope --help`（不知道参数时
-先看帮助 —— 这正是那句话教它的行为），`trigger_rate` 与 `false_positive_rate` 不变。
+先看帮助 —— 这正是那句话教它的行为）。
 
-代价：入口层（AGENTS.md + llms.txt + SKILL.md frontmatter）从 3.8 KB 涨到 **3.85 KB**，
-仍在 4 KB 预算内（有测试守）。
+**C 轮的样本量必须一起读**：C 轮只跑了 **3/5** 个用例（正例 2、负例 1），
+04/05 那两个"不该上性能工具"的陷阱例没有 C 轮证据。所以 C 列的
+`false_positive_rate = 0.00` 分母是 **1**（A/B 两轮是 3），
+上表把它和 A/B 并排容易被误读成"同样强度"。头条 `made_up_command_rate 1.00→0.50→0.00`
+不受影响：三轮的正例都是 2，分母一致。
+
+代价：入口层（AGENTS.md + llms.txt + SKILL.md frontmatter）写这一行时是 3845 B
+（现在 3749 B），仍在 4 KB 预算内（有测试守）。
 
 ## 3 边界与限制（必须一起读）
 

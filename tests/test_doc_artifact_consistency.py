@@ -162,25 +162,17 @@ def _doc_rules(art: Path):
     for key in ("copy_gbs", "read_gbs", "write_gbs"):
         if dram.get(key):
             rules.append(("README.md", f"标定 {key}", [str(dram[key])]))
+    # CALIBRATION.md 的**产物节选现在是生成物**（tools/gen_calibration_excerpt.py），
+    # 由 test_calibration_excerpt_is_generated_from_the_current_artifact 与门禁
+    # `calib` 守 —— 所以这里不再逐条登记它的字段。手抄的 needle 只能盖住"你想到的那几个"，
+    # 而混合体能同时通过全部 needle（D13 就是这么活下来的）。
     mm = cal.get("measured_matmul_tflops", {})
-    if mm.get("torch.bfloat16", {}).get("tflops"):
-        rules.append(("CALIBRATION.md", "bf16 标定读数",
-                      [str(mm["torch.bfloat16"]["tflops"])]))
-    dram = cal.get("measured_dram", {})
-    if dram.get("copy_gbs"):
-        rules.append(("CALIBRATION.md", "copy 带宽标定读数", [str(dram["copy_gbs"])]))
     if mm:
         bf16 = mm.get("torch.bfloat16", {})
         if bf16.get("tflops"):
             rules.append(("README.md", "bf16 标定读数（README 的能力表）", [str(bf16["tflops"])]))
         if bf16.get("caliber_spread_pct"):
             rules.append(("README.md", "bf16 口径离散度", [str(bf16["caliber_spread_pct"])]))
-    smi = str(cal.get("nvidia_smi", ""))
-    if smi:
-        # 「driver, maxSM, power, pcie gen, width」里的 pcie gen 是第 4 段
-        parts = [x.strip() for x in smi.split(",")]
-        if len(parts) >= 4:
-            rules.append(("CALIBRATION.md", "PCIe 代数", [f", {parts[3]}, "]))
 
     # occupancy 探针的两个读数（无 smem / 32 KB smem）—— 两个都必须存在：
     # 探针本来就同时写两份记录，README 也引用了两个读数，所以产物里必须都有，
@@ -337,3 +329,109 @@ def test_error_band_statement_matches_the_artifact():
               if "±4%" in ln and not any(n in ln for n in negation)]
     assert not claims, "误差带不能再用 ±4% 作为主张（实测带是单边偏高的）：\n  - " + \
         "\n  - ".join(claims)
+
+
+def test_source_hash_pins_the_code_that_ran(tmp_path):
+    """R-40/D26：产物要能钉住"跑的是哪份源码" —— 不带 `.git` 同步的机器上也要能复核。
+
+    `bench/source_hash.py` 只覆盖真正影响测量行为的文件（src/tools/bench 的 py 与 sh、
+    pyproject.toml），所以它必须对源码改动敏感、对产物/文档不敏感。
+    """
+    import importlib.util
+    import shutil
+
+    path = ROOT / "bench" / "source_hash.py"
+    spec = importlib.util.spec_from_file_location("ks_source_hash", path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "bench").mkdir()
+    (root / "tools").mkdir()
+    (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    (root / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "bench" / "s.sh").write_text("echo hi\n", encoding="utf-8")
+    before = mod.source_hash(root)
+    # 源码改了 → 指纹必须变
+    (root / "src" / "a.py").write_text("x = 2\n", encoding="utf-8")
+    assert mod.source_hash(root) != before
+    # 文档/产物变了 → 指纹不变（它们不影响测量行为）
+    after_src = mod.source_hash(root)
+    (root / "README.md").write_text("hello\n", encoding="utf-8")
+    (root / "bench" / "artifacts").mkdir()
+    (root / "bench" / "artifacts" / "x.json").write_text("{}\n", encoding="utf-8")
+    assert mod.source_hash(root) == after_src
+    # 本仓库自己的指纹是 16 位十六进制
+    real = mod.source_hash(ROOT)
+    assert len(real) == 16 and all(c in "0123456789abcdef" for c in real)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _load_calib_excerpt():
+    import importlib.util
+
+    path = ROOT / "tools" / "gen_calibration_excerpt.py"
+    spec = importlib.util.spec_from_file_location("ks_calib_excerpt", path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_calibration_excerpt_is_generated_from_the_current_artifact():
+    """R-56/D13：节选必须是**最新产物**渲染出来的，且门禁能发现不一致。
+
+    旧节选是手抄的，慢慢变成"两轮混合体"（一部分字段来自最新产物、一部分来自上一次，
+    `ts` 与 `fp32.ms` 两份都对不上），而门禁只对拍了 3 个字段（还恰好是两份相同的），
+    于是一路绿灯。现在它是生成物：值来自产物、`--check` 在门禁里跑。
+    """
+    mod = _load_calib_excerpt()
+    text = (ROOT / "CALIBRATION.md").read_text(encoding="utf-8")
+    assert mod.BEGIN in text and mod.END in text
+    have = text[text.index(mod.BEGIN):text.index(mod.END) + len(mod.END)]
+    assert have == mod.render(), "产物节选被手改了（它是生成物）"
+    # 节选里的每个数字都必须能在产物里找到（不是"看起来像"）
+    art, prof = mod.newest_profile()
+    body = have[have.index("```jsonc") + 9:have.rindex("```")]
+    for needle in (str(prof["ts"]), str(prof["measured_dram"]["read_gbs"]),
+                   str(prof["l2_info"]["l2_read_peak_gbs"])):
+        assert needle in body, needle
+    assert art.name in have, "节选要写明取自哪一份产物"
+
+
+def test_calibration_excerpt_gate_can_go_red(monkeypatch, tmp_path):
+    """门禁必须能红：产物换一个值，节选就应当被判不一致。"""
+    mod = _load_calib_excerpt()
+    art, prof = mod.newest_profile()
+    changed = json.loads(json.dumps(prof))
+    changed["measured_dram"]["read_gbs"] = round(changed["measured_dram"]["read_gbs"] + 5.0, 1)
+    monkeypatch.setattr(mod, "newest_profile", lambda: (art, changed))
+    assert mod.render() != mod.render.__wrapped__() if hasattr(mod.render, "__wrapped__") else True
+    text = (ROOT / "CALIBRATION.md").read_text(encoding="utf-8")
+    assert mod.render() not in text, "换了产物值之后，节选文本必须与文档里的不同（否则门禁是摆设）"
+
+
+def test_every_registered_artifact_band_is_quoted_in_the_readme():
+    """R-56/D27：README 说"更早的运行是多少"时，**每一次**已登记产物的误差带都要出现。
+
+    旧散文写"更早的两次运行里分别是 −4.3% ~ +9.0% 与 −4.3% ~ +12.7%"，而 −4.3~+9.0
+    其实是**本次**运行；更早那次是 −4.1 ~ +12.5（细则完全对不上）。逐产物的带是可算的
+    （`_ledger_error`），所以这一条能把它钉住：想改散文就必须让每一份产物的带都出现。
+    """
+    arts = _artifact_dirs()
+    if len(arts) < 2:
+        pytest.skip("只有一个产物，谈不上「更早的运行」")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    missing: list[str] = []
+    for art in arts:
+        errs = [e for e in (_ledger_error(art, k) for k in ("copy", "read", "write"))
+                if e is not None]
+        if len(errs) < 3:
+            continue
+        band = f"{min(errs):+.1f}% ~ {max(errs):+.1f}%"
+        if band not in readme and band.replace("-", "\u2212") not in readme:
+            missing.append(f"{art.name}: {band}")
+    assert not missing, ("README 要写出每个已登记产物的误差带（散文里的「更早的运行」必须"
+                         "能追到产物）：\n  - " + "\n  - ".join(missing))

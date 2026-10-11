@@ -20,7 +20,7 @@ Kernoscope 的形态是「**探测 → 选最高可用层 → 采集 → 每个�
 | 加一个已知答案负载（selftest 那一族） | `src/kernoscope/selftest.py` | — | — | `tests/test_diff_selftest.py` | §③（1.4 KB） |
 | 加/改一个能力问题 | `src/kernoscope/capabilities.py` | — | `tools/gen_coverage.py` | `tests/test_capabilities.py` / `tests/test_opening_package.py` | §④（1.3 KB） |
 | 加一种拒绝理由（我们不给数） | `src/kernoscope/refusals.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` | `tests/test_refusals.py` / `tests/test_agent_surface.py` | §⑤（1.9 KB） |
-| 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | 门禁 `sanitize` | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
+| 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | `tools/gen_calibration_excerpt.py`；门禁 `sanitize` | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
 | 加/改一个判词或决策包字段 | `src/kernoscope/packet.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` / `eval/make_tasks.py` | `tests/test_packet.py` / `tests/test_agent_surface.py` / `tests/test_eval_harness.py` | §⑧（2.3 KB） |
 | 改 agent 入口层（常驻那部分） | `AGENTS.md` | `llms.txt` / `skills/kernoscope/SKILL.md` | — | `tests/test_agent_surface.py` | §⑧（2.3 KB） |
 | 加/改一个子命令或开关 | `src/kernoscope/cli.py` | `README.md` / `CHANGELOG.md` | — | `tests/test_cli.py` / `tests/test_flag_suggestions.py` / `tests/test_documented_commands.py` | §⑧（2.3 KB） |
@@ -39,6 +39,7 @@ uv run python tools/dev_index.py --gates
 | `agentrefs` | `uv run python tools/gen_agent_refs.py --check` | ≈0.2 s | references/*.md 与拒绝码/判词同源 |
 | `index` | `uv run python tools/dev_index.py --check` | ≈0.1 s | 本索引与仓库现状同源 |
 | `tasks` | `uv run python eval/make_tasks.py --check` | ≈0.1 s | 评测任务材料与 packet.build() 同源 |
+| `calib` | `uv run python tools/gen_calibration_excerpt.py --check` | ≈0.1 s | CALIBRATION.md 的产物节选与最新产物同源 |
 | `sanitize` | `uv run python bench/sanitize_artifacts.py bench/artifacts --check` | ≈0.2 s | 入库产物已脱敏 |
 | `build` | `uv build` | ≈1.1 s | sdist + wheel 能生成 |
 

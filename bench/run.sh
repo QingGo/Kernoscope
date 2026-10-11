@@ -104,14 +104,18 @@ if [[ -z "$REVISION" ]]; then
 fi
 # 修订号只说明"基于哪个提交"，不说明"有没有未提交改动" —— 后者同样致命，
 # 所以一起记下来（没有 .git 时无法判断，如实写 unknown）。
+# 只看**被跟踪**文件的改动：产物目录本身就是这一步新建的，把它算成 dirty 的话
+# `revision_dirty` 会永远等于 yes，这个字段也就没用了（D26）。
 REVISION_DIRTY="unknown"
 if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
-  if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+  if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
     REVISION_DIRTY="yes"
   else
     REVISION_DIRTY="no"
   fi
 fi
+# 再钉一个"这次到底跑的是哪份源码"的指纹：不带 .git 同步时也能复核（D26）。
+SOURCE_SHA="$("$PY" bench/source_hash.py "$ROOT" 2>/dev/null || echo n/a)"
 KS_VERSION="$(KSC --version 2>/dev/null || echo 'n/a')"
 {
   echo "date: $(date -Is)"
@@ -120,6 +124,7 @@ KS_VERSION="$(KSC --version 2>/dev/null || echo 'n/a')"
   echo "revision: $REVISION"
   echo "revision_source: $REVISION_SOURCE"
   echo "revision_dirty: $REVISION_DIRTY"
+  echo "source_sha256: $SOURCE_SHA"
   echo "kernoscope: $KS_VERSION"
   echo "python: $($PY -V 2>&1)"
   echo "nvcc: $($NVCC --version 2>/dev/null | tail -1)"
@@ -480,6 +485,7 @@ record sanitize $?
   echo "  \"revision\": \"$REVISION\","
   echo "  \"revision_source\": \"$REVISION_SOURCE\","
   echo "  \"revision_dirty\": \"$REVISION_DIRTY\","
+  echo "  \"source_sha256\": \"$SOURCE_SHA\","
   echo "  \"kernoscope\": \"$KS_VERSION\","
   echo "  \"quick\": $QUICK,"
   echo "  \"target_big_s\": \"$TARGET_BIG\", \"target_mid_s\": \"$TARGET_MID\", \"mb\": $MB,"

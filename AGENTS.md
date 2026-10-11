@@ -18,7 +18,8 @@ uv run python tools/dev_index.py --gates   # 提交前：全部门禁一把跑�
   `unavailable` 必须带 `code=`。数字的出处判定只在 `provenance.py` 里。
 - **生成物不许手改**：`COVERAGE.md`、`skills/kernoscope/references/*.md`、`eval/tasks/*.json`。
   改代码后按索引重跑生成器 —— 漏跑会在 `--gates` 里红。
-- **公开数字要能追到产物**：`bench/artifacts/` 里那一次可复现的运行；文档数字由测试对拍。
+- **公开数字要能追到产物**：`bench/artifacts/` 里那一次可复现的运行；**已登记**的数字由
+  测试逐条对拍（登记范围见 `test_doc_artifact_consistency.py`），没登记的要自己确认。
 - **常驻入口层有 4096 B 硬预算**：加内容就要减内容（否则每个会话都付全量上下文的钱）。
 - **别把机器身份写进仓库**：主机名/实例名/裸 IP/绝对路径不进提交信息、注释与文档；
   不 `git add -f`；提交动作与身份由维护者负责。

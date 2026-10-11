@@ -57,6 +57,8 @@ GATES = [
          "本索引与仓库现状同源"),
     Gate("tasks", "uv run python eval/make_tasks.py --check", 0.1,
          "评测任务材料与 packet.build() 同源"),
+    Gate("calib", "uv run python tools/gen_calibration_excerpt.py --check", 0.1,
+         "CALIBRATION.md 的产物节选与最新产物同源"),
     Gate("sanitize", "uv run python bench/sanitize_artifacts.py bench/artifacts --check", 0.2,
          "入库产物已脱敏"),
     Gate("build", "uv build", 1.1, "sdist + wheel 能生成"),
@@ -104,6 +106,7 @@ CHANGES = [
     Change("artifact", "加一次 bench 产物 / 改公开数字",
            truth=["bench/run.sh"],
            touch=["bench/artifacts/README.md"],
+           regen=["tools/gen_calibration_excerpt.py"],
            gates=["sanitize"],
            tests=["tests/test_doc_artifact_consistency.py", "tests/test_repo_hygiene.py"], sec="⑥"),
     Change("verdict", "加/改一个判词或决策包字段",
@@ -214,16 +217,22 @@ def check() -> list[str]:
     if not any("pytest" == g.key for g in GATES):
         problems.append("门禁表里必须有全量测试")
 
-    # 逆向：支持 --check 的脚本必须被某个门禁或某类改动用到 —— 否则它就会像
-    # eval/make_tasks.py 那样"带 --check 但从来没人在 CI/提交前跑"，静默漂移。
+    # 逆向：支持 --check 的脚本必须被**三种接线之一**用到 —— 否则它就会像
+    # eval/make_tasks.py 那样"带 --check 但从来没人在 CI/提交前跑"，静默漂移：
+    #   ① 某类改动的「重跑」生成器；② 某条门禁的命令；③ bench 采集脚本调用的验收工具
+    #   （bench/run.sh 本身是产生产物的那一步，它的验收判据进 manifest 的 rc）。
     referenced = {p for c in CHANGES for p in c.regen}
     referenced |= {re.sub(r"^uv run python ", "", g.cmd).split()[0] for g in GATES}
+    bench_sh = (ROOT / "bench" / "run.sh")
+    bench_text = bench_sh.read_text(encoding="utf-8") if bench_sh.exists() else ""
     for pat in ("tools/*.py", "eval/*.py", "bench/*.py"):
         for p in sorted(ROOT.glob(pat)):
             if p.name == "__init__.py" or "--check" not in p.read_text(encoding="utf-8"):
                 continue
-            if str(p.relative_to(ROOT)) not in referenced:
-                problems.append(f"{p.relative_to(ROOT)}: 支持 --check 但没有任何门禁或改动类会跑它")
+            rel = str(p.relative_to(ROOT))
+            if rel not in referenced and rel not in bench_text:
+                problems.append(
+                    f"{rel}: 支持 --check 但没有任何门禁/改动类/bench 步骤会跑它")
 
     text = CONTRIBUTING.read_text(encoding="utf-8")
     if BEGIN not in text or END not in text:
