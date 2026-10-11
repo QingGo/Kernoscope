@@ -335,6 +335,9 @@ def load_official_memtrace(path: str, sm_count: int = 0, l2_bytes: int = 0,
             if not line.startswith(OFFICIAL_TAG):
                 continue
             body = line[len(OFFICIAL_TAG):].strip()
+            if COMPLETE_SENTINEL in body:      # 结束哨兵（R-76）：只有一段，必须在切分前判
+                saw_complete = True
+                continue
             parts = [p.strip() for p in body.split(" - ")]
             if len(parts) < 2:
                 continue
@@ -367,9 +370,6 @@ def load_official_memtrace(path: str, sm_count: int = 0, l2_bytes: int = 0,
                 if keep_current:
                     launches += 1
                     kernel, grid, block = cur_kernel, cur_grid, cur_block
-                continue
-            if COMPLETE_SENTINEL in line:
-                saw_complete = True
                 continue
             if not keep_current:
                 continue

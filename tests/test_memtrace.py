@@ -462,3 +462,25 @@ def test_trace_bounds_bracket_the_cache_model_value(tmp_path):
     assert "est__dram_bytes_per_launch_trace_bounds" in names
     note = next(m[4] for m in to_metrics(st) if m[0] == "est__dram_bytes_per_launch_trace")
     assert "measured 级算术" in note and "模型" in note
+
+
+def test_official_trace_completeness_sentinel_is_detected(tmp_path):
+    """R-76：哨兵行只有一段（`MEMTRACE: KS-TRACE-COMPLETE`），必须在切分前判定。
+
+    真事：第一版把检查放在 `len(parts) < 2` 之后，于是哨兵永远被当成"格式不对的行"跳过，
+    `complete` 一直是 `unknown` —— 冒烟门禁（`test_nvbit_smoke.py`）在真机上把它抓了出来。
+    """
+    from kernoscope.backends.memtrace import COMPLETE_SENTINEL, load_official_memtrace
+
+    body = ["MEMTRACE: CTX 0x1 - LAUNCH - Kernel pc 0x2 - Kernel name k(float*) "
+            "- grid launch id 0 - grid size 1,1,1 - block size 32,1,1",
+            "MEMTRACE: CTX 0x1 - grid_launch_id 0 - CTA 0,0,0 - warp 0 - LDG.E - 0x1000 0x1010"]
+    without = tmp_path / "without.txt"
+    without.write_text("\n".join(body) + "\n", encoding="utf-8")
+    with_sentinel = tmp_path / "with.txt"
+    with_sentinel.write_text("\n".join(body) + f"\nMEMTRACE: {COMPLETE_SENTINEL}\n",
+                             encoding="utf-8")
+    a = load_official_memtrace(str(without), sm_count=1)
+    b = load_official_memtrace(str(with_sentinel), sm_count=1)
+    assert a.complete == "unknown" and b.complete == "yes"
+    assert a.header["trace_sha256"] != b.header["trace_sha256"], "两份轨迹的指纹必须不同"

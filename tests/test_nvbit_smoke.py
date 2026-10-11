@@ -27,6 +27,24 @@ COLLECT = ROOT / "tools" / "probes" / "nvbit_memtrace" / "collect.sh"
 PROBE_SRC = ROOT / "bench" / "ledger_probe.cu"
 
 
+def _nvcc() -> str | None:
+    """找 nvcc：PATH → `$CUDA_HOME/bin` → `$CUDA_BIN` → `/usr/local/cuda*/bin`。
+
+    租用机上常见"CUDA 装了但不在 PATH"（本仓库 `bench/run.sh` 为此显式加过 PATH）——
+    门禁不能因为 PATH 而误判成"这台机器没有 NVBit"。
+    """
+    found = shutil.which("nvcc")
+    if found:
+        return found
+    cands: list[pathlib.Path] = []
+    for env in ("CUDA_HOME", "CUDA_PATH", "CUDA_BIN"):
+        if os.environ.get(env):
+            cands.append(pathlib.Path(os.environ[env]) / "nvcc")
+    cands += [pathlib.Path("/usr/local/cuda/bin/nvcc")]
+    cands += sorted(pathlib.Path("/usr/local").glob("cuda*/bin/nvcc"))
+    return next((str(c) for c in cands if c.is_file()), None)
+
+
 def _memtrace_so() -> pathlib.Path | None:
     env = os.environ.get("NVBIT_MEMTRACE_SO")
     if env and pathlib.Path(env).is_file():
@@ -41,25 +59,31 @@ def _memtrace_so() -> pathlib.Path | None:
 
 
 needs_nvbit = pytest.mark.skipif(
-    _memtrace_so() is None or shutil.which("nvcc") is None,
+    _memtrace_so() is None or _nvcc() is None,
     reason="本机没有 NVBit 的 mem_trace.so 或 nvcc（可选外部依赖，见 tools/probes/nvbit_memtrace/README.md）")
 
 
 @needs_nvbit
 def test_documented_collect_command_produces_a_complete_parseable_trace(tmp_path):
     probe = tmp_path / "ledger_probe"
-    r = subprocess.run(["nvcc", "-O3", "-o", str(probe), str(PROBE_SRC)],
+    r = subprocess.run([_nvcc() or "nvcc", "-O3", "-o", str(probe), str(PROBE_SRC)],
                        capture_output=True, text=True, cwd=ROOT, timeout=300)
     if r.returncode != 0:
         pytest.skip(f"nvcc 编译探针失败（本机 CUDA 工具链不完整）：{r.stderr.strip()[:200]}")
 
     trace = tmp_path / "trace.txt"
     env = dict(os.environ, KS_MEMTRACE_OUT=str(trace))
+    # 负载必须**有界**：轨迹一行 = 一条 warp 访存指令，紧循环 1 秒 ≈ 6.6 GB（真事，
+    # 会把磁盘写满）。这里只跑 3 次 launch，够断言格式与完整性即可。
+    free_mb = shutil.disk_usage(tmp_path).free // (1 << 20)
+    if free_mb < 1024:
+        pytest.skip(f"剩余空间只有 {free_mb} MB，采集需要至少 1 GB")
     r = subprocess.run(["bash", str(COLLECT), "--", str(probe), "--kernel", "copy",
-                        "--mb", "16", "--target-s", "1"],
+                        "--mb", "4", "--iters", "3", "--warmup", "1"],
                        capture_output=True, text=True, cwd=ROOT, timeout=900, env=env)
     assert r.returncode == 0, f"按文档采集失败：{r.stdout[-400:]}\n{r.stderr[-400:]}"
     assert trace.exists() and trace.stat().st_size > 0, "轨迹是空的"
+    assert trace.stat().st_size < 200 * 1024 * 1024, "有界负载不该产出这么大的轨迹"
     text = trace.read_text(encoding="utf-8", errors="replace")
     assert "KS-TRACE-COMPLETE" in text, "collect.sh 必须写结束标记（R-76）"
     assert "MEMTRACE:" in text and "warp" in text, "轨迹里没有 warp 访存记录"
