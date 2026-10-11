@@ -446,3 +446,40 @@ def test_explicit_screen_off_prints_only_the_report():
     rc, out = _run_with_stdout(True, "--ks-synthetic", "--set", "basic", "--screen", "off")
     assert rc == 0
     assert len(out.encode("utf-8")) > 8192
+
+
+# ---------------------------------------------------------------------------
+# N9：单文件 HTML 证据单（`--html`）—— 自包含、离线、零 JS、出处角标与数字同行
+# ---------------------------------------------------------------------------
+def test_html_flag_writes_a_self_contained_evidence_sheet(tmp_path):
+    out = tmp_path / "evidence.html"
+    rc, _ = _run_with_stdout(False, "--ks-synthetic", "--set", "basic", "--screen", "off",
+                            "--html", str(out))
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("<!DOCTYPE html>") and text.rstrip().endswith("</html>")
+    assert "http://" not in text and "https://" not in text, "自包含：不许有外部 URL"
+    assert "<script" not in text, "零 JS：打开的是一份证据，不是应用"
+    assert "<style" in text
+    assert "badge" in text, "每个数字要带出处角标"
+
+
+def test_html_dash_writes_to_stdout_but_not_together_with_packet_dash():
+    rc, out = _run_with_stdout(False, "--ks-synthetic", "--set", "basic", "--screen", "off",
+                              "--html", "-")
+    assert rc == 0 and out.startswith("<!DOCTYPE html>")
+
+    rc2, _ = _run_with_stdout(False, "--ks-synthetic", "--set", "basic",
+                              "--packet", "-", "--html", "-")
+    assert rc2 == 2, "stdout 上一次只能要一种格式"
+
+
+def test_plan_declares_the_html_file(tmp_path):
+    from kernoscope.cli import build_parser
+    from kernoscope.effects import plan_for
+
+    out = tmp_path / "evidence.html"
+    argv = ["--ks-synthetic", "--ks-no-nvml", "--set", "basic", "--screen", "off",
+            "--html", str(out)]
+    plan = plan_for(build_parser().parse_args(argv), argv)
+    assert str(out) in plan.declared_writes()

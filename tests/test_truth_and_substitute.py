@@ -18,9 +18,13 @@ import pytest
 from kernoscope.analyze.truth import (PAIRS, compare, comparison_metrics, match_action,
                                       truth_metrics)
 from kernoscope.backends.ncu_rep import NcuRepAction, NcuRepData
-from kernoscope.ncrep.substitute import (ATTRIBUTION_MARK, SubstituteRefused, assert_writable,
-                                         build_plan, render_comment, select_metrics,
+from kernoscope.ncrep.substitute import (ATTRIBUTION_JSON_MARK, ATTRIBUTION_JSON_SCHEMA,
+                                         ATTRIBUTION_MARK, SubstituteRefused,
+                                         assert_writable, attribution_data, build_plan,
+                                         render_comment, render_sidecar, select_metrics,
                                          write_substitute)
+from kernoscope.ncrep.source_class import SourceClass, allows_ncu_name
+from kernoscope.ncrep.ncu_rows import row_for
 from kernoscope.provenance import COUNTER_NAMESPACES, Metric, Provenance
 
 
@@ -185,13 +189,13 @@ def test_selection_refuses_counter_namespace_and_unavailable_values():
         _m("est__dram_bytes_per_launch", 2.5e7, Provenance.ESTIMATED),
         _RawRow("sm__throughput.avg.pct_of_peak_sustained_elapsed", None, Provenance.UNAVAILABLE),
     ])
-    metrics, prov, units, dropped, by_ns, over = select_metrics(kr)
+    metrics, prov, units, dropped, by_ns, by_sc, our_units, over = select_metrics(kr)
     names = [m.name for m in metrics]
     assert "dram__bytes.sum" not in names
     assert "sm__throughput.avg.pct_of_peak_sustained_elapsed" not in names
     assert names[0] == "meas__window_energy_j"        # measured 排在 estimated 之前
     assert prov["ks__launch_time_mean"] == "derived"
-    assert over == 0 and dropped == [] and by_ns == []
+    assert over == 0 and dropped == [] and by_ns == [] and by_sc == []
     with pytest.raises(SubstituteRefused):
         assert_writable([type("M", (), {"name": "dram__bytes.sum"})()])
 
@@ -201,7 +205,7 @@ def test_selection_drops_metrics_whose_premise_failed_and_refuses_if_nothing_is_
     kr = _kr_with([_m("est__dram_bytes_per_launch", 2.5e7, Provenance.ESTIMATED)])
     packet = {"verdicts": [{"id": "dram_bytes", "status": "refused",
                             "metrics": ["est__dram_bytes_per_launch"]}]}
-    metrics, _, _, dropped, _, _ = select_metrics(kr, packet)
+    metrics, _, _, dropped, _, _, _, _ = select_metrics(kr, packet)
     assert metrics == [] and dropped == ["est__dram_bytes_per_launch"]
     with pytest.raises(SubstituteRefused) as e:
         build_plan(kr, packet=packet, tool_version="0.2.0")
@@ -236,7 +240,7 @@ def test_same_source_ncu_rows_are_written_with_ncu_units_and_labels():
     kr = _kr_with([_m("gpu__time_duration.sum", 0.089728, Provenance.EXACT, unit="ms"),
                    _m("launch__registers_per_thread", 16.0, Provenance.EXACT),
                    _m("ks__launch_time_mean", 0.089728, unit="ms")])
-    metrics, _, units, dropped, by_ns, _ = select_metrics(kr)
+    metrics, _, units, dropped, by_ns, _, _, _ = select_metrics(kr)
     by_name = {m.name: m for m in metrics}
     assert "gpu__time_duration.sum" in by_name and "gpu__time_duration.sum" not in by_ns
     # 选择阶段**不改值**（换算只允许在 build_report 一处发生；双换算曾把 ms→ns 变成 ×1e12）
@@ -458,10 +462,195 @@ def test_empty_unit_is_not_converted_by_assumption():
         _m("gpu__time_duration.sum", 9.51, Provenance.EXACT),        # 单位缺失 ⇒ 不许换算
         _m("launch__thread_count", 1048576.0, Provenance.EXACT),     # from_units 含 "" ⇒ 不受影响
     ])
-    metrics, _, _, _, by_ns, _ = select_metrics(kr)
+    metrics, _, _, _, by_ns, _, _, _ = select_metrics(kr)
     names = {m.name for m in metrics}
     assert "gpu__time_duration.sum" not in names, \
         "单位不明的同源行不许按假设换算后写出去"
     assert "gpu__time_duration.sum" in by_ns, by_ns
     assert "launch__thread_count" in names, \
         "`from_units` 里本来就含空串的行不受影响（否则这条修复会误伤）"
+
+
+# --------------------------------------------------------------------------- #
+# N3：把"同源才写 ncu 名"从散文政策变成类型系统（`source_class` 四档）
+# --------------------------------------------------------------------------- #
+def _demote(monkeypatch, name: str, cls: SourceClass):
+    """把白名单里某一行的来源档位降级 —— 用来驱动"规则被回退就变红"。
+
+    走 `ncu_rows._BY_NAME`（`row_for()` 的唯一后端）而不是复制一份表：
+    替换的是**真的查找路径**，所以测的是生产代码，不是测试自己搭的假表。
+    """
+    from dataclasses import replace
+
+    from kernoscope.ncrep import ncu_rows
+
+    row = ncu_rows.row_for(name)
+    assert row is not None, f"{name} 必须在 NCU_ROWS 白名单里"
+    monkeypatch.setitem(ncu_rows._BY_NAME, name, replace(row, source_class=cls))
+
+
+def _parse_json_block(text: str) -> dict:
+    """从旁路署名里取出机器可读块（委托生产者的读法，避免下游各自 split 一次）。"""
+    from kernoscope.ncrep.substitute import parse_attribution_json
+
+    return parse_attribution_json(text)
+
+
+def test_allows_ncu_name_is_exactly_documented_and_unit_ok():
+    """规则的机检形式：**只有 documented 且单位相符**才允许 ncu 名。
+
+    这条覆盖四档 × 单位两态：把 `allows_ncu_name` 改成"只要 unit_ok 就行"
+    （即撤掉档位这道门）时，`documented-adjacent`/`undocumented-observed`/
+    `vendor-tool-output` 那 6 个组合会立刻变红。
+    """
+    assert allows_ncu_name(SourceClass.DOCUMENTED, True) is True
+    assert allows_ncu_name("documented", True) is True       # str 子类：JSON/CLI 值也能用
+    for cls in (SourceClass.DOCUMENTED_ADJACENT, SourceClass.UNDOCUMENTED_OBSERVED,
+                SourceClass.VENDOR_TOOL_OUTPUT):
+        assert allows_ncu_name(cls, True) is False, f"{cls.value} 不许挂 ncu 名"
+        assert allows_ncu_name(cls, False) is False
+    # 单位是独立的一道门：来源再权威，单位不符也不许写（V-9 不许被这条规则绕过）
+    assert allows_ncu_name(SourceClass.DOCUMENTED, False) is False
+
+
+def test_default_source_class_keeps_todays_rows_documented():
+    """`source_class` 有默认值 ⇒ 今天的行行为逐位不变（不能借这次改动放松边界）。"""
+    from kernoscope.ncrep.ncu_rows import NCU_ROWS
+
+    assert NCU_ROWS and all(r.source_class is SourceClass.DOCUMENTED for r in NCU_ROWS)
+    assert all(allows_ncu_name(r.source_class, True) for r in NCU_ROWS), \
+        "白名单里的每一行都必须允许用 ncu 名（否则该行永远写不出去）"
+
+
+def test_undocumented_row_may_not_be_written_under_its_ncu_name(monkeypatch):
+    """**规则回退就红**：把一行降级成 `undocumented-observed`，它就不许用那个 ncu 名。
+
+    回退检查：删掉 `select_metrics` 里的档位判断（或把 `allows_ncu_name` 改成只看单位），
+    这条立刻红 —— 因为 `gpu__time_duration.sum` 会重新被写出去。
+    """
+    _demote(monkeypatch, "gpu__time_duration.sum", SourceClass.UNDOCUMENTED_OBSERVED)
+    kr = _kr_with([_m("gpu__time_duration.sum", 0.089728, Provenance.EXACT, unit="ms"),
+                   _m("ks__launch_time_mean", 0.089728, Provenance.DERIVED, unit="ms")])
+    metrics, _, _, _, by_ns, by_sc, _, _ = select_metrics(kr)
+    names = {m.name for m in metrics}
+    assert "gpu__time_duration.sum" not in names, \
+        "非 documented 的行不许写进 ncu 名字空间（档位规则被回退了）"
+    assert "gpu__time_duration.sum" not in by_ns, \
+        "它不是被命名空间规则挡下的（它确实在白名单里），是被**档位**挡下的"
+    assert [d.name for d in by_sc] == ["gpu__time_duration.sum"]
+    assert by_sc[0].source_class is SourceClass.UNDOCUMENTED_OBSERVED
+    assert "undocumented-observed" in by_sc[0].reason, by_sc[0].reason
+    # 同一份报告里的自有命名空间值照写（丢弃是逐条的，不是整份放弃）
+    assert "ks__launch_time_mean" in names
+
+
+def test_demoted_row_is_refused_not_renamed_into_another_ncu_name(monkeypatch):
+    """被档位挡下的值**不许**改挂到别的 ncu 名（"换个名字写出去"是最坏的回退）。"""
+    _demote(monkeypatch, "launch__grid_size", SourceClass.DOCUMENTED_ADJACENT)
+    kr = _kr_with([_m("launch__grid_size", 4096.0, Provenance.EXACT),
+                   _m("launch__block_size", 128.0, Provenance.EXACT)])
+    plan = build_plan(kr, packet={"verdicts": []}, tool_version="test")
+    written = {m.name for m in plan.metrics}
+    assert written == {"launch__block_size"}, written
+    assert [d.name for d in plan.dropped_by_source_class] == ["launch__grid_size"]
+    # 机器块里也只出现允许的那个 ncu 名
+    json_block = _parse_json_block(render_sidecar(plan, ncu_rep_path="out.ncu-rep"))
+    assert [w["ncu_name"] for w in json_block["written"]] == ["launch__block_size"]
+    assert [d["name"] for d in json_block["not_written_by_source_class"]] == ["launch__grid_size"]
+
+
+def test_demoted_row_alone_refuses_the_whole_file(monkeypatch):
+    """只剩一个"档位不相容"的值 ⇒ 拒绝生成文件（空报告比没有报告更糟，I2 的老纪律）。"""
+    _demote(monkeypatch, "launch__block_size", SourceClass.VENDOR_TOOL_OUTPUT)
+    kr = _kr_with([_m("launch__block_size", 128.0, Provenance.EXACT)])
+    with pytest.raises(SubstituteRefused) as e:
+        build_plan(kr, packet={"verdicts": []}, tool_version="test")
+    assert "一个可署名的值都不剩" in str(e.value)
+
+
+def test_assert_writable_also_refuses_a_demoted_row(monkeypatch):
+    """第二道防线也认档位：**不经过 `select_metrics`** 直接送进来的行照样被挡下。"""
+    from kernoscope.ncrep.profile import RepMetric
+
+    _demote(monkeypatch, "launch__thread_count", SourceClass.DOCUMENTED_ADJACENT)
+    with pytest.raises(SubstituteRefused) as e:
+        assert_writable([RepMetric("launch__thread_count", 1024.0)])
+    assert "N3" in str(e.value) and "documented-adjacent" in str(e.value)
+
+
+def test_assert_writable_still_refuses_a_unit_mismatch_for_a_documented_row():
+    """档位对、单位错，仍然拒绝 —— 两道门是"与"，不是"或"（V-9 + N3）。"""
+    from kernoscope.ncrep.profile import RepMetric
+
+    with pytest.raises(SubstituteRefused) as e:
+        assert_writable([RepMetric("gpu__time_duration.sum", 1.0, "us")])
+    assert "单位" in str(e.value)
+
+
+def test_attribution_json_covers_every_written_value_and_blocks_ncu_names():
+    """机检署名：每个写入值都有条目；**非 documented 的值绝不出现在 ncu 名下**。"""
+    plan = _build_plan_for_sidecar()
+    data = _parse_json_block(render_sidecar(plan, ncu_rep_path="out.ncu-rep"))
+    written_names = {m.name for m in plan.metrics}
+    entries = {w["name"]: w for w in data["written"]}
+    assert written_names == set(entries), "每个写入值都必须有署名条目（名字集合相等）"
+    assert len(data["written"]) == len(plan.metrics), "条目数必须等于写入值数（不许少也不许多）"
+    for name, entry in entries.items():
+        assert entry["provenance"] == plan.provenance_by_name[name]
+        if entry["ncu_name"] is not None:
+            row = row_for(entry["ncu_name"])
+            assert row is not None and row.source_class is SourceClass.DOCUMENTED
+    # 反向：`ncu_name` 不是 documented 的行，在文件里就不该存在
+    assert data["not_written_by_source_class"] == []
+
+
+def test_every_written_value_carries_its_origin_in_the_machine_block():
+    """出处必须进机器块（`origin` = `Metric.source` 原文）：审计工具要能追到通道。"""
+    from dataclasses import replace
+
+    metric = _m("ks__cost_per_mtok", 12.5)
+    kr = _kr_with([replace(metric, source="NVML 采样 window_energy")])
+    plan = build_plan(kr, packet={"verdicts": []}, tool_version="test")
+    data = _parse_json_block(render_sidecar(plan, ncu_rep_path="out.ncu-rep"))
+    assert data["written"] == [{
+        "name": "ks__cost_per_mtok", "value": 12.5, "ncu_name": None, "unit": "",
+        "our_unit": "", "source_class": None, "provenance": "derived",
+        "origin": "NVML 采样 window_energy",
+    }]
+
+
+def test_parse_attribution_json_refuses_a_malformed_block():
+    """读法也要在同一个地方定义：标记缺失/块不完整/schema 不对 ⇒ 抛错，不返回空字典。
+
+    "读不到"与"一个值都没写"必须可区分 —— 静默返回 `{}` 会让审计工具把
+    「署名丢了」读成「没有值得署名的东西」。
+    """
+    from kernoscope.ncrep.substitute import parse_attribution_json
+
+    good = render_sidecar(_build_plan_for_sidecar(), ncu_rep_path="out.ncu-rep")
+    assert parse_attribution_json(good)["schema"] == ATTRIBUTION_JSON_SCHEMA
+    for broken in ("# 没有标记的署名",                                   # 标记丢了
+                   good.split("```json", 1)[0],                          # 块被截断
+                   good.replace(ATTRIBUTION_JSON_SCHEMA, "someone-elses/9")):  # schema 不对
+        with pytest.raises(ValueError):
+            parse_attribution_json(broken)
+
+
+def test_writing_a_demoted_row_is_refused_and_nothing_is_written(monkeypatch, tmp_path):
+    """端到端：写了档位不相容的值 ⇒ 拒绝 + 磁盘上不留 `.ncu-rep` / 署名文件。
+
+    `.ATTRIBUTION.txt` 只在成功写出报告后才存在，所以"被拒的产物没有署名文件"
+    正是我们要的行为：一份没有署名的 `.ncu-rep` 才是真正危险的东西。
+    """
+    _demote(monkeypatch, "launch__grid_size", SourceClass.UNDOCUMENTED_OBSERVED)
+    kr = _kr_with([_m("launch__grid_size", 4096.0, Provenance.EXACT)])
+    out = tmp_path / "sub" / "rep.ncu-rep"
+    with pytest.raises(SubstituteRefused):
+        write_substitute(kr, str(out), packet={"verdicts": []}, tool_version="test")
+    assert not out.exists()
+    assert not Path(str(out) + ".ATTRIBUTION.txt").exists()
+
+    # 同一个值如果留在它自己的名字下，就必须能写出去（拒绝的是"借 ncu 名"，不是这个数）
+    plan = build_plan(_kr_with([_m("ks__grid_size", 4096.0, Provenance.EXACT)]),
+                      packet={"verdicts": []}, tool_version="test")
+    assert [m.name for m in plan.metrics] == ["ks__grid_size"]

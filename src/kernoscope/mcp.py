@@ -209,11 +209,25 @@ def serve(stdin: Iterable[str], stdout, *,
     return 0
 
 
+def build_parser() -> "argparse.ArgumentParser":
+    """`kernoscope mcp` 的解析器（与其它子命令同一约定：唯一真源给 `--help`/门禁用）。"""
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="kernoscope mcp",
+        description="MCP（stdio）：只给**没有 shell** 的 agent runtime 用的一层。"
+                    "可选、零常驻（不进常驻入口层，见 NON-GOALS N10），带止损。")
+    ap.add_argument("--stdio", action="store_true",
+                    help="在 stdin/stdout 上跑 MCP（目前唯一传输：不监听端口、不启动服务）")
+    return ap
+
+
 def main(argv: list[str] | None = None) -> int:
     """`kernoscope mcp --stdio`（只有这一个传输：进程内的 stdio，不监听端口）。"""
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] != "--stdio":
-        print("error: mcp 目前只支持 `--stdio`（不监听端口、不启动服务）", file=sys.stderr)
+    args = build_parser().parse_args(argv)
+    if not args.stdio:
+        print("error: mcp 需要显式 `--stdio`（不监听端口、不启动服务）", file=sys.stderr)
         return 2
     return serve(sys.stdin, sys.stdout)
 

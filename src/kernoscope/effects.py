@@ -135,6 +135,12 @@ OPERATIONS: dict[str, Operation] = {
         "`--force-overwrite` **只管** `.ksreport.json` 与 perfetto 两处，其它文件（含案件目录里的 "
         "`journal.jsonl` 追加）不看它。",
         ToolEffects(writes_filesystem=True, may_discard_data=True)),
+    "write_html_view": Operation(
+        "write_html_view", "写单文件 HTML 证据单（给人看/截图/贴 issue）",
+        "写 `--html <path>` 指定的**一个**自包含 `.html`（内联 CSS、零外部 URL、零 JS、无服务器）。"
+        "`--html -` 写到 stdout。同名会被覆盖。内容是决策包的渲染：每个数字带出处角标，"
+        "拿不到的数字印 n/a + 拒绝码而不是 0 —— 它不产生任何新测量、不读设备。",
+        ToolEffects(writes_filesystem=True, may_discard_data=True)),
     "write_report_md": Operation(
         "write_report_md", "把 per-kernel 报告写成 Markdown（人读）",
         "写 `--report-md <path>` 指定的**一个**文件；同名会被覆盖。前提是本次有 kernel 级数据："
@@ -413,6 +419,11 @@ def plan_for(args: Any, argv: Sequence[str] | None = None) -> Plan:
         fmt = "csv" if path.lower().endswith(".csv") else "json"
         plan.items.append(PlanItem(
             OPERATIONS["write_name_map"], target=f"{path}（{fmt}）", writes=[path]))
+    if getattr(args, "html", None) and str(args.html) != "-":
+        path = str(args.html)
+        plan.items.append(PlanItem(
+            OPERATIONS["write_html_view"], target=path, writes=[path],
+            detail="自包含：内联 CSS、零外部 URL、零 JS、无服务器；每个数字带出处角标"))
     if getattr(args, "report_md", None):
         path = str(args.report_md)
         plan.items.append(PlanItem(

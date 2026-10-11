@@ -539,6 +539,41 @@ def legacy_refusal(message: str) -> Refusal:
                    severity="blocking")
 
 
-__all__ = ["CODE_TITLES", "Refusal", "RefusalCode", "Remedy", "code_title",
-           "combined_refusal", "default_remedy", "legacy_refusal", "missing_remedies",
-           "missing_titles"]
+# --------------------------------------------------------------------------
+# 反事实视图（条件答案）—— 「拒绝」的第二半：为什么 + 怎么办 + **如果……那么……**
+# --------------------------------------------------------------------------
+# 设计动机（实测的失败形态）：缺的是**用户必须提供的输入**（价格、每步 token 数）时，
+# 旧输出只有 `refused` + remedy。对**人**够用；对 **agent** 不够 —— 它读到"没有这个数"
+# 就会去别处编一个，或者干脆放弃。判决不变（没给输入就是没给），但可以**附加**一个
+# 处处标注为条件的答案：
+#
+#     assumed_price_per_kwh = 0.8  →  if_cost_per_mtok = 0.0067
+#
+# 命名纪律（与 PROVENANCE.md 的 R2/R3 同源，由 tests 守）：
+#   * 键只有两种前缀：`assumed_*` = 假设的输入（必须具名），`if_*` = 该假设下的值；
+#   * 值一律带 `if_basis=conditional` 与 `if_provenance=estimated` 两个标签 ——
+#     条件值**永远**不许被读成 measured/exact；
+#   * 条件值不写进计数器命名空间（`sm__*` 等），也不占判词的 `value`（refused 无值）。
+#
+# 为什么这两个词放在 refusals.py 而不是 packet.py：条件答案是拒绝契约的一部分
+# （"不给数"时给什么），两个视图（包与人话）都从这一处取词，才不会各写一套。
+CONDITIONAL_BASIS = "conditional"        # 机器可读：这是"如果……那么……"，不是结论
+CONDITIONAL_PROVENANCE = "estimated"     # 条件值的出处等级：只能是 estimated
+CONDITIONAL_ASSUMED_PREFIX = "assumed_"  # 假设的输入（必须具名）
+CONDITIONAL_VALUE_PREFIX = "if_"         # 该假设下的值（必须带上面两个标签）
+
+
+def conditional_fact_keys(facts: dict[str, Any]) -> list[str]:
+    """列出 facts 里属于**条件答案**的键（`assumed_*` / `if_*`），其余键不算。
+
+    给消费者一个可编程的判据："这条判词里有没有条件答案、是哪几个键" —— 不用去猜
+    命名约定。包渲染与人话渲染共用它，所以两个视图不会分叉。
+    """
+    return sorted(k for k in facts
+                  if k.startswith((CONDITIONAL_ASSUMED_PREFIX, CONDITIONAL_VALUE_PREFIX)))
+
+
+__all__ = ["CODE_TITLES", "CONDITIONAL_ASSUMED_PREFIX", "CONDITIONAL_BASIS",
+           "CONDITIONAL_PROVENANCE", "CONDITIONAL_VALUE_PREFIX", "Refusal", "RefusalCode",
+           "Remedy", "code_title", "combined_refusal", "conditional_fact_keys",
+           "default_remedy", "legacy_refusal", "missing_remedies", "missing_titles"]

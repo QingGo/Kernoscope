@@ -147,7 +147,12 @@ def test_serve_answers_each_line_and_survives_a_bad_one():
 
 
 def test_cli_entry_refuses_anything_but_stdio(capsys):
-    assert mcp.main(["--http"]) == 2
+    # 未知开关是 argparse 的用法错误（SystemExit 2）——与仓库其它子命令同一条约定
+    with pytest.raises(SystemExit) as e:
+        mcp.main(["--http"])
+    assert e.value.code == 2
+    # 而不给 --stdio 是**自家的**一行错误 + rc=2（不是静默地什么都不做）
+    assert mcp.main([]) == 2
     err = capsys.readouterr().err
     assert "error:" in err and "stdio" in err
 

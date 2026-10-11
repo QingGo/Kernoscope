@@ -38,6 +38,11 @@ from kernoscope.ncrep.profile import (
     UINT64X3,
     SOURCE_DATA,
 )
+from kernoscope.ncrep.substitute import (
+    ATTRIBUTION_JSON_MARK,
+    ATTRIBUTION_JSON_SCHEMA,
+    parse_attribution_json as _parse_json_block,
+)
 from kernoscope.ncrep.writer import (
     BLOCK_HEADER as WIRE_BLOCK_HEADER,
     FILE_HEADER,
@@ -695,3 +700,117 @@ def test_cc_unknown_still_writes_the_reference_link():
     source_blocks = [b for b in blocks if BLOCK_HEADER.decode(b[0]).get("NumSources") == 1]
     assert len(source_blocks) == 1
     assert "CudaSmVersion" not in SOURCE_DATA.decode(source_blocks[0][1][4:])
+
+
+# --------------------------------------------------------------------------- #
+# N3：机器可读署名 + "今天发布的那几行不许少"
+# --------------------------------------------------------------------------- #
+def _fake_report(metrics):
+    """给 `select_metrics` / `build_plan` 的最小 kernel 报告替身（与真 dataclass 同构）。"""
+
+    class _Launch:
+        grid, block = (4, 1, 1), (32, 1, 1)
+
+    class _Section:
+        name = "Duration"
+
+        def __init__(self, ms):
+            self.metrics = ms
+
+    class _Report:
+        name = "synthetic_gemm(float const*, float const*, float*)"
+        launches = [_Launch()]
+        sections = [_Section(metrics)]
+
+    return _Report()
+
+
+def test_documented_rows_are_all_still_written_and_in_the_machine_block():
+    """**不许少发**：`NCU_ROWS` 里每一行 `documented` 的同源量今天都还要被写出去。
+
+    这条是"规则没有顺手把已发布的东西砍掉"的回归线：把档位判定写成"一律不许用 ncu 名"
+    （或漏掉默认值），这里会红。同时钉住机器可读块覆盖**每一个**写入值。
+    """
+    from kernoscope.ncrep.substitute import build_plan, render_sidecar
+    from kernoscope.ncrep.ncu_rows import NCU_ROWS
+    from kernoscope.provenance import Metric, Provenance
+
+    documented = tuple(r for r in NCU_ROWS if r.source_class.value == "documented")
+    assert len(documented) == 7, "白名单里那 7 行今天都是 documented"
+    metrics = [Metric(r.name, 1.0, Provenance.EXACT, unit=r.from_units[0],
+                      source=f"fixture:{r.section}") for r in documented]
+    plan = build_plan(_fake_report(metrics), packet={"verdicts": []}, tool_version="test")
+    written = {m.name for m in plan.metrics}
+    assert written == {r.name for r in documented}, written
+    assert plan.dropped_by_namespace == [] and plan.dropped_by_source_class == []
+    assert "ks__" not in " ".join(written)
+
+    text = render_sidecar(plan, ncu_rep_path="out.ncu-rep")
+    block = _parse_json_block(text)
+    entries = {w["name"]: w for w in block["written"]}
+    assert set(entries) == written, "机器块必须覆盖每个写入值（一个都不能漏署名）"
+    for name, entry in entries.items():
+        assert entry["ncu_name"] == name, "同源行写在 ncu 自己的名字下（同名）"
+        assert entry["source_class"] == "documented"
+        assert entry["origin"].startswith("fixture:"), "出处必须带出来，不能只有档位"
+    assert block["not_written_by_source_class"] == []
+    assert "gpu__time_duration.sum" in text          # 人读表格里仍然逐行列出
+
+
+def test_sidecar_keeps_the_human_table_and_appends_the_machine_block():
+    """人读表格照旧（证据要能直接粘进 issue），机器块**追加**在最后，不替换任何段落。"""
+    from kernoscope.ncrep.substitute import build_plan, render_sidecar
+    from kernoscope.provenance import Metric, Provenance
+
+    plan = build_plan(_fake_report([
+        Metric("gpu__time_duration.sum", 22.5248, Provenance.EXACT, unit="ms",
+               source="CUPTI activity"),
+        Metric("launch__grid_size", 4096.0, Provenance.EXACT, source="CUPTI activity"),
+    ]), packet={"verdicts": []}, tool_version="0.2.0")
+    text = render_sidecar(plan, ncu_rep_path="out.ncu-rep")
+    # 老段落一个都没少
+    assert "# kernoscope-substitute-v1 attribution / 署名" in text
+    assert "| metric | value | our unit | unit (written) " in text
+    assert "| `gpu__time_duration.sum` | 22,524,800（我们的值 22.5248 ms × 1,000,000）" in text
+    assert "表格行不会渲染" in text
+    # 机器块在最后
+    assert text.rstrip().endswith("```")
+    assert text.index(ATTRIBUTION_JSON_MARK) > text.index("表格行不会渲染")
+    block = _parse_json_block(text)
+    assert block["schema"] == ATTRIBUTION_JSON_SCHEMA
+    assert block["source_classes"]["documented"] == (
+        "NVIDIA 公开文档/公开头文件定义了这个量及其单位（例：NVML_FI_DEV_* 在公开的 nvml.h 里）")
+    by_name = {w["name"]: w for w in block["written"]}
+    assert by_name["gpu__time_duration.sum"]["unit"] == "ns"       # 写进文件的单位
+    assert by_name["gpu__time_duration.sum"]["our_unit"] == "ms"   # 我们的单位（换算可复核）
+    assert by_name["launch__grid_size"]["ncu_name"] == "launch__grid_size"
+
+
+def test_ncu_named_row_that_is_not_documented_is_refused_at_the_profile_layer(monkeypatch):
+    """最底层的写法也要拒：绕开 `select_metrics` 直接 `build_report` 也不行。
+
+    `build_report` 是"这段字节就此成为一份 `.ncu-rep`"的那一步，
+    所以档位规则在它前面还有一道门（由 `substitute.assert_writable` 提供）；
+    这里钉住那道门**真的会炸**，而不是只写在文档里。
+    """
+    from dataclasses import replace
+
+    from kernoscope.ncrep import ncu_rows
+    from kernoscope.ncrep.source_class import SourceClass
+    from kernoscope.ncrep.substitute import SubstituteRefused, assert_writable
+
+    row = ncu_rows.row_for("launch__thread_count")
+    assert row is not None
+    monkeypatch.setitem(ncu_rows._BY_NAME, row.name,
+                        replace(row, source_class=SourceClass.DOCUMENTED_ADJACENT))
+    with pytest.raises(SubstituteRefused) as e:
+        assert_writable([RepMetric("launch__thread_count", 1024.0)])
+    assert "launch__thread_count" in str(e.value)
+
+    # 降级后 consensus_check 也必须点名（表里不容许"登记了却写不出去"的行）
+    problems = ncu_rows.consensus_check()
+    assert any("launch__thread_count" in p for p in problems), problems
+    # 反面对照：同一行恢复 documented ⇒ 检查全绿、也能继续写（说明拒绝的是档位，不是这个名字）
+    monkeypatch.setitem(ncu_rows._BY_NAME, row.name, row)
+    assert ncu_rows.consensus_check() == []
+    assert_writable([RepMetric("launch__thread_count", 1024.0)])

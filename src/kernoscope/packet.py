@@ -36,8 +36,10 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from . import __version__
+from .analyze.cost import J_PER_KWH
 from .provenance import Metric, Provenance, fmt_bytes, to_bytes
-from .refusals import Refusal, RefusalCode, Remedy, code_title, default_remedy
+from .refusals import (CONDITIONAL_BASIS, CONDITIONAL_PROVENANCE, Refusal, RefusalCode,
+                       Remedy, code_title, conditional_fact_keys, default_remedy)
 
 PACKET_SCHEMA_VERSION = 1
 # v1.1（追加式，向后兼容）：加 `actionable` 与 `schema_revision`。主版本不动是因为
@@ -618,6 +620,104 @@ def _environment_premises(rep: Any) -> list[Premise]:
     return out
 
 
+# --------------------------------------------------------------------------
+# 反事实视图（条件答案，C1 的延伸）—— 缺**用户必须给的输入**时，不许 dead-end
+# --------------------------------------------------------------------------
+# 实测的失败形态：没给价格 ⇒ `cost_per_token` 是 `refused/no_price`，包里连一条事实都
+# 没有；读包的 agent 只有两条路 —— 去别处编一个价，或者放弃这个结论。判决不变
+# （没给输入就是没给），但**附加**一个条件句："如果电价是 0.8 元/kWh，那么……"。
+#
+# 两个假设数是**示例性的**（不是测量、不是统计结论），只作为条件句的输入出现，
+# 名字里就写着"假设"（`assumed_*`）；结果一律 `if_*` + `if_provenance=estimated`。
+ASSUMED_PRICE_PER_KWH = 0.8            # 示例电价（元/kWh）
+ASSUMED_TOKENS_PER_STEP = 1_200_000    # 示例每步 token 数
+
+
+def _window_seconds(rep: Any) -> float | None:
+    """窗口秒数 —— 报告里没有单独的窗口秒指标，从两个**实测**值反推：能量 ÷ 平均功率。"""
+    energy = metric_value(rep, "meas__window_energy_j")
+    power = metric_value(rep, "meas__window_power_mean_w")
+    if energy is None or power is None or float(power) <= 0:
+        return None
+    return float(energy) / float(power)
+
+
+def _cost_currency(rep: Any) -> str:
+    """成本口径的币种：只从报告里**已有的成本行**的单位前缀取（`--ks-currency` 的产物）。
+
+    条件答案里的钱必须与报告同币种 —— 写死 "CNY" 在 `--ks-currency USD` 的机器上就是
+    又一个"数字与单位对不上"的小谎。
+    """
+    for name in ("ks__cost_per_mtok", "ks__cost_per_hour", "ks__cost_per_hour_energy"):
+        m = find_metric(rep, name)
+        unit = str(getattr(m, "unit", "") or "")
+        if "/" in unit and unit.split("/")[0]:
+            return unit.split("/")[0]
+    return "CNY"
+
+
+def _conditional_cost_facts(rep: Any, *, cost_per_hour: float | None = None,
+                            tokens_s: float | None = None,
+                            refusal_code: str = "") -> dict[str, Any]:
+    """反事实视图：把缺的那个输入假设掉，算出"如果是这样，会是多少"。
+
+    三条纪律（调用侧不再重复）：
+      ① 只用报告里**已经有的**量（实测能耗/平均功率、窗口内 step 数、已有的每小时成本）
+         与一个命名清楚的假设；
+      ② 返回的键全部可编程：`assumed_*` = 假设的输入，`if_*` = 该假设下的值，
+         `if_basis`/`if_provenance` = 这两个词本身（人话里也原样印出）；
+      ③ 算不出来就返回空 dict —— **不硬凑**（没有实测能量/平均功率就没有可条件的量）。
+
+    `cost_per_hour` / `tokens_s` 是调用方**已经拿到的真值**（有就不假设），所以同一段代码
+    覆盖三种缺法：缺价格、缺 token 数、两个都缺。
+    """
+    facts: dict[str, Any] = {}
+    assumed_codes: list[str] = []
+    cur = _cost_currency(rep)
+
+    # ① 缺价格 ⇒ 假设电价：每小时成本 = 实测平均功率 × 假设电价
+    hourly = float(cost_per_hour) if cost_per_hour is not None else None
+    if hourly is None:
+        power_w = metric_value(rep, "meas__window_power_mean_w")
+        if power_w is None:
+            window_s = _window_seconds(rep)
+            energy = metric_value(rep, "meas__window_energy_j")
+            if energy is not None and window_s:
+                power_w = float(energy) / window_s
+        if power_w is not None:
+            facts["assumed_price_per_kwh"] = ASSUMED_PRICE_PER_KWH
+            assumed_codes.append(RefusalCode.NO_PRICE.value)
+            hourly = float(power_w) * 3600.0 / J_PER_KWH * ASSUMED_PRICE_PER_KWH
+            facts["if_cost_per_hour"] = float(f"{hourly:.4g}")
+
+    # ② 缺 token 数 ⇒ 假设 token/step：tokens/s = 假设 × 窗口内 step 数 ÷ 窗口秒数
+    rate = float(tokens_s) if tokens_s else None
+    if rate is None:
+        steps = metric_value(rep, "ks__steps_in_window")
+        window_s = _window_seconds(rep)
+        if steps is not None and float(steps) > 0 and window_s:
+            facts["assumed_tokens_per_step"] = ASSUMED_TOKENS_PER_STEP
+            assumed_codes.append(RefusalCode.NO_TOKENS.value)
+            rate = float(ASSUMED_TOKENS_PER_STEP) * float(steps) / window_s
+            facts["if_tokens_s"] = float(f"{rate:.4g}")
+
+    # ③ 条件单位成本：两个量（每小时成本 + 吞吐）都成立才给 —— 少一个就是又一个假数
+    if hourly is not None and rate:
+        facts["if_cost_per_mtok"] = float(f"{hourly * 1e6 / (rate * 3600.0):.4g}")
+
+    if not facts:
+        return {}
+    # 缺的是哪个输入：拒绝码在前（判词自己的 code），再补条件句假设掉的输入码
+    codes = ([refusal_code] if refusal_code else [])
+    codes += [c for c in assumed_codes if c not in codes]
+    if codes:
+        facts["if_missing"] = ",".join(codes)
+    facts["if_currency"] = cur
+    facts["if_basis"] = CONDITIONAL_BASIS
+    facts["if_provenance"] = CONDITIONAL_PROVENANCE
+    return facts
+
+
 def _verdict_cost(rep: Any) -> Verdict | None:
     """成本判词（C1）—— 这个工具存在的理由：把秒换算成钱。
 
@@ -625,8 +725,11 @@ def _verdict_cost(rep: Any) -> Verdict | None:
       * 有 token 数 + 价格 → 给 ¥/Mtoken（外加 token/s 与 J/token）；
       * 只有一半输入     → 给算得出来的那一半（例如只要功率与电价就有 ¥/h），
                             另一半用带 code 的拒绝说清楚该加哪个开关；
+                            缺 token 数时**附加**一个条件答案（"如果每步 1.2M token"）；
       * 都没有           → refused + remedy（`no_tokens` / `no_price` / `no_energy`），
-                            agent 据此知道下一步该传什么，而不是猜。
+                            并在有实测能量时**附加**条件答案（"如果电价 0.8 元/kWh，
+                            那么 ¥X/h、¥Y/Mtoken"）—— 拒绝不再 dead-end，但判决不变：
+                            `if_*` 一律标注 `estimated/conditional`，绝不写成实测。
     """
     per_mtok = find_metric(rep, "ks__cost_per_mtok")
     per_hour = find_metric(rep, "ks__cost_per_hour")
@@ -669,13 +772,21 @@ def _verdict_cost(rep: Any) -> Verdict | None:
                    + (f"（{float(tokens_s):,.0f} token/s、{float(j_per_token):.3g} J/token）"
                       if tokens_s and j_per_token is not None else "")))
 
-    # ---- ② 只有每小时成本：仍是有用的部分结论 ----
+    # ---- ② 只有每小时成本：仍是有用的部分结论（+ 缺 token 数时的条件答案）----
     if per_hour is not None and per_hour.value is not None:
         facts = {"per_hour": round(float(per_hour.value), 4),
                  "tokens_s": round(float(tokens_s), 1) if tokens_s else None}
         if kernel_cost is not None and top:
             facts["top_kernel"] = _clip(top, FACT_STR_LIMIT)
             facts["top_kernel_per_hour"] = round(float(kernel_cost), 4)
+        # 缺 token 数 ⇒ 单位成本给不出（no_tokens），但**条件答案**给得出：
+        # "如果每步 1.2M token，那么 ¥X/Mtoken"。状态仍是 soft（每小时成本是真的），
+        # 条件部分由 `if_basis/if_provenance` 自己声明出处 —— 不改 `provenance`，
+        # 那是给 `per_hour`（真值）的，不能被条件值顶替。
+        facts.update(_conditional_cost_facts(
+            rep, cost_per_hour=float(per_hour.value), tokens_s=tokens_s,
+            refusal_code=(per_mtok.refusal.code.value
+                          if per_mtok is not None and per_mtok.refusal is not None else "")))
         return Verdict(
             id="cost_per_token", question="这次推理/训练每百万 token 花多少钱", status=SOFT,
             facts=facts, value=round(float(per_hour.value), 4), unit=per_hour.unit,
@@ -685,14 +796,25 @@ def _verdict_cost(rep: Any) -> Verdict | None:
             claim=f"每小时成本 {float(per_hour.value):.4g} {per_hour.unit}"
                   "（还差每步 token 数才能给单位成本）")
 
-    # ---- ③ 给不出钱：拒绝 + 该加哪个开关 ----
+    # ---- ③ 给不出钱：拒绝 + 该加哪个开关 +（有实测量就算）条件答案 ----
     ref_metric = next((m for m in (per_mtok, per_hour, energy)
                        if m is not None and getattr(m, "refusal", None) is not None), None)
     if ref_metric is None:
         return None
-    return _refused("cost_per_token", "这次推理/训练每百万 token 花多少钱", ref_metric,
-                    premises, ("ks__cost_per_mtok", "ks__cost_per_hour",
-                               "meas__window_energy_j"))
+    v = _refused("cost_per_token", "这次推理/训练每百万 token 花多少钱", ref_metric,
+                 premises, ("ks__cost_per_mtok", "ks__cost_per_hour",
+                            "meas__window_energy_j"))
+    facts = _conditional_cost_facts(
+        rep, tokens_s=tokens_s, refusal_code=ref_metric.refusal.code.value)
+    if facts:
+        v.facts = facts
+        # refused 判词没有 `value`（有测试守），所以这里的 provenance **只可能**描述
+        # facts 里那个条件答案：出处是 estimated（条件值不是测量）。没有条件答案时
+        # 不写 provenance —— 保持旧包的形状，别让读包的人以为拒绝本身有出处。
+        v.provenance = CONDITIONAL_PROVENANCE
+        v.claim += (f"；另有条件答案（{'、'.join(conditional_fact_keys(facts))}，"
+                    f"出处 {CONDITIONAL_PROVENANCE}）")
+    return v
 
 
 def _verdict_truth(rep: Any) -> Verdict | None:
@@ -1684,14 +1806,46 @@ def _bytes_phrase(v: dict[str, Any]) -> str:
     return "?"
 
 
+def _conditional_phrase(f: dict[str, Any]) -> str:
+    """条件答案的人话 —— 假设、结果、"这不是实测"三件必须**在同一句**里。
+
+    机器字段名（`if_basis` / `if_provenance` 的**值**）原样印出来：一屏契约要求包里的
+    每个 fact 都能在人视图里看到；藏起来就等于两个视图分叉（与 M13 的 basis/money 同理）。
+    """
+    if not conditional_fact_keys(f):
+        return ""
+    cur = str(f.get("if_currency") or "CNY")
+    assumed: list[str] = []
+    if f.get("assumed_price_per_kwh") is not None:
+        assumed.append(f"假设价格 {f['assumed_price_per_kwh']} {cur}/kWh")
+    if f.get("assumed_tokens_per_step") is not None:
+        assumed.append(f"假设 {f['assumed_tokens_per_step']} token/step")
+    got: list[str] = []
+    if f.get("if_tokens_s") is not None:
+        got.append(f"{f['if_tokens_s']} token/s")
+    if f.get("if_cost_per_hour") is not None:
+        got.append(f"{f['if_cost_per_hour']} {cur}/h")
+    if f.get("if_cost_per_mtok") is not None:
+        got.append(f"{f['if_cost_per_mtok']} {cur}/Mtoken")
+    head, tail = "、".join(assumed), "、".join(got)
+    body = f"{head} ⇒ {tail}" if head and tail else (head or tail)
+    tags = (f"if_basis={f.get('if_basis')}、if_provenance={f.get('if_provenance')}"
+            + (f"、if_missing={f['if_missing']}" if f.get("if_missing") else ""))
+    return f"条件估计：{body}（{tags}；条件值不是实测）"
+
+
 def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
     """判词的一句话（散文只在这里生成，包与报告里都不存它）。"""
     fid = v.get("id", "")
     f = v.get("facts") or {}
     if v.get("status") == REFUSED:
-        # 只给「哪一类拒绝」：怎么办由下面的 remedy 行负责（同一句话不印两遍）
+        # 只给「哪一类拒绝」：怎么办由下面的 remedy 行负责（同一句话不印两遍）。
+        # 但**条件答案**必须印出来（一屏契约：包里的 fact 都要能在人视图看到）——
+        # 它正是"拒绝不再 dead-end"的那一半。
         code = (v.get("refusal") or {}).get("code", "?")
-        return f"不给数字：{code_title(code)}"
+        line = f"不给数字：{code_title(code)}"
+        cond = _conditional_phrase(f)
+        return f"{line}；{cond}" if cond else line
     if fid == "kernel_time":
         return (f"最耗时的是 {f.get('top', '?')}（{f.get('top_ms')} ms / {f.get('launches')} 次，"
                 f"占 kernel 时间 {f.get('share_pct')}%），进程内 kernel 时间合计 "
@@ -1760,6 +1914,9 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
             cur = (v.get("unit") or "CNY/Mtoken").split("/")[0] or "CNY"
             bits.append(f"最贵的是 {f['top_kernel']}"
                         f"（{f.get('top_kernel_per_hour')} {cur}/h 量级）".strip())
+        cond = _conditional_phrase(f)   # 缺 token 数时的那一半：条件单位成本
+        if cond:
+            bits.append(cond)
         return "；".join(bits) or "成本账"
     if fid == "saving_estimate":
         if f.get("basis") == "time_share":

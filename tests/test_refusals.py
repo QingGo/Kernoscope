@@ -157,3 +157,32 @@ def test_section_histogram_still_works():
                              severity="degraded"))
     assert s.provenance is Provenance.UNAVAILABLE
     assert s.n_unavailable == 1
+
+
+def test_conditional_answer_labels_match_the_provenance_vocabulary():
+    """反事实视图（条件答案）的命名纪律：「拒绝」的第二半只能是条件值，不许像测量。
+
+    为什么这条放在拒绝的测试文件里：条件答案是「不给数」这种输出的第二半
+    （为什么 + 怎么办 + **如果……那么……**），不是新判词、也不是新 code。行为级测试
+    （缺价格 → 包里出现条件成本）在 `tests/test_packet.py`；这里守的是**词表** ——
+    `refusals.py` 不能 import `provenance.py`（后者反过来 import 前者），所以
+    "条件值的出处就是 `estimated`" 这层一致性只能由测试钉住。
+    """
+    from kernoscope.provenance import COUNTER_NAMESPACES
+    from kernoscope.refusals import (CONDITIONAL_ASSUMED_PREFIX, CONDITIONAL_BASIS,
+                                     CONDITIONAL_PROVENANCE, CONDITIONAL_VALUE_PREFIX,
+                                     conditional_fact_keys)
+
+    assert CONDITIONAL_PROVENANCE == Provenance.ESTIMATED.value
+    assert CONDITIONAL_PROVENANCE not in (Provenance.MEASURED.value, Provenance.EXACT.value)
+    assert CONDITIONAL_BASIS == "conditional"
+    assert CONDITIONAL_ASSUMED_PREFIX == "assumed_" and CONDITIONAL_VALUE_PREFIX == "if_"
+
+    facts = {"per_mtok": 0.0067, "assumed_price_per_kwh": 0.8, "if_cost_per_mtok": 0.0067,
+             "if_basis": CONDITIONAL_BASIS, "if_provenance": CONDITIONAL_PROVENANCE}
+    keys = conditional_fact_keys(facts)
+    assert keys == ["assumed_price_per_kwh", "if_basis", "if_cost_per_mtok", "if_provenance"]
+    for k in keys:
+        assert not k.startswith("meas__") and not k.startswith("ks__"), k
+        assert not k.startswith(COUNTER_NAMESPACES), k
+    assert conditional_fact_keys({"per_mtok": 0.0067}) == []

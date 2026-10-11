@@ -83,7 +83,7 @@ $ ncu --set basic -- python train.py
 | **覆盖更多 ncu 功能** | 不与 NVIDIA 正面对撞 | 两条可度量的线：**同源覆盖**（同源量就该写同名同单位）+ **决策覆盖**（真实裁决问题的三态比例，见 [COVERAGE.md](COVERAGE.md)） |
 | **需要特权计数器的精确值** | 不猜、不编 | 报 `n/a` + `code` + 原因 + 替代口径。「不做」的对象是**精确值**，不是**那个问题** |
 | **没有前提的数字** | 可判定性 | 结构化拒绝：`code` + `observed` + `threshold` + 可执行的 remedy + 代价（见 §3） |
-| **GUI / Web UI** | 不做重资产 | 零安装的 Perfetto 输出；单文件 HTML 渲染器**尚未实现**（见 NON-GOALS.md §3.1） |
+| **GUI / Web UI** | 不做重资产 | 零安装的 Perfetto 输出；**单文件 HTML 证据单**（`--html`，零依赖/离线/无 JS，每个数字带出处角标） |
 
 有 `ncu`/`rocprof` 可用时，我们的定位是**编排它们**（`route` 给出该用哪个）并对结果做经济口径的
 融合；没有它们（容器/多租户/异构卡）时才降级到替代口径。缺哪个数据源就报告缺哪个，并给出
@@ -303,7 +303,15 @@ kernoscope --export-ncu-rep out.ncu-rep -o rep -- python bench.py
 
 #### 哪些名字写 ncu 名下、哪些留在自有命名空间
 
-规则只有一条：**同源才写 ncu 名下，且必须按 ncu 的单位与标签写**。
+规则只有一条：**同源才写 ncu 名下，且必须按 ncu 的单位与标签写** —— 而"同源"是**类型**，不是印象。
+每个量带一个 `source_class`（`ncrep/source_class.py`，四档）；只有 `documented`
+（NVIDIA 公开文档/公开头文件明确定义了该量与单位 —— 例：`NVML_FI_DEV_*` 家族就在公开的
+`nvml.h` 里）**且单位相符**，才允许出现在 ncu 名字下。`documented-adjacent`（公开符号名、
+无语义承诺，典型是头文件里没有、驱动却接受的 enum 值）/ `undocumented-observed`（实证观察，
+如不透明 blob）/ `vendor-tool-output`（别的工具的输出格式）一律只进 `ks__`/`est__`/`meas__`，
+或者被丢弃并记下原因（`dropped_by_source_class`）。两道门：`select_metrics()` 过滤 +
+`assert_writable()` 在写文件那一刻再判一次。旁路署名末尾还有一段**机器可读**署名
+（`kernoscope-attribution-json-v1`，用 `substitute.parse_attribution_json()` 读回）。
 
 | 类型 | 例子 | 写在 | 谁能看到 |
 |---|---|---|---|
@@ -507,6 +515,22 @@ kernoscope --ks-achieved-occupancy occ.json -k regex:<kernel> -- your_app
 （文件头注释列了三个必须保留的坑：时间戳要值依赖、跨 SM 只能用 `%globaltimer`、
 共享内存必须写后读否则被 ptxas 当死代码删掉）。
 
+**零源码改动（NVBit 版）**：闭源 kernel（cuBLAS / Inductor 生成 / 库里的）没有源码可改，
+上面这套"抄几行进自己的 kernel"的办法用不了。`tools/probes/nvbit_occupancy/` 用 NVBit 把同样
+两个 `%globaltimer` 读**在 SASS 层注入**（入口 = 偏置最小的指令、出口 = 偏置最大的指令），产出
+**同一种** `ks-occupancy-records v1` 记录 —— `kernoscope occupancy` 一行都不用改：
+
+```bash
+bash tools/probes/nvbit_occupancy/collect.sh -- <你的命令>   # 产出 ks-occupancy.txt（KS_OCC_KERNEL 选中那个 kernel）
+```
+
+覆盖率（记录到的 CTA 行 ÷ `grid_blocks`）低于 `KS_OCC_MIN_COVERAGE`（默认 95%）时它**不写**
+记录文件并在 stderr 说明原因 —— early-exit 的 kernel 会少报，部分数据算出来的分布只会偏小，
+不能变成结论。⚠️ 这个工具**未在真机验证**：NVBit 的可用性是**构建级**的（同一版本号的不同构建
+可以一个能用一个不能用，见 `tools/probes/nvbit_memtrace/README.md` 的版本矩阵）；第一次用请先
+小流量试采（`KS_OCC_DEBUG_CALLS=1` 确认注入调用真的执行），并与 `occupancy_probe.cu` 在同一个
+kernel 上对拍后再信它。细节见 [`tools/probes/nvbit_occupancy/README.md`](tools/probes/nvbit_occupancy/README.md)。
+
 ### 6.2 发射槽利用率与瓶颈方向（上界口径）
 
 官方 NVBit 的 `opcode_hist` 在默认模式下统计的是**每 warp 每条指令执行一次** ——
@@ -632,6 +656,16 @@ kernoscope diff a.json b.json --selfcheck machine-selfcheck.json --fail-on regre
 工具版本、kernel 选择）不同时判 `protocol_mismatch`；基线为 0 时走 `zero_baseline`
 （相对差无定义，只给绝对差值）。判据是**相对差 vs 相对误差带**（`%` 单位不再拿百分点去比 MDD）。
 
+### 7.1 缺输入时不再 dead-end（条件答案）
+
+同一条判词的 `facts` 里会附一个**命名清楚的条件答案**：缺价格时 `assumed_price_per_kwh`
+（示例 0.8 元/kWh）→ `if_cost_per_hour` / `if_cost_per_mtok`；缺 token 数时
+`assumed_tokens_per_step`（示例 1.2M）→ `if_tokens_s` / `if_cost_per_mtok`。条件值一律带
+`if_basis=conditional` + `if_provenance=estimated` + `if_missing=<code>`，一屏上写成
+「条件估计：假设价格 0.8 CNY/kWh ⇒ 0.24 CNY/h、0.006667 CNY/Mtoken（…条件值不是实测）」。
+**判决不变**：原拒绝码照旧保留、remedy 照旧指路；这是"把钱算出来给你看"的一条路，
+不是把拒绝改成通过。
+
 ### 8.2 接进 CI：`kernoscope gate`
 
 ```bash
@@ -665,6 +699,8 @@ kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
 | 一屏（三段式） | `--screen only`（默认铺在报告前） | 结论 → 发现（判词与前提）→ 路径（按挡住决策的程度排序）→ 本次代价 |
 | 决策包 | `--packet <f>`（`-` = stdout） | agent 用：判词 + 前提 + 结构化拒绝 + 代价，**≤4 KB 预算** |
 | Markdown 报告 | `--report-md rep.md` | 人读的 per-kernel 报告（0–6 固定结构） |
+| **MCP（可选、零常驻）** | `kernoscope mcp --stdio` | 只给**没有 shell** 的 agent runtime：逐行 JSON-RPC，4 工具（`capabilities_brief`/`profile`/`diff`/`selftest`）+ 3 资源；工具**不自己算数**（调既有子命令）。不进常驻入口层 —— 见 NON-GOALS.md N10 |
+| **HTML 证据单** | `--html evidence.html`（`-` = stdout） | 给人看/截图/贴 issue：**单文件**、离线可开、零 JS、无服务器；结论 → 判词/前提（每格带 exact/measured/estimated/derived 角标，拿不到的数字印 `n/a` + 拒绝码而不是 0）→ 拒绝与补救 → 没测到什么 → 本次代价；≤64 KB |
 | CSV | `--csv` | 表格分析；多出 `provenance` / `resolution` 列 |
 | JSON | `-o rep` → `rep.ksreport.json` | 机器消费、回归对比（带 `schema_version`） |
 | Perfetto trace | `-o rep` → `rep.perfetto.json` | 丢进 <https://ui.perfetto.dev> 看时间线，零安装 |

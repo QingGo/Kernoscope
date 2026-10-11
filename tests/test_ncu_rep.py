@@ -576,3 +576,73 @@ def test_cli_uses_the_isolated_reader(monkeypatch):
 
     cli_mod._attach_truth(FakeRep(), "/tmp/whatever.ncu-rep", lambda *_: None)
     assert calls == ["/tmp/whatever.ncu-rep"]
+
+
+# --------------------------------------------------------------------------- #
+# N3：来源档位（`source_class`）是类型，不是注释
+# --------------------------------------------------------------------------- #
+# 这一节钉的是"名字与来源相容"这条规则的边界：有人写错、或者规则被回退时，
+# 必须在**最底层的那一处**（唯一拿得到 ncu 行定义的地方）拒绝，而不是靠调用方自觉。
+def test_source_class_enum_is_a_str_enum_with_the_four_approved_levels():
+    """四档的名称与含义由 NON-GOALS 的 N3 钉住；`str` 子类便于直接进 JSON/CLI。"""
+    from kernoscope.ncrep.source_class import SourceClass
+
+    assert [c.value for c in SourceClass] == [
+        "documented", "documented-adjacent", "undocumented-observed", "vendor-tool-output"]
+    assert isinstance(SourceClass.DOCUMENTED, str)
+    assert SourceClass("documented-adjacent") is SourceClass.DOCUMENTED_ADJACENT
+    # 每一档都要能自证"为什么如此"（机器可读署名里逐档印出来）
+    assert "NVML_FI_DEV_*" in SourceClass.DOCUMENTED.justification
+    assert "enum" in SourceClass.DOCUMENTED_ADJACENT.justification
+    assert "blob" in SourceClass.UNDOCUMENTED_OBSERVED.justification
+
+
+def test_consensus_check_rejects_a_row_whose_source_class_forbids_its_own_name(monkeypatch):
+    """登记在 `NCU_ROWS` 里却不许用 ncu 名 = 表与规则脱节：自查必须点名，而不是静默。
+
+    没有这一条，降级一行的 `source_class` 会得到一个"永远写不出去、但看起来还在白名单里"
+    的行 —— 那种状态最容易被下一个人误读成"这行能用"。
+    """
+    from dataclasses import replace
+
+    from kernoscope.ncrep import ncu_rows
+    from kernoscope.ncrep.source_class import SourceClass
+
+    row = ncu_rows.row_for("launch__grid_size")
+    assert row is not None
+    monkeypatch.setitem(ncu_rows._BY_NAME, row.name,
+                        replace(row, source_class=SourceClass.UNDOCUMENTED_OBSERVED))
+    problems = ncu_rows.consensus_check()
+    assert any("launch__grid_size" in p and "undocumented-observed" in p for p in problems), \
+        problems
+    # 反过来：档位回到 documented，这条问题就消失（其余自洽性检查仍然绿）
+    monkeypatch.setitem(ncu_rows._BY_NAME, row.name, row)
+    assert ncu_rows.consensus_check() == []
+
+
+def test_row_lookup_refuses_a_name_or_unit_that_cannot_be_published(monkeypatch):
+    """`allows_ncu_row_name` / `ncu_name_refusal`：**单一判定入口**，理由要能说清是哪道门。
+
+    两个调用方（`select_metrics` 的过滤、`assert_writable` 的兜底）都走这里，
+    所以回退只有一处可回退 —— 这也是"规则可测试"的前提。
+    """
+    from dataclasses import replace
+
+    from kernoscope.ncrep import ncu_rows
+    from kernoscope.ncrep.source_class import SourceClass
+
+    assert ncu_rows.allows_ncu_row_name("gpu__time_duration.sum", "ms") is True
+    assert ncu_rows.allows_ncu_row_name("gpu__time_duration.sum", "us") is False
+    assert ncu_rows.ncu_name_refusal("gpu__time_duration.sum", "ms") == ""
+    assert "单位" in ncu_rows.ncu_name_refusal("gpu__time_duration.sum", "us")
+    assert "白名单" in ncu_rows.ncu_name_refusal("nope__not_a_row", "ms")
+
+    row = ncu_rows.row_for("gpu__time_duration.sum")
+    assert row is not None
+    monkeypatch.setitem(ncu_rows._BY_NAME, row.name,
+                        replace(row, source_class=SourceClass.DOCUMENTED_ADJACENT))
+    assert ncu_rows.allows_ncu_row_name(row.name, "ms") is False
+    reason = ncu_rows.ncu_name_refusal(row.name, "ms")
+    assert "documented-adjacent" in reason and "只有 documented" in reason
+    assert ncu_rows.source_class_of(row.name) is SourceClass.DOCUMENTED_ADJACENT
+    assert ncu_rows.source_class_of("nope__not_a_row") is None

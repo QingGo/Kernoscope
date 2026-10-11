@@ -29,8 +29,8 @@ from kernoscope.diff_cmd import diff_packets
 from kernoscope.provenance import Metric, Provenance, Section, fmt_bytes, to_bytes
 from kernoscope.packet import BUILDERS
 import kernoscope.packet as packet_mod
-from kernoscope.refusals import DEFAULT_REMEDIES
-from kernoscope.refusals import RefusalCode
+from kernoscope.refusals import CONDITIONAL_PROVENANCE, DEFAULT_REMEDIES
+from kernoscope.refusals import RefusalCode, conditional_fact_keys
 from kernoscope.report import DeviceInfo, KernelLaunch, KernelReport, Report
 
 
@@ -1059,3 +1059,189 @@ def test_discovery_ranking_never_pretends_to_be_money():
     assert "total_per_hour" not in facts and "total_per_mtok" not in facts
     assert facts.get("basis") == "time_share"
     assert facts.get("money") == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# 反事实视图（条件答案）：缺**用户必须给的输入**时，拒绝不再 dead-end
+# --------------------------------------------------------------------------
+def _cost_report(*, price: float | None, tokens: float | None = 1000.0) -> Report:
+    """成本口径的实测量齐全、只缺调用方输入的夹具。
+
+    数字刻意取整，条件答案可以手算对拍：
+      能量 300 J / 平均功率 300 W ⇒ 窗口 1.0 s；窗口内 10 个 step；10k token/s。
+      假设电价 0.8 元/kWh ⇒ 0.3 kWh/h × 0.8 = 0.24 元/h；
+      有 token 数时 ⇒ 0.24 × 1e6 ÷ (1e4 × 3600) = 0.006667 元/Mtoken。
+    """
+    rep = Report(device=DeviceInfo(name="RTX 4090", compute_capability="8.9", sm_count=128))
+    rep.wall_time_ns = 1_000_000_000
+    k = KernelReport("big_gemm", launch_count=10, launches=[_launch(i) for i in range(10)])
+    s = Section("CostLedger")
+    s.add(Metric.measured("meas__window_energy_j", 300.0, "J", source="NVML 功率积分"))
+    s.add(Metric.measured("meas__window_power_mean_w", 300.0, "W", source="能量 ÷ 窗口"))
+    s.add(Metric.derived("ks__steps_in_window", 10.0, "", source="窗口对齐的 launch 数"))
+    if tokens is not None:
+        s.add(Metric.derived("ks__tokens_per_s", 10_000.0, "token/s"))
+        s.add(Metric.derived("ks__j_per_token", 0.03, "J/token"))
+    if price is not None:
+        s.add(Metric.derived("ks__cost_per_hour", 0.24, "CNY/h"))
+    else:
+        s.add(Metric.unavailable("ks__cost_per_hour", "没有给价格：钱换算不了", "CNY/h",
+                                 code=RefusalCode.NO_PRICE))
+    if price is not None and tokens is not None:
+        s.add(Metric.derived("ks__cost_per_mtok", 0.006667, "CNY/Mtoken"))
+    else:
+        # 报告的 per_mtok 拒绝码与 cost.py 同源：先看价格、再看 token 数
+        code = RefusalCode.NO_PRICE if price is None else RefusalCode.NO_TOKENS
+        s.add(Metric.unavailable("ks__cost_per_mtok", "缺输入：单位成本给不出", "CNY/Mtoken",
+                                 code=code))
+    k.sections = [s]
+    rep.kernels = [k]
+    return rep
+
+
+def _cost_verdict(packet: dict) -> dict:
+    return next(v for v in packet["verdicts"] if v["id"] == "cost_per_token")
+
+
+def test_missing_price_gets_a_conditional_cost_answer():
+    """**反事实视图**：没有价格时，拒绝里必须带一个命名清楚的"如果……那么……"。
+
+    这条**能红**：把 `_conditional_cost_facts()` 从 ③ 分支去掉，包里的 facts 就只剩
+    拒绝码（旧行为），`assumed_price_per_kwh` / `if_cost_per_mtok` 全部消失。
+    """
+    p = build(_cost_report(price=None))
+    v = _cost_verdict(p)
+    assert v["status"] == "refused"
+    assert v["refusal"]["code"] == "no_price"          # 原拒绝码还在：缺什么必须说清楚
+    f = v["facts"]
+    assert f["assumed_price_per_kwh"] == 0.8            # 假设**具名**（不是匿名魔法数）
+    assert f["if_cost_per_hour"] == pytest.approx(0.24, rel=1e-3)
+    assert f["if_cost_per_mtok"] == pytest.approx(0.006667, rel=1e-3)
+    assert f["if_missing"] == "no_price"                # 条件句因缺哪个输入而生
+    assert f["if_provenance"] == "estimated"
+    assert f["if_basis"] == "conditional"
+    # 条件答案是**追加**的：包仍然压得进预算（常见情形）
+    assert packet_bytes(p) <= PACKET_SIZE_BUDGET_BYTES
+
+
+def test_missing_tokens_gets_a_conditional_unit_cost():
+    """缺 token 数（价格已给）：每小时成本照给，单位成本**给条件答案**（no_tokens 不 dead-end）。"""
+    p = build(_cost_report(price=0.8, tokens=None))
+    v = _cost_verdict(p)
+    assert v["status"] == "soft"                        # 每小时成本是真的 ⇒ 判词形状不变
+    assert v["facts"]["per_hour"] == pytest.approx(0.24, rel=1e-3)
+    f = v["facts"]
+    assert f["assumed_tokens_per_step"] == 1_200_000    # 假设具名
+    assert f["if_tokens_s"] == pytest.approx(1.2e7, rel=1e-6)
+    assert f["if_cost_per_mtok"] == pytest.approx(5.556e-6, rel=1e-3)
+    assert f["if_missing"] == "no_tokens"
+    assert f["if_provenance"] == "estimated" and f["if_basis"] == "conditional"
+    assert "if_cost_per_hour" not in f                  # 真有每小时成本时不重复报（要求 4）
+
+
+def test_both_inputs_missing_names_both_assumptions():
+    """既没价格也没 token 数：条件答案把**两个**假设都具名（功能说明里的那一句）。
+
+    "if price = 0.8 元/kWh 且 1.2M token/step，那么 ¥X/Mtoken" —— 两个假设都不是测量，
+    所以两个名字都必须写出来，且都要能在人话里读到。
+    """
+    p = build(_cost_report(price=None, tokens=None))
+    v = _cost_verdict(p)
+    assert v["status"] == "refused" and v["refusal"]["code"] == "no_price"
+    f = v["facts"]
+    assert f["assumed_price_per_kwh"] == 0.8
+    assert f["assumed_tokens_per_step"] == 1_200_000
+    assert f["if_missing"] == "no_price,no_tokens"
+    assert f["if_cost_per_hour"] == pytest.approx(0.24, rel=1e-3)
+    assert f["if_cost_per_mtok"] == pytest.approx(5.556e-6, rel=1e-3)
+    text = render_onepage(p)
+    assert "假设价格 0.8 CNY/kWh" in text and "假设 1200000 token/step" in text
+    assert "no_price,no_tokens" in text
+
+
+def test_giving_the_price_removes_the_conditional_block():
+    """真输入给了 ⇒ 行为与今天完全一样：ok + 单位成本，**没有**条件块（要求 4）。"""
+    p = build(_cost_report(price=0.8))
+    v = _cost_verdict(p)
+    assert v["status"] == "ok"
+    assert v["facts"]["per_mtok"] == pytest.approx(0.0067, rel=1e-3)
+    assert v["facts"]["tokens_s"] == pytest.approx(1e4, rel=1e-6)
+    assert conditional_fact_keys(v["facts"]) == []
+    assert "refusal" not in v and v["provenance"] == "derived"
+
+
+def test_conditional_answer_can_never_be_read_as_a_measurement():
+    """命名/出处纪律：条件值是 `estimated` + `conditional`，**永不**能被读成实测/精确。
+
+    条件值不占 `value`（refused 判词没有 value），不挂 `meas__*`/`ks__*`，也不落进
+    计数器命名空间 —— 名字承诺什么，出处就得是什么（PROVENANCE.md 的 R2/R3/R12）。
+    """
+    from kernoscope.provenance import COUNTER_NAMESPACES
+
+    v = _cost_verdict(build(_cost_report(price=None)))
+    f = v["facts"]
+    keys = conditional_fact_keys(f)
+    assert keys, "这个夹具必须产出条件答案，否则本测试没有分辨力"
+    for k in keys:
+        assert not k.startswith("meas__"), k
+        assert not k.startswith("ks__"), k
+        assert not k.startswith(COUNTER_NAMESPACES), k
+    assert v["status"] == "refused" and v["status"] not in ("measured", "exact")
+    assert v["provenance"] == CONDITIONAL_PROVENANCE
+    assert v["provenance"] not in ("measured", "exact")
+    assert "value" not in v, "条件值不许占 value（否则 diff/消费者会把它当结论）"
+    assert f["if_provenance"] == CONDITIONAL_PROVENANCE
+    # 对照：同一份报告给了价格之后，那些键一个都不该在包里出现
+    ok_facts = _cost_verdict(build(_cost_report(price=0.8)))["facts"]
+    assert not (set(keys) & set(ok_facts))
+
+
+def test_onepage_shows_the_conditional_cost_sentence():
+    """一屏契约：条件答案的每个 fact（含假设本身）都要能在人视图里看到。"""
+    p = build(_cost_report(price=None))
+    packet_bytes(p)
+    text = render_onepage(p)
+    v = _cost_verdict(p)
+    for key, val in (v["facts"] or {}).items():
+        assert str(val) in text, f"{key}={val} 没有出现在人视图（两个视图分叉）"
+    assert "条件估计" in text
+    assert "假设价格 0.8 CNY/kWh" in text
+    assert "if_basis=conditional" in text and "if_provenance=estimated" in text
+    assert "条件值不是实测" in text
+    assert "no_price" in text                     # 原始拒绝码仍可见（缺什么一目了然）
+
+    # 缺 token 数（soft 那一半）同样要印出来，否则 agent 只看到"钱给不出"
+    soft = render_onepage(build(_cost_report(price=0.8, tokens=None)))
+    assert "条件估计" in soft and "1200000 token/step" in soft
+
+
+def test_conditional_answer_survives_the_packet_budget():
+    """尺寸预算（要求 3）：条件答案挂在结论判词上 ⇒ 先裁次要 facts，再裁它。
+
+    `cost_per_token` 是 `PRIMARY_FACT_IDS` 之一，所以预算裁到"次要 facts"那一档时，
+    条件答案必须还在；真被裁到最后一级时，`cost.trimmed_ids` 要如实记下是哪条判词的
+    facts 没了（R-106：结论的数字不许静默消失）。
+    """
+    rep = _rich_report()
+    for m in (Metric.measured("meas__window_energy_j", 300.0, "J"),
+              Metric.measured("meas__window_power_mean_w", 300.0, "W"),
+              Metric.derived("ks__tokens_per_s", 10_000.0, "token/s"),
+              Metric.derived("ks__steps_in_window", 10.0),
+              Metric.unavailable("ks__cost_per_hour", "没有给价格", "CNY/h",
+                                 code=RefusalCode.NO_PRICE),
+              Metric.unavailable("ks__cost_per_mtok", "没有给价格", "CNY/Mtoken",
+                                 code=RefusalCode.NO_PRICE)):
+        rep.kernels[0].sections[0].add(m)
+    p = build(rep)
+    assert packet_bytes(p) <= PACKET_SIZE_BUDGET_BYTES
+    assert "facts_secondary" in p["cost"]["trimmed"], \
+        f"这个夹具必须真的走到裁剪（否则本测试没有分辨力）：{p['cost']['trimmed']}"
+    v = _cost_verdict(p)
+    facts = v.get("facts") or {}
+    if facts:
+        assert "if_cost_per_mtok" in facts, "条件答案不该先于次要 facts 被裁"
+        assert facts["if_basis"] == "conditional"
+    else:
+        trimmed = p["cost"].get("trimmed_ids") or []
+        assert "facts_primary:cost_per_token" in trimmed, \
+            f"facts 没了却查不到留痕：{p['cost'].get('trimmed')} / {trimmed}"

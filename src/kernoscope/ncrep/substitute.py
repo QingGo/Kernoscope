@@ -16,21 +16,35 @@ D3=A 的决策：为了让人能继续用他们已有的 Nsight Compute 工作�
   4. **旁路署名**（sidecar）：官方 Python API 读不到 comment，`ncu --import` 的 details 页
      也不渲染它（2025.3.1 实测）。所以同时在 `<file>.ATTRIBUTION.txt` 里放一份**人能读**的
      完整署名与指标表 —— 文件内署名 + 文件外署名，两条路都留。
+  5. **名字与来源必须相容（N3）**：量的来源被分成 `source_class` 四档
+     （`ncrep/source_class.py`），只有 `documented` **且**单位相符的行才允许写进 ncu 名字空间。
+     过去这条是散文政策、由人判断；现在是类型 + 机检：`select_metrics()` 按档位丢弃
+     （`dropped_by_source_class`，带机器可读原因），`assert_writable()` 再兜一次
+     （`gpu__time_duration.sum` 配错单位也在那里被挡下）。
+  6. **机器可读署名**：旁路署名的**末尾**追加一段 JSON（`ATTRIBUTION_JSON_MARK`），
+     逐条给出"写进去的值 → {名字, ncu 名?, 单位, 来源档位, 出处}"，外加被丢弃清单。
+     人读的表格**不动**（它是证据，要能直接粘进 issue），机器块附在后面。
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 from ..provenance import COUNTER_NAMESPACES, OUR_PREFIXES, Provenance
-from .ncu_rows import convert, row_for, section_of, unit_ok
+from .ncu_rows import (allows_ncu_row_name, convert, ncu_name_refusal, row_for,
+                       section_of, unit_ok)
 from .profile import RepMetric, RepSource, build_report, format_value
+from .source_class import SourceClass, allows_ncu_name
 from .writer import FILE_VERSION
 
 # 署名标记：下游/审计可以 grep 这个字符串判断"这份报告是不是替代口径产物"。
 ATTRIBUTION_MARK = "kernoscope-substitute-v1"
+# 机器可读署名的开始标记与 schema 名 —— 外部消费者按这两个字符串定位 JSON 块。
+ATTRIBUTION_JSON_MARK = "kernoscope-attribution-json-v1"
+ATTRIBUTION_JSON_SCHEMA = "kernoscope.attribution/1"
 # 写进文件的指标上限：`.ncu-rep` 的大小不是问题，问题是"读的人要能核"。
 # 超过上限时按"与决策最相关"的顺序截断（exact/measured 优先，然后 derived，最后 estimated），
 # 并把被截断的条数写进 comment —— 静默丢值就是另一种撒谎。
@@ -39,6 +53,35 @@ MAX_SUBSTITUTE_METRICS = 32
 
 class SubstituteRefused(RuntimeError):
     """拒绝生成 `.ncu-rep`：没有可署名的、前提成立的值。"""
+
+
+@dataclass(frozen=True)
+class SourceClassDrop:
+    """一个"名字与其来源档位不相容"因而被丢掉的值（机器可读，进署名）。
+
+    `name` 是它**原本**的名字（那个看起来像 ncu 名的名字），`reason` 是判定原因；
+    `ncu_*` 是"照着 ncu 的行定义本可以写的样子" —— 一起记下来，读者才能复核我们
+    到底拒绝了什么，而不是只看到一句"被拒"。
+    """
+
+    name: str
+    source_class: SourceClass
+    reason: str
+    ncu_name: str = ""
+    ncu_unit: str = ""
+    scale: float = 1.0
+    unit: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "source_class": self.source_class.value,
+            "reason": self.reason,
+            "ncu_name": self.ncu_name or None,
+            "ncu_unit": self.ncu_unit,
+            "scale": self.scale,
+            "unit": self.unit,
+        }
 
 
 @dataclass
@@ -57,6 +100,12 @@ class SubstitutePlan:
     dropped_over_cap: int = 0
     premises: list[str] = field(default_factory=list)
     comment: str = ""
+    #: 因**来源档位**（`source_class` 与 ncu 名不相容）被丢弃的值 + 机器可读原因（N3）。
+    dropped_by_source_class: list[SourceClassDrop] = field(default_factory=list)
+    #: 名字 → 量自己的单位（写 ncu 名的行：**我们的**单位，用来复核换算）。
+    our_unit_by_name: dict[str, str] = field(default_factory=dict)
+    #: 名字 → 这个值从哪来（`Metric.source` 原文，人可读的出处）。
+    source_by_name: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -80,12 +129,29 @@ def _refused_metric_names(packet: dict[str, Any] | None) -> set[str]:
 
 
 def assert_writable(metrics: Sequence[RepMetric]) -> None:
-    """第二道防线：进文件的名字不许落在 ncu 计数器命名空间里。"""
+    """第二道防线：进文件的名字不许落在 ncu 计数器命名空间里，且同源名必须**名字与来源相容**。
+
+    第一条（计数器命名空间）是老的防线；第二条是 N3 的：哪怕名字在 `NCU_ROWS` 白名单里，
+    只要那一行的 `source_class` 不是 `documented`、或单位与换算表不符，也一律拒绝。
+    这一层存在的理由是它**不依赖 `select_metrics` 的过滤**：写文件那一刻再判一次，
+    过滤被改窄、或者有人绕过 `select_metrics` 直接调 `build_report`，都会在这里炸。
+    """
     bad = [m.name for m in metrics if _is_counter_name(m.name)]
     if bad:
         raise SubstituteRefused(
             "拒绝写出：这些名字落在 ncu 计数器命名空间里（{0}）。我们拿不到计数器，"
             "把替代值挂在这些名字下面就是在伪造 ncu 读数".format(", ".join(sorted(bad)[:6])))
+    not_allowed = []
+    for m in metrics:
+        row = row_for(m.name)
+        if row is None:
+            continue                      # 自有命名空间：本来就该留在我们这边
+        if not allows_ncu_name(row.source_class, unit_ok(m.name, m.unit or None)):
+            not_allowed.append(ncu_name_refusal(m.name, m.unit or None))
+    if not_allowed:
+        raise SubstituteRefused(
+            "拒绝写出：这些同源行的名字与来源/单位不相容（N3）—— {0}".format(
+                "；".join(not_allowed[:4])))
 
 
 def _provenance_rank(p: Provenance) -> int:
@@ -97,7 +163,7 @@ def _provenance_rank(p: Provenance) -> int:
 def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
                    limit: int = MAX_SUBSTITUTE_METRICS
                    ) -> tuple[list[RepMetric], dict[str, str], dict[str, str], list[str],
-                              list[str], int]:
+                              list[str], list[SourceClassDrop], dict[str, str], int]:
     """从 kernel 报告里挑出**可以写进 `.ncu-rep`** 的指标。
 
     过滤规则（每条都有对应测试）：
@@ -106,37 +172,57 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
       * ncu 命名空间里的名字只允许 `ncu_rows.NCU_ROWS` 里的**同源行**，且值按 ncu 单位换算
         （`gpu__time_duration.sum`：我们的 ms × 1e6 = ncu 的 ns）。它们是 ncu 自己也会给出的
         同源量，写在 ncu 名下才是它该在的地方；代理/模型/成本类的量仍然只留在自有命名空间；
+      * **名字与来源档位必须相容（N3）**：白名单里的行还要 `source_class == documented`
+        且单位相符，才允许用 ncu 名（判定只在 `source_class.allows_ncu_name` 一处）。
+        别的档位（`documented-adjacent` / `undocumented-observed` / `vendor-tool-output`）
+        即使名字看起来一样，也不写进 ncu 名字空间，而是进 `dropped_by_source_class` + 原因；
       * 被拒判词引用过的不写（前提不成立）；
       * 值不是数字的不写（字符串型判词无法进 `.ncu-rep` 的 double 通道）。
+
     返回 (metrics, 名字→出处, 名字→写进文件的单位, 因前提不成立被丢弃的名字,
-    因命名空间/单位规则被丢弃的名字, 因超上限被丢弃的条数)。
+    因命名空间/单位规则被丢弃的名字, 因来源档位不相容被丢弃的记录, 我们自己的单位表,
+    因超上限被丢弃的条数)。**前六个位置与旧签名一致**，新加的档位记录插在第 6 位之后。
     """
     refused = _refused_metric_names(packet)
-    picked: list[tuple[Provenance, str, float, str, str]] = []
+    picked: list[tuple[Provenance, str, float, str, str, str]] = []
     dropped: list[str] = []
     by_namespace: list[str] = []
+    by_source_class: dict[str, SourceClassDrop] = {}
     for sec in getattr(kr, "sections", []) or []:
         for m in getattr(sec, "metrics", []) or []:
             if m.provenance is Provenance.UNAVAILABLE or m.value is None:
                 continue
             if _is_counter_name(m.name):
                 continue
-            if not m.name.startswith(OUR_PREFIXES) and row_for(m.name) is None:
+            row = row_for(m.name)
+            if not m.name.startswith(OUR_PREFIXES) and row is None:
                 by_namespace.append(m.name)
                 continue
             # V-9：白名单里的行带换算系数，系数只在"我们的单位确实是 from_units 里那个"时成立。
             # 单位不符就**不写这一行**（而不是乘错一个 1000× 的数）。
             # `m.unit or None` 会把空串悄悄变成"调用方拿不到单位"，于是**按假设换算**：
             # 工厂默认的 `unit=""` 就这样写出过 9.51e11 ns（R-110）。空串必须按"不知道"处理。
-            if row_for(m.name) is not None and not unit_ok(m.name, m.unit):
+            if row is not None and not unit_ok(m.name, m.unit):
                 by_namespace.append(m.name)
+                continue
+            # N3：名字与来源档位必须相容 —— 白名单只是"我们有这一行"的登记，
+            # 「能不能挂 ncu 名」由 source_class 判（只有 documented 且单位相符才行）。
+            # 这一条单独记原因（机器可读），因为"这个值是什么来源"与"名字错"是两件事：
+            # 前者要留在自有命名空间里发布，后者本来就该消失。
+            if row is not None and not allows_ncu_name(row.source_class, True):
+                by_source_class[m.name] = SourceClassDrop(
+                    name=m.name, source_class=row.source_class,
+                    reason=ncu_name_refusal(m.name, m.unit),
+                    ncu_name=row.name, ncu_unit=row.unit, scale=row.scale,
+                    unit=m.unit or "")
                 continue
             if m.name in refused:
                 dropped.append(m.name)
                 continue
             if isinstance(m.value, bool) or not isinstance(m.value, (int, float)):
                 continue
-            picked.append((m.provenance, m.name, float(m.value), sec.name, m.source or ""))
+            picked.append((m.provenance, m.name, float(m.value), sec.name,
+                           m.source or "", m.unit or ""))
     # 同一名字出现多次（多个 section）时保留第一次：`.ncu-rep` 里同名指标只能有一个值，
     # 而"哪个 section 的那个值"必须是我们能说清的（第一个即主口径）。
     seen: set[str] = set()
@@ -151,10 +237,13 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
     uniq = uniq[:limit]
     # **值保持我们的单位**：ncu 单位的换算只允许在 `build_report` 那一处发生
     # （早先这里也换一次，于是 ×1e6 变成了 ×1e12 —— 真机 raw 页抓到 3.75e13 ns）。
-    metrics = [RepMetric(name, value, "") for _, name, value, _, _ in uniq]
+    metrics = [RepMetric(name, value, "") for _, name, value, _, _, _ in uniq]
     units = {m.name: (row_for(m.name).unit if row_for(m.name) else "") for m in metrics}
     prov = {row[1]: row[0].value for row in uniq}
-    return metrics, prov, units, dropped, by_namespace, over
+    our_units = {row[1]: row[5] for row in uniq}
+    sources = {row[1]: row[4] for row in uniq}
+    return (metrics, prov, units, dropped, by_namespace,
+            [by_source_class[n] for n in sorted(by_source_class)], our_units, over)
 
 
 def build_plan(kr: Any, *, packet: dict[str, Any] | None = None,
@@ -170,21 +259,40 @@ def build_plan(kr: Any, *, packet: dict[str, Any] | None = None,
     launch = launches[0]
     source = RepSource(kernel_name=str(getattr(kr, "name", "") or ""),
                        grid=tuple(launch.grid), block=tuple(launch.block))
-    metrics, prov_by_name, unit_by_name, dropped, by_namespace, over = select_metrics(
-        kr, packet, limit=limit)
+    metrics, prov_by_name, unit_by_name, dropped, by_namespace, by_source_class, \
+        our_units, over = select_metrics(kr, packet, limit=limit)
     plan = SubstitutePlan(source=source, metrics=metrics, provenance_by_name=prov_by_name,
                           unit_by_name=unit_by_name, disclosure=disclosure,
                           device_name=device_name, compute_capability=str(compute_capability or ""),
                           dropped_by_refusal=dropped, dropped_by_namespace=by_namespace,
-                          dropped_over_cap=over)
+                          dropped_by_source_class=by_source_class,
+                          our_unit_by_name=our_units,
+                          source_by_name=select_metrics_sources(kr), dropped_over_cap=over)
     if not plan.ok:
         raise SubstituteRefused(
-            "拒绝写出：过滤掉「前提不成立」「单位语义不确定（非自有命名空间）」与不可用的指标后，"
-            "一个可署名的值都不剩（被丢弃：{0}）".format(
-                ", ".join(sorted(dropped + by_namespace)[:6]) or "无"))
+            "拒绝写出：过滤掉「前提不成立」「单位语义不确定（非自有命名空间）」"
+            "「来源档位与 ncu 名不相容」与不可用的指标后，一个可署名的值都不剩（被丢弃：{0}）".format(
+                ", ".join(sorted(dropped + by_namespace
+                                 + [d.name for d in by_source_class])[:6]) or "无"))
     plan.premises = _premises(kr, packet)
     plan.comment = render_comment(plan, tool_version=tool_version)
     return plan
+
+
+def select_metrics_sources(kr: Any) -> dict[str, str]:
+    """名字 → 值从哪来（`Metric.source` 原文；同名取第一次出现，与 `select_metrics` 一致）。
+
+    机器可读署名里"每个写入值的出处"这一格就取这里：人可读署名表只印 provenance 档位，
+    而"这个数是从哪条通道读来的"（NVML 采样 / CUPTI activity / cubin / 模型）
+    是复核时真正要看的东西，所以它必须进机器块。
+    """
+    out: dict[str, str] = {}
+    for sec in getattr(kr, "sections", []) or []:
+        for m in getattr(sec, "metrics", []) or []:
+            name = getattr(m, "name", "")
+            if name and name not in out:
+                out[name] = str(getattr(m, "source", "") or "")
+    return out
 
 
 def _premises(kr: Any, packet: dict[str, Any] | None) -> list[str]:
@@ -237,6 +345,11 @@ def render_comment(plan: SubstitutePlan, *, tool_version: str = "") -> str:
         lines.append("omitted (they live in ncu's namespace but we have no same-source row "
                      "definition for them, or the unit does not match the conversion table): "
                      + ", ".join(plan.dropped_by_namespace[:8]))
+    if plan.dropped_by_source_class:
+        lines.append("omitted (their source_class does not allow an ncu name; source class "
+                     "is not a hint, it is the publishing rule): "
+                     + ", ".join(f"{d.name}[{d.source_class.value}]"
+                                 for d in plan.dropped_by_source_class[:8]))
     if plan.dropped_over_cap:
         lines.append(f"omitted by size cap: {plan.dropped_over_cap} more values "
                      f"(see the sidecar for the full list of what exists on this machine)")
@@ -245,8 +358,81 @@ def render_comment(plan: SubstitutePlan, *, tool_version: str = "") -> str:
     return "\n".join(lines)
 
 
+def attribution_data(plan: SubstitutePlan) -> dict[str, Any]:
+    """机器可读署名（N3 的机检那一半）：**每个写入值 → 名字/ncu 名/单位/来源档位/出处**。
+
+    形状（:data:`ATTRIBUTION_JSON_SCHEMA` = ``kernoscope.attribution/1``）::
+
+        {
+          "schema": "kernoscope.attribution/1",
+          "rule": "只有 source_class=documented 且单位相符的值才允许出现在 ncu 名字下",
+          "source_classes": {档位: 判定依据},          # 四档，含 NVML_FI_DEV_* 那个例子
+          "written": [                                  # 一个写入值一条，顺序 = 文件里的顺序
+            {"name": ..., "value": ..., "ncu_name": ...|None, "unit": ..., "our_unit": ...,
+             "source_class": ..., "provenance": ..., "origin": ...}
+          ],
+          "not_written_by_source_class": [              # 被档位规则拒绝的值（带原因）
+            {"name": ..., "source_class": ..., "reason": ..., "ncu_name": ...}
+          ]
+        }
+
+    `name` 永远是**文件里真正出现的名字**：写 ncu 名的行，`name == ncu_name`；
+    自有命名空间的行 `ncu_name` 为 `null`（"这个值没有借 ncu 名"本身就是一条证据）。
+    """
+    written: list[dict[str, Any]] = []
+    for m in plan.metrics:
+        row = row_for(m.name)
+        written.append({
+            "name": m.name,
+            "value": float(m.value),
+            "ncu_name": row.name if row is not None else None,
+            "unit": plan.unit_by_name.get(m.name, "") or "",
+            "our_unit": plan.our_unit_by_name.get(m.name, "") or "",
+            "source_class": row.source_class.value if row is not None else None,
+            "provenance": plan.provenance_by_name.get(m.name, ""),
+            "origin": plan.source_by_name.get(m.name, ""),
+        })
+    return {
+        "schema": ATTRIBUTION_JSON_SCHEMA,
+        "rule": ("只有 source_class=documented（NVIDIA 公开文档/头文件定义了该量与单位）"
+                 "且单位相符的值，才允许写进 ncu 的名字空间；其余档位只进 "
+                 "ks__/est__/meas__，或带原因丢弃"),
+        "source_classes": {c.value: c.justification for c in SourceClass},
+        "written": written,
+        "not_written_by_source_class": [d.to_dict() for d in plan.dropped_by_source_class],
+    }
+
+
+def render_attribution_json(plan: SubstitutePlan) -> str:
+    """机器可读署名的文本形态：**一行标记 + 一段 fenced JSON**（便于 grep/定位）。"""
+    payload = json.dumps(attribution_data(plan), ensure_ascii=False, indent=2,
+                         sort_keys=False)
+    return (f"<!-- {ATTRIBUTION_JSON_MARK} schema={ATTRIBUTION_JSON_SCHEMA} -->\n"
+            "```json\n" + payload + "\n```")
+
+
+def parse_attribution_json(text: str) -> dict[str, Any]:
+    """从旁路署名里读回机器可读块（`render_attribution_json` 的逆操作）。
+
+    审计工具/测试用它，生产者也把它导出来：**读法与写法必须由同一处定义**，
+    否则下游各自 split 一次，格式一改就静默读空。找不到标记或 JSON 坏了就抛
+    `ValueError`（不返回空字典 —— "读不到"与"一个值都没写"必须可区分）。
+    """
+    if ATTRIBUTION_JSON_MARK not in text:
+        raise ValueError(f"署名里没有机器可读标记 {ATTRIBUTION_JSON_MARK!r}")
+    body = text.split(ATTRIBUTION_JSON_MARK, 1)[1]
+    fence = "```json"
+    if fence not in body or "```" not in body.split(fence, 1)[1]:
+        raise ValueError("机器可读标记后面没有完整的 ```json 块")
+    payload = body.split(fence, 1)[1].split("```", 1)[0]
+    data = json.loads(payload)
+    if not isinstance(data, dict) or data.get("schema") != ATTRIBUTION_JSON_SCHEMA:
+        raise ValueError(f"机器可读署名块的 schema 不是 {ATTRIBUTION_JSON_SCHEMA!r}")
+    return data
+
+
 def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path: str = "") -> str:
-    """文件外的署名（人能读、可 diff、可归档）：完整署名 + 全部写进去的值。"""
+    """文件外的署名（人能读、可 diff、可归档）：完整署名 + 全部写进去的值 + 机器可读块。"""
     lines = [f"# {ATTRIBUTION_MARK} attribution / 署名", ""]
     lines.append(f"file: {ncu_rep_path or '(未指定)'}")
     lines.append(f"producer: kernoscope {tool_version}".rstrip())
@@ -261,11 +447,16 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
     lines.append("")
     lines.append("## 写进报告的值")
     lines.append("")
-    lines.append("| metric | value | unit | provenance | 表格 |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| metric | value | our unit | unit (written) | source_class | provenance | 表格 |")
+    lines.append("|---|---|---|---|---|---|---|")
     for m in plan.metrics:
         row = row_for(m.name)
         where = "ncu（同源）" if row is not None else "raw/本工具"
+        our_unit = plan.our_unit_by_name.get(m.name, "") or "—"
+        written_unit = plan.unit_by_name.get(m.name, "") or "—"
+        # 名字写在 ncu 名字空间里的量，来源档位是它允许出现在这里的**依据**，
+        # 所以逐行印出来（人读的表格与机器块说的是同一件事）。
+        cls = row.source_class.value if row is not None else "自有命名空间（不借 ncu 名）"
         # 这里**不传单位**是刻意的：`plan.metrics` 的值保持**我们的**单位、单位字段是空
         # （见 `select_metrics` 末尾），而"我们的单位是否与换算系数匹配"已经在
         # `select_metrics` 里用**真单位**校验过了（R-110：空串不再被当成"按假设换算"）。
@@ -274,9 +465,8 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
         # 与 profile 的 details 文本用同一个 `format_value` —— 同一份产物里两种写法就是不一致。
         note = (f"（我们的值 {format_value(m.value)} ms × {format_value(row.scale)}）"
                 if row is not None and row.scale != 1.0 else "")
-        lines.append(f"| `{m.name}` | {format_value(value)}{note} | "
-                     f"{plan.unit_by_name.get(m.name, '') or '—'} "
-                     f"| {plan.provenance_by_name.get(m.name, '')} | {where} |")
+        lines.append(f"| `{m.name}` | {format_value(value)}{note} | {our_unit} | {written_unit} "
+                     f"| {cls} | {plan.provenance_by_name.get(m.name, '')} | {where} |")
     if plan.device_name or plan.compute_capability:
         lines.append("")
         lines.append("设备：`{0}` CC `{1}`（ncu 的首页设备行来自它自己的 PerfWorks 不透明块，"
@@ -298,6 +488,18 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
                      "写进 `.ncu-rep` 会被按 ncu 的单位与语义理解，所以宁可不写"
                      "（例：" + ", ".join(f"`{n}`" for n in plan.dropped_by_namespace[:3])
                      + ("…" if len(plan.dropped_by_namespace) > 3 else "") + "）。")
+    if plan.dropped_by_source_class:
+        lines.append("")
+        lines.append("## 因来源档位（source_class）与 ncu 名不相容而未写入的值")
+        lines.append("")
+        lines.append("行定义在白名单里，但那一行的来源**不允许**用 ncu 名字发布：只有 "
+                     "`documented`（NVIDIA 公开文档/头文件定义了该量与单位，例：整个 "
+                     "`NVML_FI_DEV_*` 家族在公开的 `nvml.h` 里）才可以；"
+                     "`documented-adjacent`/`undocumented-observed`/`vendor-tool-output` "
+                     "一律只进 `ks__`/`est__`/`meas__`。这一条是可机检的，见署名末尾的 JSON 块。")
+        lines.append("")
+        for d in plan.dropped_by_source_class:
+            lines.append(f"- `{d.name}`：source_class=`{d.source_class.value}`。{d.reason}")
     if plan.dropped_by_refusal:
         lines.append("")
         lines.append("## 因前提不成立而未写入的值")
@@ -313,6 +515,19 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
         lines.append("")
         for p in plan.premises:
             lines.append(f"- {p}")
+    # 机器可读的那一半**追加在最后**：人读表格一个字都不改（它是要粘进 issue 的证据），
+    # JSON 块给审计工具/agent 用（每个写入值的名字、ncu 名、单位、来源档位、出处，
+    # 以及被档位规则拒绝的值与原因）。
+    lines.append("")
+    lines.append("## 机器可读署名（JSON）")
+    lines.append("")
+    lines.append(f"`{ATTRIBUTION_JSON_MARK}` / schema `{ATTRIBUTION_JSON_SCHEMA}`："
+                 "每个写入值一条 `{name, value, ncu_name, unit, our_unit, source_class, "
+                 "provenance, origin}`；"
+                 "`ncu_name` 为 `null` 表示这个值**没有**借 ncu 名。"
+                 "被来源档位拒绝的值在同块的 `not_written_by_source_class` 里，带原因。")
+    lines.append("")
+    lines.append(render_attribution_json(plan))
     return "\n".join(lines) + "\n"
 
 

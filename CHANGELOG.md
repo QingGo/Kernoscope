@@ -281,10 +281,10 @@
 - `capabilities --brief` 的 `next_layer.bytes` 现在等于**它自己命名的那个命令的真实输出
   字节数**（以前用紧凑序列化算，低估 35%）；新增 `blocked_by_unavailable`。
 - `capabilities --json` 的输出不再多一个换行。
-- 文档命令门禁：**全部**可检命令（当前 57 条）都交给**真实解析器**（10 个子命令各有自己的
+- 文档命令门禁：**全部**可检命令（当前 62 条）都交给**真实解析器**（11 个子命令各有自己的
   `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
-  其中**读者面 11 条**逐字执行并断言结论（比例 11/57，不是"每条都断言"）。
+  其中**读者面 11 条**逐字执行并断言结论（比例 11/62，不是"每条都断言"）。
   注：这三个数字随代码走动，若与 `tests/test_documented_commands.py` 的断言不一致，以测试为准。
 
 ### 访存轨迹口径（NVBit）
@@ -312,6 +312,25 @@
   原句"v1.8.1 真机验证"不实，已删；另写明"不要 make 整个 tools / 架构变量用裸数字 /
   必须 NO_EAGER_LOAD=0 / 别把版本号当可用性凭据（同版本不同构建结果可以不同）"。
   新增 `tests/test_nvbit_smoke.py`：按文档真采一段轨迹并核对版本号（无 NVBit 时跳过）。
+
+### 零源码改动的达到 occupancy（NVBit 插桩，新增工具）
+
+- 新增 `tools/probes/nvbit_occupancy/`（NVBit 工具 + `collect.sh` + `Makefile` + README）：
+  把 `(smid, g0, g1)` 两个 `%globaltimer` 读**在 SASS 层注入**被测 kernel，产出与
+  `occupancy_probe.cu` **同一种** `ks-occupancy-records v1` 记录 —— 闭源 kernel
+  （cuBLAS / Inductor 生成 / 库里的）第一次能测达到 occupancy，被测 kernel **零源码改动**；
+  `kernoscope occupancy --from …` 与 CLI **一个字节都没改**。
+- 入口钩子 = 偏置最小的指令（每 CTA 一次，`atomicExch` 抢门）；出口钩子 = 偏置最大的指令
+  （每 warp 一次 `atomicMax.u64`，取**最后一个**收尾的 warp）。出口是**近似**：NVBit 没有
+  「CTA 结束」钩子，early exit 的 kernel 会少报。
+- **覆盖率纪律**：文件头写 `grid_blocks` / `cta_rows` / `coverage` / `coverage_ok`；
+  覆盖率低于 `KS_OCC_MIN_COVERAGE`（默认 95%）、同一个 kernel 被 launch 多次、或前后
+  grid/block 不一致时，工具在 stderr 逐条说明并**默认不写记录文件**
+  （`KS_OCC_ALLOW_PARTIAL=1` 才强行写出，文件带 `# coverage_ok 0`）；`collect.sh` 据此 exit 3。
+  部分数据不许静默变成分布（既有分析路径看不见 `coverage_ok`，所以拒绝发生在产出之前）。
+- ⚠️ **未在真机验证**：本工具在任何 GPU / 任何 NVBit 版本上都没有编译或运行过（本仓库只钉住过
+  官方 `mem_trace` 的 v1.7.7.3 + 老 Makefile 组合）。该目录 README 有专门的「未在真机验证」一节。
+- 新增 `tests/test_nvbit_occupancy.py`（19 条，无 GPU/无 NVBit 也能跑）。
 
 ### 测量口径（重要）
 
@@ -438,6 +457,66 @@
   实测 `--set basic` 是 21.6 KB / 200+ 行，和承诺不符（易用性实测 #3）。
   **要老行为就显式写 `--screen auto`**（显式给值时行为完全不变）。
 - `--screen` 的帮助文本同步写清三种取值的差别与"默认随 stdout 是不是终端变化"。
+
+### 单文件 HTML 证据单（N9）
+
+- 新增 `--html <path>`（`-` = stdout）：把决策包渲染成一个**自包含** `.html` —— 内联 CSS、
+  零外部 URL、零 JS、无服务器（它不是 Web UI，是"JSON → 一个文件"的渲染器；所以能截图、
+  能当附件、能离线打开）。渲染入口是 `kernoscope.html_view.render_html(packet, *, title, onepage_text)`，
+  也可 `python -m kernoscope.html_view packet.json > out.html`。
+- **出处与数字同行**：`exact`/`measured`/`estimated`/`derived` 各有颜色角标与图例；
+  `unavailable` 渲染成 `n/a` + 拒绝码，**不渲染 0**，也不渲染 `facts.uncitable_value`。
+  拒绝表给 `code` + 人话 + remedy + 代价 + 命令；未测项按 code 归组；代价块含三个 `*_more` 留痕。
+- 尺寸预算：正常包渲染 ≤ 64 KB（有测试）；包里的文本全部 HTML 转义；
+  `--html -` 与 `--packet -` 同时给出时报用法错误（stdout 上一次只能要一种格式）。
+- `--plan` 会声明这个文件（新操作 `write_html_view`，`_OP_BINARIES` 登记为空集）。
+
+### 同源命名从散文政策变成类型系统（N3）
+
+- **`source_class` 四档 + 机检**：`NcuRow` 新增 `source_class`（默认 `documented`，今天 7 行行为
+  逐位不变）。规则：**只有 `documented`（公开文档/公开头文件定义了该量与单位）且单位相符，
+  才允许写进 ncu 名字空间** —— 这正是"同源才写 ncu 名下"的可执行形式。其余三档只进
+  `ks__`/`est__`/`meas__`，或被丢弃并记机器可读原因（新列表 `dropped_by_source_class`）。
+  `ncu_rows.consensus_check()` 拒绝"登记在表里却 source_class 非 documented"的行（表与规则脱节必须炸）。
+- **机器可读署名（外部消费者注意）**：`.ATTRIBUTION.txt` 末尾**追加**一个 JSON 块
+  （标记 `kernoscope-attribution-json-v1`，`schema=kernoscope.attribution/1`），逐条给出
+  `{name, value, ncu_name, unit, our_unit, source_class, provenance, origin}` 与
+  `not_written_by_source_class`。人读表格一行没删，但**表头多了两列**：
+  `| metric | value | our unit | unit (written) | source_class | provenance | 表格 |`
+  —— 旧表头里 `unit` 的语义（写进文件的单位）现在叫 `unit (written)`，按旧列名解析的脚本要改。
+  读取请用 `substitute.parse_attribution_json()`（坏块抛 `ValueError`，不返回空字典）。
+- **Python API 变化**：`ncrep.substitute.select_metrics()` 由 6 元组改为 **8 元组**
+  （前 6 位含义与顺序不变，档位丢弃记录插在第 6 位，`over` 移到第 8 位）。
+- `.ncu-rep` 字节格式**未变**（仍 v7）；机器块只在旁路署名里。
+
+### 可选 MCP 层（N10：可选、零常驻、带止损）
+
+- 新增子命令 `kernoscope mcp --stdio`：在 stdin/stdout 上跑**逐行 JSON-RPC 2.0**
+  （`initialize` / `tools/list` / `tools/call` / `resources/list` / `resources/read` / `ping`），
+  只服务**没有 shell** 的 agent runtime。它是**可选**的：不进默认安装路径、**不进 4 KB 常驻入口层**
+  （有测试断言 `AGENTS.md` / `llms.txt` / `SKILL.md` frontmatter 不许出现 mcp），
+  止损条件写死在决定里 —— 一段时间内没有真实环境用它就删。
+- 4 个工具（`capabilities_brief` / `profile` / `diff` / `selftest`）+ 3 个资源
+  （拒绝码参考 / 出处规则 / skill 入口）。**工具不自己算任何数**：它们把 CLI 的既有子命令
+  叫起来并回传文本，所以"MCP 里的数字"与 CLI/包的证据模型只有一处真源。
+- 坏的一行回 `-32700` 但**不终止长会话**；工具参数不合法回 `-32602`；未知方法回 `-32601`。
+- `--stdio` 是唯一传输：不监听端口、不启动服务、不发任何写请求。
+
+```bash
+kernoscope mcp --stdio
+```
+
+### 反事实视图：缺用户输入时给条件答案（拒绝不再 dead-end）
+
+- 缺价格 / 缺 token 数时，`cost_per_token` 判词的 `facts` 里**追加**一个条件答案：
+  `assumed_price_per_kwh`（示例 0.8 元/kWh）→ `if_cost_per_hour` / `if_cost_per_mtok`；
+  缺 token 数时 `assumed_tokens_per_step`（示例 1.2M）→ `if_tokens_s` / `if_cost_per_mtok`。
+  条件值一律带 `if_basis=conditional`、`if_provenance=estimated`、`if_missing=<code>`
+  （原拒绝码仍在 `refusal.code`），并且**不占** `value`。
+- 原始判决不变：`no_price` / `no_tokens` 照旧出现、remedy 照旧指路；给了真输入时行为与旧版
+  完全一致（不产生任何 `if_*` 键，包字节不变 —— 有测试）。
+- 外部消费者注意：`refused` 判词现在**可能**带 `provenance: "estimated"` —— 它描述的是 facts 里的
+  条件答案，不是拒绝本身；没有条件答案时不写这个键。
 
 ## 0.2.0
 

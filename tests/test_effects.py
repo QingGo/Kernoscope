@@ -157,6 +157,7 @@ _OP_BINARIES: dict[str, set[str]] = {
     "read_inputs": set(),
     "write_outputs": set(),
     "write_report_md": set(),
+    "write_html_view": set(),
     "write_ncu_rep": set(),
     "write_ncu_truth": set(),
     "write_name_map": set(),
@@ -271,14 +272,15 @@ def test_plan_reports_third_party_tools_and_network_honestly():
 _FULL_WRITE_ARGV = [
     "--ks-synthetic", "--ks-no-nvml", "--set", "basic",
     "-o", "out/rep.json", "--launch-csv", "--packet", "out/rep.packet.json",
-    "--report-md", "out/rep.md", "--export-ncu-rep", "out/rep.ncu-rep",
+    "--report-md", "out/rep.md", "--html", "out/rep.html",
+    "--export-ncu-rep", "out/rep.ncu-rep",
     "--export-name-map", "out/names.json", "--log-file", "out/run.log",
     "--screen", "off", "--quiet",
 ]
 
 # V-18 漏声明、现在必须逐条对上的那 5 个落盘点（含 `.ncu-rep` 的旁路署名）。
 _V18_WRITES = ("out/rep.md", "out/rep.ncu-rep", "out/rep.ncu-rep.ATTRIBUTION.txt",
-               "out/names.json", "out/run.log")
+               "out/names.json", "out/run.log", "out/rep.html")
 
 
 def _files_under(root: Path) -> list[str]:
@@ -319,8 +321,8 @@ def test_declared_writes_equal_files_on_disk(stub_path, tmp_path, monkeypatch, c
         f"实得({len(actual)})：{actual}\n"
         f"磁盘有而没声明：{sorted(set(actual) - set(concrete))}\n"
         f"声明了却没有：{sorted(set(concrete) - set(actual))}")
-    # 这条命令的规模本身也是承诺的一部分：4 项的时代必须回不去。
-    assert len(actual) >= 13
+    # 这条命令的规模本身也是承诺的一部分：4 项的时代必须回不去（N9 之后是 ≥14）。
+    assert len(actual) >= 14
     # V-18 的那 5 项必须在声明里（上面已证明它们真的落盘）。
     for path in _V18_WRITES:
         assert path in concrete, f"V-18 漏声明的落盘点又漏了：{path}"

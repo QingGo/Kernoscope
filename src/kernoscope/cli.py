@@ -75,6 +75,7 @@ SUBCOMMAND_HELP: dict[str, str] = {
     "selftest": "用已知答案负载算本机误差带与最小可分辨差异（MDD）",
     "diff": "两次运行对比：improved / regressed / indistinguishable / incomparable",
     "gate": "CI 门禁：对决策包下断言，不达标就红（拿不到数据也算不达标）",
+    "mcp": "MCP（stdio）：只给没有 shell 的 agent runtime 用（可选、零常驻）",
     "skill": "把 skill 装进 agent 的上下文（默认只打印计划，`--apply` 才写盘）",
     "issue": "把一次采集打包成可提交的 issue 材料",
 }
@@ -245,6 +246,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "`ncu --import` / ncu-ui 能打开），同时写 PATH.ATTRIBUTION.txt 署名。"
                         "文件内署名（provider/comment）为空则拒绝生成；前提不成立的指标不写；"
                         "一个值都不剩时拒绝生成（宁可不生成，也不生成假的 ncu 报告）")
+    k.add_argument("--html", default=None, metavar="PATH",
+                   help="写一个**自包含**的单文件 HTML 证据单（给人看/截图/贴 issue：内联 CSS、"
+                        "零外部 URL、零 JS、无服务器；每个数字带出处角标，拿不到的数字印 n/a + "
+                        "拒绝码而不是 0）；`-` = stdout")
     k.add_argument("--report-md", default=None, metavar="PATH",
                    help="写出**人读的 per-kernel 报告**（Markdown，结构对齐生态里通用的 "
                         "per-kernel 报告模板：0 采集设置 → 1 头部数字（带 Source 列）→ "
@@ -441,7 +446,7 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
 # --------------------------------------------------------------------------
 SUBCOMMANDS: tuple[str, ...] = (
     "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff", "route",
-    "skill", "gate")
+    "skill", "gate", "mcp")
 
 
 def subcommand_parser(name: str) -> Any:
@@ -462,12 +467,13 @@ def subcommand_parser(name: str) -> Any:
     from .route_cmd import build_parser as route_parser
     from .selftest import build_parser as selftest_parser
     from .skill_cmd import build_parser as skill_parser
+    from .mcp import build_parser as mcp_parser
 
     return {"doctor": doctor_parser, "occupancy": occupancy_parser,
             "memtrace": memtrace_parser, "issue": issue_parser,
             "capabilities": capabilities_parser, "selftest": selftest_parser,
             "diff": diff_parser, "route": route_parser, "skill": skill_parser,
-            "gate": gate_parser}[name]()
+            "gate": gate_parser, "mcp": mcp_parser}[name]()
 
 
 def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
@@ -482,11 +488,12 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     from .route_cmd import route_main
     from .selftest import selftest_main
     from .skill_cmd import skill_main
+    from .mcp import main as mcp_main_entry
 
     return {"doctor": doctor_main, "occupancy": occupancy_main, "memtrace": memtrace_main,
             "issue": issue_main, "capabilities": capabilities_main,
             "selftest": selftest_main, "diff": diff_main, "route": route_main,
-            "skill": skill_main, "gate": gate_main}
+            "skill": skill_main, "gate": gate_main, "mcp": mcp_main_entry}
 
 
 # --------------------------------------------------------------------------
@@ -1608,6 +1615,33 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
     return 0
 
 
+def _write_html_view(packet: dict[str, Any] | None, args: argparse.Namespace,
+                     logged: list[str]) -> int:
+    """N9：把决策包渲染成一个**自包含**的 HTML 证据单（离线、零 JS、无服务器）。
+
+    为什么不是"Web UI"：这里没有前端工程、没有后端、没有状态 —— 是"JSON → 一个文件"的渲染器
+    （NON-GOALS N9 的择中形态）。所以它天然带得走：可截图、可当附件、可离线打开。
+    """
+    from .html_view import render_html
+
+    if packet is None:
+        print("error: --html 需要决策包（本次没有判词可渲染）；去掉 --screen off/--csv 或加 -o",
+              file=sys.stderr)
+        return 1
+    text = render_html(packet)
+    out = str(args.html)
+    if out == "-":
+        if getattr(args, "packet", None) == "-":
+            print("error: `--html -` 与 `--packet -` 都要求 stdout：一次只能要一种格式",
+                  file=sys.stderr)
+            return 2
+        sys.stdout.write(text)
+        return 0
+    _write_text_or_fail(text, out, what="HTML 证据单", logged=logged)
+    print(f"==PROF== HTML 证据单: {out}（{len(text.encode('utf-8'))} B）", file=sys.stderr)
+    return 0
+
+
 def _write_report_md(rep: Report, args: argparse.Namespace, packet: dict[str, Any] | None,
                      logged: list[str]) -> int:
     """I3：把 per-kernel 报告写成 Markdown（人读；结构对齐生态里通用的报告模板）。"""
@@ -1946,7 +1980,7 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
     # V-26③：案件目录（`-o <前缀>` 默认写 `<前缀>.case/`）此前只在"要打一屏或要决策包"时
     # 才建 —— `--screen off`/`--csv`/`--launch-csv` 会**静默不写** case，而 README 只写
     # `--no-case` 能关。语义统一：只要没显式 `--no-case`，就把 case 写出来。
-    if (getattr(args, "packet", None) or screen != "off"
+    if (getattr(args, "packet", None) or screen != "off" or getattr(args, "html", None)
             or (not getattr(args, "no_case", False) and getattr(args, "export", None))):
         from .packet import build, dumps, render_onepage, write_packet
 
@@ -2004,6 +2038,12 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
                             what="名字对照表", logged=logged)
         rep.meta["out_name_map"] = str(args.export_name_map)
         print(f"==PROF== ncu 名字对照表: {args.export_name_map}（{fmt}）", file=sys.stderr)
+
+    # ---------- N9：单文件 HTML 证据单（给人看/截图）----------
+    if getattr(args, "html", None):
+        rc_html = _write_html_view(packet, args, logged)
+        if rc_html:
+            return rc_html
 
     # ---------- I3：人读的 per-kernel 报告（Markdown）----------
     if getattr(args, "report_md", None):
