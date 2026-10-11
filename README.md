@@ -195,7 +195,10 @@ ncu 的硬件计数器在受限环境里拿不到，但很多读数可以用**�
 | 精确 L2/DRAM 字节 | `lts__*` / `dram__*` | 只报 `n/a` + 原因 | `unavailable` |
 | 每 kernel 能耗 | （ncu 没有） | NVML 能量累加器 → `meas__device_energy_j`；窗口内功率积分 → `meas__window_energy_j` | `measured` |
 | **单位成本（每百万 token 多少钱）** | （ncu 没有） | `--ks-tokens` + `--ks-price-per-kwh` / `--ks-price-per-hour` → `ks__cost_per_mtok`、`ks__tokens_per_s`、`ks__j_per_token`；按 kernel 归因 `est__kernel_cost_per_hour` | `measured` / `derived` / `estimated` |
-| CI 门禁 | —— | `--strict` → exit 2（覆盖 set/section/账本裁决行/空转开关/成本输入） | —— |
+| CI 门禁 | —— | `--strict` → exit 2（覆盖 set/section/账本裁决行/空转开关/成本输入）；`kernoscope gate --packet p.json --require …` → 0/1/2 | —— |
+| 真值校准我们的替代口径 | `ncu -o r.ncu-rep` 后自己比对 | `--ks-ncu-rep r.ncu-rep` → `ncu__*`（真值，exact）+ `ks__truth_vs_substitute_pct`（对拍偏差）+ `<base>.ncu-truth.json` | `exact` / `derived` |
+| 让已有的 ncu 工作流继续能用 | `.ncu-rep` | `--export-ncu-rep out.ncu-rep`（替代口径 + 三处署名；前提不成立的值不写） | `estimated` / `derived` |
+| 先改哪里、能省多少 | Estimate Speedup（规则引擎） | `Prescription` section + 判词 `saving_estimate`（保守/上界区间 + ¥/h，重叠不相加） | `estimated` |
 | 时间线可视化 | `.ncu-rep` + UI | Perfetto JSON，零安装 | `exact` |
 
 ---
@@ -517,6 +520,67 @@ kernoscope --set basic --ks-tokens 8192 --ks-price-per-kwh 0.6 --ks-price-per-ho
 
 成本判词会进决策包（`cost_per_token`）：有数就是 `ok`，缺输入就是 `refused` + 带 code 的
 处置（agent 据此知道该补哪个开关，而不是猜）。
+
+---
+
+## 接进 CI：`kernoscope gate`
+
+```bash
+kernoscope --packet rep.packet.json -o rep -- python serve.py
+kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
+    --require kernel_time --require-actionable cost_per_token \
+    --forbid-code counters_denied --max-metric ks__cost_per_mtok=0.5
+```
+
+判据全是**可编程的东西**（判词状态、`actionable`、拒绝码、指标值+出处），不是散文：
+
+| 判据 | 语义 |
+|---|---|
+| `--require ID[=ok\|soft\|refused]` | 判词必须存在且状态达标（默认 `ok`）；不存在即失败（被尺寸预算裁掉也算） |
+| `--require-actionable ID` | 判词可作为行动依据（`actionable=true`；v1.0 包回退到"不是 refused 且前提全成立"） |
+| `--forbid-code CODE` | 出现该拒绝码即失败（含判词、拒绝索引与环境拒绝） |
+| `--max-metric NAME=V` / `--min-metric NAME=V` | 指标阈值；**`n/a` 一律算不通过**（"没有数"不是"没超阈值"） |
+
+退出码 `0` 通过 / `1` 不通过 / `2` 用法错误；**一条规则都没给时失败** —— 门禁凭空绿灯是它最坏的失败模式。
+`--json` 给出逐条失败原因。门禁只消费已经产出的包与报告，不跑测量。
+
+---
+
+## 与 ncu 的名字共处（不是改名，也不改名）
+
+你带着 `--metrics dram__bytes.sum` 来，不会得到一句"指标不存在"：
+
+```
+==PROF== note: --metrics dram__bytes.sum → 替代口径 est__dram_bytes_total（零依赖的 NVML 代理口径…）；
+             数值不会挂在 dram__bytes.sum 名下
+```
+
+- **名字是发现键**：已知的 ncu 名字会解析成"我们给什么"（替代口径的真实指标名）或
+  "为什么给不出"（动态 Tensor Core 利用率、warp stall 周期细分 —— 这两条确实拿不到）。
+  `--strict` 下仍然失败（我们确实给不出 ncu 名下那个数），但错误信息里写明替代口径叫什么。
+- **硬规则没松**：数值仍然只出现在 `ks__`/`est__`/`meas__` 名下，绝不在计数器命名空间里。
+- `--export-name-map names.json|csv` 写一份对照表供下游脚本翻译（**声明**，不是数据替换）。
+- 反过来也通：`--ks-ncu-rep r.ncu-rep` 把**别处采到的真值**读进来（官方只读 API），
+  `ncu__*` 前缀 + `exact` 出真值，并逐条对拍我们的替代口径 → `ks__truth_vs_substitute_pct`；
+  一条都对不上时也是 `refused` + 原因（沉默会被读成"对上了"）。
+- `--export-ncu-rep out.ncu-rep` 把替代口径写成**合法的 `.ncu-rep`**（`ncu-ui` 能打开），
+  同时写 `out.ncu-rep.ATTRIBUTION.txt` 署名。三条门禁：文件内署名（provider/comment）为空
+  即拒绝生成；被拒判词引用过的指标不写入；过滤后一个值不剩就拒绝生成。
+  只写自有命名空间（`ks__`/`est__`/`meas__`）+ 两边单位语义一致的计数量白名单 ——
+  **不写 `gpu__time_duration.sum`**（我们是 ms、ncu 是 ns，写进去读的人会差 10⁶）。
+
+---
+
+## 交给人和 agent
+
+- `--report-md rep.md`：人读的 per-kernel 报告（`## 0` 采集设置 → `## 1` 头部数字**带 Source 列**
+  + `One-line read` → `## 2` 分维度（没有数据的维度也保留并写明拒绝码）→ `## 3` 诊断 →
+  `## 4` 按影响排序的方向（最多 5 条，每条必须带 `Evidence`）→ `## 5` 置信与限制 → `## 6` 复现）。
+- `kernoscope skill`：把 skill（`SKILL.md` + `references/` + `scripts/`）装到 agent 的 skill 目录。
+  默认只打印计划，`--apply` 才写：备份 `<文件>.kernoscope.backup`（保留第一份快照）、原子写、
+  写后回读校验、失败逆序回滚、内容相同即幂等。
+- `--ks-nvtx-phases`：从 nsys 的 NVTX 区间归因 kernel 时间（训练/推理阶段各占多少）；
+  跨区间的 kernel 按重叠部分计入，嵌套区间各自计入（**不是划分**，份额和可 >100%）。
 
 ---
 
