@@ -73,6 +73,7 @@ class RefusalCode(str, Enum):
     NO_TOKENS = "no_tokens"                    # 没给每次迭代的 token/样本数 -> 算不出单位成本
     NO_PRICE = "no_price"                      # 没给电价/租用价 -> 算不出钱
     NO_ENERGY = "no_energy"                    # 拿不到窗口能耗读数（NVML 功率/能量不可用）
+    NCU_REPORT_UNREADABLE = "ncu_report_unreadable"  # 给了 .ncu-rep 但读不了（缺模块/文件坏）
     UNKNOWN_ARCH = "unknown_arch"              # 架构不在表里，算不出上界
     NO_SELFTEST_BAND = "no_selftest_band"      # 没跑 selftest，没有本机误差带/MDD
     MDD_UNKNOWN = "mdd_unknown"                # 误差带里没有这个指标的 MDD
@@ -128,6 +129,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NO_TOKENS: "没有给每次迭代的 token/样本数：算不出单位成本",
     RefusalCode.NO_PRICE: "没有给电价或租用价：算不出钱",
     RefusalCode.NO_ENERGY: "拿不到窗口能耗读数（NVML 能量/功率不可用）",
+    RefusalCode.NCU_REPORT_UNREADABLE: "读不了这份 .ncu-rep（缺 Nsight Compute 的 Python 模块，或文件损坏）",
     RefusalCode.UNKNOWN_ARCH: "未知架构，算不出上界",
     RefusalCode.NO_SELFTEST_BAND: "没有本机误差带与 MDD",
     RefusalCode.MDD_UNKNOWN: "误差带里没有这个指标的 MDD",
@@ -350,6 +352,12 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "拿不到功率读数时能耗口径不可用，我们不按 TDP 顶替",
         command="kernoscope --set basic -o rep -- python bench_loop.py",
         cost_s=0.0, then_answers=("cost_per_token",)),
+    RefusalCode.NCU_REPORT_UNREADABLE: Remedy(
+        "读 .ncu-rep 只需要 Nsight Compute 的 Python 模块（不需要 GPU、不需要计数器权限）："
+        "把 `<nsight-compute>/extras/python` 加进 PYTHONPATH；若文件本身损坏，重新导出或重采",
+        command="PYTHONPATH=/opt/nvidia/nsight-compute/<版本>/extras/python kernoscope "
+                "--ks-ncu-rep report.ncu-rep --set basic",
+        cost_kind="manual", then_answers=("truth_vs_substitute",)),
     RefusalCode.UNKNOWN_ARCH: Remedy(
         "用 --ks-sm-count 指定 SM 数，或报告里带上 compute capability："
         "未知架构算不出 occupancy 上界，我们不猜",

@@ -193,6 +193,12 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
     class FakeRep:
         kernels = [FakeKernel()]
         wall_time_ns = 2_000_000_000
+        # 真值对拍判词（I1）只有在导入了 .ncu-rep 时才存在；替身必须能表达这个状态，
+        # 否则"判词目录与实际一致"这条测试会因为替身缺字段而漏掉 truth_vs_substitute。
+        meta = {
+            "ncu_truth": {"ncu_version": "2025.3.1", "actions": 1, "pairs_compared": 2,
+                          "pairs_total": 3, "max_abs_err_pct": 4.5},
+        }
 
     ids = set()
     for fn in BUILDERS:

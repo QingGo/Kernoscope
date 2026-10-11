@@ -71,7 +71,7 @@ kernoscope diff before.json after.json --selfcheck machine-selfcheck.json --json
 
 | 文件 | 字节 | 里面有什么 |
 |---|---|---|
-| `references/refusal-codes.md` | ~13 KB（生成） | 每个拒绝码什么意思、怎么办、代价 |
+| `references/refusal-codes.md` | ~14 KB（生成） | 每个拒绝码什么意思、怎么办、代价 |
 | `references/verdicts.md` | ~3 KB（生成） | 判词目录、方向、前提、MDD 键 |
 | `references/provenance-rules.md` | ~2 KB | 出处纪律的短版 |
 | `references/recipes.md` | ~3 KB | 四个闭环配方 |

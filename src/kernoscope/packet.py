@@ -561,6 +561,45 @@ def _verdict_cost(rep: Any) -> Verdict | None:
                                "meas__window_energy_j"))
 
 
+def _verdict_truth(rep: Any) -> Verdict | None:
+    """真值对拍判词（I1）—— 只有在导入了 `.ncu-rep` 时才有。
+
+    这条判词回答的是"我们的替代口径到底准不准"：它把导入的真值（`ncu__*`，与 ncu 同源）
+    与我们自己的值逐条相比。**一条对拍都没有时也出判词**（refused + 原因），
+    因为"对不上"本身是结论 —— 沉默会让读的人以为对拍过了。
+    """
+    t = (getattr(rep, "meta", {}) or {}).get("ncu_truth")
+    if not t:
+        return None
+    compared = int(t.get("pairs_compared") or 0)
+    total = int(t.get("pairs_total") or 0)
+    facts = {"ncu": _clip(str(t.get("ncu_version") or "?"), FACT_STR_LIMIT),
+             "compared": compared, "pairs": total,
+             "actions": int(t.get("actions") or 0)}
+    if t.get("max_abs_err_pct") is not None:
+        facts["max_abs_err_pct"] = round(float(t["max_abs_err_pct"]), 3)
+    if compared == 0:
+        return Verdict(
+            id="truth_vs_substitute", question="我们的替代口径 vs 真值（导入的 .ncu-rep）",
+            status=REFUSED, facts=facts,
+            refusal=Refusal(RefusalCode.METRIC_ABSENT,
+                            "一条对拍都没成功：要么这份报告里没有我们用来对拍的指标"
+                            "（不同架构/采集配置的指标集不同），要么我们这次没算出对应的替代值；"
+                            "用 --json 看 ncu_truth.comparisons[].pairs[].reason"),
+            metrics=("ncu__gpu__time_duration.sum",),
+            next="换一份含 gpu__time_duration / launch__registers_per_thread 的报告，"
+                 "或补齐我们的替代值前提（标定/账本）再对拍",
+            claim=f"导入了 {t.get('actions')} 个 action 的真值，但没有一条能与我们逐条对拍")
+    return Verdict(
+        id="truth_vs_substitute", question="我们的替代口径 vs 真值（导入的 .ncu-rep）",
+        status=OK, facts=facts, value=facts.get("max_abs_err_pct"), unit="%",
+        provenance="exact", premises=[],
+        metrics=("ncu__gpu__time_duration.sum", "ks__truth_vs_substitute_pct"),
+        next="偏差大的那条口径要写进结论的限制里（别把代理值当计数器读数引用）",
+        claim=f"与 ncu {t.get('ncu_version')} 的真值对拍 {compared}/{total} 条，"
+              f"最大相对偏差 {facts.get('max_abs_err_pct')}%")
+
+
 def _verdict_over_peak(rep: Any) -> Verdict | None:
     warn = metric_value(rep, "ks__over_peak_warning")
     if not warn:
@@ -601,6 +640,7 @@ def _verdict_static_mix(rep: Any) -> Verdict | None:
 VERDICT_IDS: tuple[str, ...] = (
     "kernel_time",
     "cost_per_token",
+    "truth_vs_substitute",
     "dram_bytes",
     "dram_bytes_per_launch",
     "dram_bytes_trace",
@@ -613,7 +653,8 @@ VERDICT_IDS: tuple[str, ...] = (
     "static_mix",
 )
 
-BUILDERS = (_verdict_kernel_time, _verdict_cost, _verdict_dram_total, _verdict_per_launch,
+BUILDERS = (_verdict_kernel_time, _verdict_cost, _verdict_truth, _verdict_dram_total,
+            _verdict_per_launch,
             _verdict_trace, _verdict_ledger, _verdict_occupancy, _verdict_roofline,
             _verdict_issue_slot, _verdict_l2, _verdict_over_peak, _verdict_static_mix)
 

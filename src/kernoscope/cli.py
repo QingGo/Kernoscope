@@ -203,6 +203,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "哪些是第三方软件），不执行任何东西、不写文件；配合 --plan-json 给 agent")
     k.add_argument("--plan-json", action="store_true",
                    help="计划以 JSON 输出（机器读；含每个操作的 8 项 effects 与 4 项 annotations）")
+    k.add_argument("--export-ncu-rep", default=None, metavar="PATH",
+                   help="把替代口径**写成一个合法的 .ncu-rep**（官方只读 API 能读、"
+                        "`ncu --import` / ncu-ui 能打开），同时写 PATH.ATTRIBUTION.txt 署名。"
+                        "文件内署名（provider/comment）为空则拒绝生成；前提不成立的指标不写；"
+                        "一个值都不剩时拒绝生成（宁可不生成，也不生成假的 ncu 报告）")
+    k.add_argument("--ks-ncu-rep", "--from-ncu-report", default=None, metavar="PATH",
+                   dest="ks_ncu_rep",
+                   help="读一个已有的 .ncu-rep 作**真值**（官方只读 API）：ncu__* 前缀 + exact "
+                        "出真值，并与我们的替代口径逐条对拍（真值 vs 替代的相对误差）。"
+                        "本机没有 Nsight Compute 的 Python 模块时报 ncu_report_unreadable + 处置")
 
     p.add_argument("program", nargs=argparse.REMAINDER, help="-- 之后是要 profile 的命令")
     return p
@@ -843,6 +853,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     dev_kr.sections = dev_sections
     rep.kernels.append(dev_kr)
 
+    # ---------- I1：导入一份真值 .ncu-rep 并与替代口径对拍 ----------
+    if getattr(args, "ks_ncu_rep", None):
+        _attach_truth(rep, str(args.ks_ncu_rep), log)
+
     rep.sort_kernels("total")
     # synthetic 模式是瞬时生成的，wall time 无物理意义 -> 用 kernel 跨度代替，不报百分比
     if args.ks_synthetic:
@@ -969,6 +983,131 @@ def main(argv: Sequence[str] | None = None) -> int:
         rc = target_rc
     _write_case_if_needed(rep, args, rc, argv)
     return rc
+
+
+def _attach_truth(rep: Report, path: str, log) -> None:
+    """把 `.ncu-rep` 里的真值接进报告（I1），并逐条与替代口径对拍。
+
+    两条纪律：
+      * 真值用 `ncu__` 前缀 + `exact`（与 ncu 同源），**不是**计数器命名空间，
+        所以它绕开 R2 的 allowlist —— 这个名字本身就说明"它来自导入的报告"；
+      * 读不了就报结构化拒绝（`ncu_report_unreadable` + 处置），绝不静默地当没有这回事。
+        缺的往往只是 `PYTHONPATH`：读报告不需要 GPU、也不需要计数器权限。
+    """
+    from .analyze.truth import (comparison_metrics, compare, match_action, truth_metrics)
+    from .backends import ncu_rep as ncu_rep_backend
+    from .provenance import Metric, Section
+    from .refusals import Refusal, RefusalCode
+
+    try:
+        data = ncu_rep_backend.load(path)
+    except ncu_rep_backend.NcuRepUnavailable as e:
+        msg = (f"读不了 {path}：{e}；读 .ncu-rep 只要 Nsight Compute 的 Python 模块"
+               f"（把它放进 PYTHONPATH），不需要 GPU 与计数器权限")
+        rep.meta.setdefault("environment_refusals", []).append(
+            Refusal(RefusalCode.NCU_REPORT_UNREADABLE, msg).to_dict())
+        log(f"error: {msg}")
+        return
+    except ncu_rep_backend.NcuRepError as e:
+        msg = f"读不了 {path}：{e}"
+        rep.meta.setdefault("environment_refusals", []).append(
+            Refusal(RefusalCode.NCU_REPORT_UNREADABLE, msg).to_dict())
+        log(f"error: {msg}")
+        return
+
+    ours = {m.name: m.value for k in rep.kernels for s in k.sections for m in s.metrics
+            if isinstance(m.value, (int, float)) and not isinstance(m.value, bool)}
+    hit = 0
+    total_rows = 0
+    comparisons: list[dict[str, Any]] = []
+    for action in data.actions:
+        kr = next((k for k in rep.kernels if k.name != "(device)"
+                   and k.name == action.kernel_name), None)
+        if kr is None:
+            kr = next((k for k in rep.kernels if k.name != "(device)"
+                       and match_action(data, k.name) is action), None)
+        if kr is None:
+            kr = KernelReport(action.kernel_name, launch_count=0)
+            rep.kernels.append(kr)
+        sec = Section("NcuGroundTruth")
+        for name, value, source in truth_metrics(data, action):
+            sec.add(Metric.exact(name, float(value), source=source,
+                                 note="导入的真值（与 ncu 同源），用于校准我们的替代口径"))
+        cmp = compare(data, ours, action=action,
+                      ours_by_name={m.name: m.value for s in kr.sections for m in s.metrics
+                                    if isinstance(m.value, (int, float))})
+        pair_by_ours = {r.ours_name: r for r in cmp.rows}
+        for name, value, unit, note in comparison_metrics(cmp):
+            ours_name = name.split("[", 1)[1].rstrip("]")
+            row = pair_by_ours.get(ours_name)
+            truth_name = row.truth_name if row is not None else ""
+            if value is None:
+                sec.add(Metric.unavailable(
+                    name, (row.reason if row is not None else "不可比"),
+                    unit=unit, source=f"对拍：{truth_name} vs {ours_name}",
+                    code=RefusalCode.PREMISE_FAILED if row is not None and row.truth is not None
+                    else RefusalCode.METRIC_ABSENT,
+                    observed={"truth": row.truth if row is not None else None,
+                              "ours": row.ours if row is not None else None},
+                    severity="degraded"))
+                continue
+            sec.add(Metric.derived(name, value, unit, source=f"对拍：{truth_name} vs {ours_name}",
+                                   note=note))
+            hit += 1
+        total_rows += len(cmp.rows)
+        comparisons.append(cmp.to_dict())
+        kr.sections.append(sec)
+    rep.meta["ncu_truth"] = {
+        "path": data.path, "ncu_version": data.tool_version,
+        "actions": len(data.actions),
+        "metrics_read": sum(len(a.metrics) for a in data.actions),
+        "metrics_skipped": sum(a.skipped_metrics for a in data.actions),
+        "pairs_compared": hit, "pairs_total": total_rows,
+        "actions": [{"kernel": a.kernel_name, "grid": list(a.grid), "block": list(a.block),
+                     "metrics": len(a.metrics), "rules": a.rules} for a in data.actions],
+        "comparisons": comparisons,
+        "max_abs_err_pct": (max((abs(r["rel_err_pct"]) for c in comparisons
+                                 for r in c.get("pairs", []) if "rel_err_pct" in r),
+                                default=None)),
+    }
+    log(f"ncu-rep: 导入 {data.path}（ncu {data.tool_version or '?'}）：{len(data.actions)} 个 "
+        f"action、{rep.meta['ncu_truth']['metrics_read']} 个真值指标；对拍了 {hit}/{total_rows} 条")
+    if not hit and total_rows:
+        log("warn: 一条对拍都没成功（不是没数，是两边口径对不上）—— 用 --json 看 pairs[].reason")
+
+
+def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, Any] | None,
+                       log) -> int:
+    """把替代口径写成 `.ncu-rep`（I2/M4）+ 旁路署名。"""
+    from . import __version__
+    from .ncrep.substitute import SubstituteRefused, write_substitute
+
+    kernels = [k for k in rep.kernels
+               if k.name != "(device)" and list(getattr(k, "launches", []) or [])]
+    if not kernels:
+        log("error: 没有可导出的 kernel（没有 launch 记录就写不出 kernel 身份，"
+            "编一组 grid/block 就是在造身份）")
+        return 2 if args.strict else 1
+    kernels.sort(key=lambda k: k.total_ns, reverse=True)
+    kr = kernels[0]
+    if packet is None:
+        from .packet import build
+
+        packet = build(rep, basis=str(rep.meta.get("ledger_basis") or ""))
+    try:
+        res = write_substitute(kr, str(args.export_ncu_rep), packet=packet,
+                               tool_version=__version__)
+    except SubstituteRefused as e:
+        log(f"error: 拒绝生成 .ncu-rep：{e}")
+        return 2 if args.strict else 1
+    log(f"ncu-rep: 写出 {res.ncu_rep_path}（{res.bytes_written} B，"
+        f"{res.metrics_written} 个值，全部带出处）+ 署名 {res.sidecar_path}")
+    if len(kernels) > 1:
+        log(f"note: 报告里有 {len(kernels)} 个 kernel，只导出了最耗时的 {kr.name}"
+            f"（用 -k 选别的）")
+    rep.meta["out_ncu_rep"] = res.ncu_rep_path
+    rep.meta["out_ncu_rep_sidecar"] = res.sidecar_path
+    return 0
 
 
 def _write_case_if_needed(rep: Report, args: argparse.Namespace, rc: int,
@@ -1266,6 +1405,20 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
                 print("=" * 100)
                 print("完整报告（上面的判词都出自这里的数据；每个数字都带出处）")
                 print("=" * 100)
+
+    # ---------- I2/M4：把替代口径导出成 .ncu-rep（+ 旁路署名）----------
+    if getattr(args, "export_ncu_rep", None):
+        rc_export = _export_substitute(rep, args, packet, logged)
+        if rc_export:
+            return rc_export
+
+    # ---------- I1：真值对照产物（机器可读，可归档、可 diff）----------
+    if rep.meta.get("ncu_truth") and rep.meta.get("out_json"):
+        truth_path = re.sub(r"\.ksreport\.json$", "", str(rep.meta["out_json"])) + ".ncu-truth.json"
+        Path(truth_path).write_text(
+            json.dumps(rep.meta["ncu_truth"], ensure_ascii=False, indent=2), encoding="utf-8")
+        rep.meta["out_ncu_truth"] = truth_path
+        print(f"==PROF== 真值对拍: {truth_path}", file=sys.stderr)
 
     # 标准输出
     if getattr(args, "packet", None) == "-":
