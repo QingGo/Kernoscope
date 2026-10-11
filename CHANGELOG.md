@@ -518,6 +518,33 @@ kernoscope mcp --stdio
 - 外部消费者注意：`refused` 判词现在**可能**带 `provenance: "estimated"` —— 它描述的是 facts 里的
   条件答案，不是拒绝本身；没有条件答案时不写这个键。
 
+### 有 nsys 的机器上不再把目标的问题讲成 nsys 的问题（第七轮 X-1，P1）
+
+- **交给 nsys 之前先解析目标可执行文件**：`kernoscope doctr`（拼错的子命令被当成程序）现在报
+  `error: 目标命令无法执行：doctr 不存在（…）`，与**无 nsys 路径逐字相同**；旧实现在有 nsys 的
+  机器上走 `nsys profile … doctr` → `nsys profile failed (rc=1)` + "nsys 随 CUDA Toolkit 提供
+  （或单独安装）" —— 把人送去装一个已经装好的工具，而真实原因一个字都没说（真机实测）。
+- **目标退出码与 nsys 自身失败分开**（`backends/nsys.py` 新增 `TargetFailed`）：nsys 会把目标的
+  退出码透传回来。现在报 `error: 目标命令退出码 N`；有 `.nsys-rep` 时说明"采集文件仍在、可以继续
+  分析"，没有时才补一句"也可能是 nsys 自身失败"并附 stderr 尾部。只有 nsys 自己返回 0 却没产出
+  才报 nsys 的问题。
+- **输入文件的存在性提前到采集之前**（`--ks-calibration` / `--ks-memtrace` / `--ks-instr-hist` /
+  `--ks-achieved-occupancy` / `--ks-selfcheck`）：旧实现里"标定文件不存在"会被随后的采集错误盖住，
+  从头到尾没被报出来。
+- 新增 5 条测试（`tests/test_error_paths.py`），含"nsys 存在时也必须是目标错误"与"采集根本不该开始"。
+
+### M13 的两级拆成两个判词 id（第七轮 X-19，P1 口径级）
+
+- **新增判词 id `saving_estimate_share`**（第一级：按**实测时长占比**排序的头寸，单位 `%`）；
+  `saving_estimate` 只用于第二级（保守可省区间与**钱**，单位如 `CNY/h`）。旧实现两级共用
+  `saving_estimate`，于是 `diff` 把 `96.6 %` 与 `1.9801 CNY/h` 直接相减、吐出
+  `delta_pct=-97.95%` 并把单位标成 `CNY/h` —— 正是本项目最老的错误族（用单一表示承载多重语义）。
+  **外部消费者**：按 id 取"先改哪里"的脚本要区分两级（`saving_estimate_share` 只在缺标定/价格时
+  出现，零前提、`provenance=exact`、`facts.basis=time_share`）。
+- **第二道防线在 `diff`**：同一个判词 id 的两侧若**单位**或 `facts.basis` 不同，判 `incomparable`
+  + `protocol_mismatch`，**不给差值也不给百分比**；单位与 basis 都相同时照常给差值
+  （有测试钉住这条防线不是"一律不给"）。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

@@ -24,6 +24,7 @@ import errno
 import hashlib
 import json
 import os
+import pathlib
 import re
 import shlex
 import shutil
@@ -329,6 +330,53 @@ def load_synthetic() -> list[KernelLaunch]:
     return launches
 
 
+#: 采集**之前**必须存在的输入文件（第七轮 X-1④）：否则"文件不存在"会被采集错误盖住
+#: （真机实测：`--ks-calibration /tmp/nope.json` 在有 nsys 的机器上先撞 sqlite 错误，
+#: 于是"标定文件不存在"这件事从头到尾没被报出来）。
+_MUST_EXIST_INPUTS: tuple[tuple[str, str], ...] = (
+    ("ks_calibration", "标定文件"),
+    ("ks_memtrace", "访存轨迹"),
+    ("ks_instr_hist", "指令直方图"),
+    ("ks_achieved_occupancy", "occupancy 注入 JSON"),
+    ("ks_selfcheck", "自检/误差带报告"),
+)
+
+
+def _preflight_inputs(args: argparse.Namespace) -> None:
+    """采集前把"输入文件在不在"查掉（X-1④）：输入错误不该被采集错误盖住。"""
+    for attr, what in _MUST_EXIST_INPUTS:
+        value = getattr(args, attr, None)
+        if not value:
+            continue
+        path = str(value)
+        if attr in ("ks_calibration", "ks_memtrace", "ks_instr_hist", "ks_selfcheck"):
+            # 这几个既收路径也可能收 URL/内联文本，只有"看起来像路径"时才查
+            if "://" in path or "\n" in path:
+                continue
+        if not pathlib.Path(path).exists():
+            raise CliInputError(
+                f"{what}不存在：{path}", hint="确认路径拼写与文件已经生成（怎么生成见 README）")
+
+
+def _resolve_target(cmd: list[str]) -> None:
+    """交给 nsys **之前**解析目标可执行文件（第七轮 X-1①）。
+
+    为什么必须在采集前做：有 nsys 的机器上，`kernoscope doctr`（拼错的子命令被当成程序）
+    会走 `nsys profile … doctr`，nsys 返回非零，于是旧实现报"nsys profile failed" +
+    "装 nsys"的提示 —— 真实原因（这个程序不存在）一个字都没说，还把人送去装已装好的工具。
+    这里先判一次，报的是与**无 nsys 路径逐字相同**的那句话。
+    """
+    prog = cmd[0]
+    if os.sep in prog or (os.altsep and os.altsep in prog):
+        p = pathlib.Path(prog)
+        ok = p.exists() and os.access(prog, os.X_OK)
+    else:
+        ok = shutil.which(prog) is not None
+    if not ok:
+        raise CliInputError(f"目标命令无法执行：{prog} 不存在",
+                            hint="检查拼写；用 `--` 把要运行的程序与它的参数放在最后")
+
+
 def _target_command(program: Sequence[str]) -> list[str]:
     """把 `-- <cmd>` 后面的内容还原成 argv。
 
@@ -372,6 +420,10 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
             "（例如 `kernoscope --set basic -- python train.py`）；"
             "或用 --ks-sqlite/--ks-nsys-rep 读已有采集；没有 GPU 时用 --ks-synthetic")
     meta["target"] = " ".join(cmd)
+    # X-1④：输入文件的存在性在采集**之前**判（否则会被采集错误盖住）
+    _preflight_inputs(args)
+    # X-1①：目标可执行文件也在采集之前解析（否则"程序不存在"会被讲成"nsys 失败"）
+    _resolve_target(cmd)
 
     if not nsys_backend.find_nsys():
         # ---- W1：优雅降级。没有 nsys ≠ 没有信息 ----
@@ -428,6 +480,17 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
     """
     try:
         return collect(args, log)
+    except nsys_backend.TargetFailed as e:
+        # X-1②：nsys 把**目标程序**的退出码透传回来 —— 先说目标，再说 nsys（如果有嫌疑）。
+        print(f"error: 目标命令退出码 {e.rc}", file=sys.stderr)
+        if e.rep_exists:
+            print("hint: 采集文件仍然产出了，可以继续分析；如果目标是你的负载，先看它自己为什么退出。",
+                  file=sys.stderr)
+        else:
+            print("hint: 并且没有产出 .nsys-rep —— 也可能是 nsys 自身失败"
+                  "（目标是被 nsys 启动后再失败的，所以我们无法完全区分）。"
+                  + (f"\nstderr 尾部：{e.detail}" if e.detail else ""), file=sys.stderr)
+        return None
     except nsys_backend.NsysError as e:
         print(f"error: {e}", file=sys.stderr)
         print("hint: nsys 随 CUDA Toolkit 提供（或单独安装 Nsight Systems）。"

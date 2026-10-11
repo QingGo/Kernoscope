@@ -56,7 +56,7 @@
           "next": "用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词"
         },
         {
-          "id": "saving_estimate",
+          "id": "saving_estimate_share",
           "status": "soft",
           "actionable": true,
           "facts": {
@@ -221,7 +221,7 @@
           "unmeasured_examples",
           "verdict_metrics"
         ],
-        "packet_bytes": 4089
+        "packet_bytes": 4095
       }
     },
     "files": {

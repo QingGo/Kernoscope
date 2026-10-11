@@ -466,3 +466,38 @@ def test_not_judged_has_its_own_status_and_is_counted():
                 [c["status"] for c in r.to_dict()["not_judged"]]
     assert len(by_status) == sum(counts.values())
     assert set(by_status) <= set(counts)
+
+
+def test_same_verdict_id_with_different_units_is_incomparable_not_subtracted():
+    """第七轮 X-19（P1，口径级）：同一个判词 id 的两侧必须是**同一个量**。
+
+    M13 的第一级（按实测时长占比，单位 `%`）与第二级（省下的钱，单位 `CNY/h`）曾经共用
+    `saving_estimate` 这一个 id。实测：`diff` 把 `96.6 %` 与 `1.9801 CNY/h` 直接相减、
+    吐出 `delta_pct=-97.95%` 并把单位标成 `CNY/h` —— 也就是本项目最老的错误族
+    （用单一表示承载多重语义）。判词 id 已拆开（`saving_estimate_share` vs `saving_estimate`），
+    这里是**第二道防线**：单位或 `facts.basis` 不同就不给差值、不给百分比。
+    """
+    a = _packet()
+    b = _packet()
+    a["verdicts"].append({"id": "saving_estimate", "status": "soft", "value": 96.6,
+                          "unit": "%", "provenance": "exact",
+                          "facts": {"basis": "time_share"}})
+    b["verdicts"].append({"id": "saving_estimate", "status": "soft", "value": 1.9801,
+                          "unit": "CNY/h", "provenance": "estimated",
+                          "facts": {"basis": "money"}})
+    res = diff_packets(a, b)
+    row = next(c for c in res.comparisons if c.id == "saving_estimate")
+    assert row.status == "incomparable", row.to_dict()
+    assert row.delta is None and row.delta_pct is None, \
+        f"把百分比和钱相减了：{row.to_dict()}"
+    assert row.refusal is not None and row.refusal.code.value == "protocol_mismatch", row.to_dict()
+    # 单位相同、basis 也相同时照常给差值（不许把这条防线做成"一律不给"）
+    a2, b2 = _packet(), _packet()
+    a2["verdicts"].append({"id": "saving_estimate", "status": "soft", "value": 10.0, "unit": "CNY/h",
+                           "provenance": "estimated", "facts": {"basis": "money"}})
+    b2["verdicts"].append({"id": "saving_estimate", "status": "soft", "value": 8.0, "unit": "CNY/h",
+                           "provenance": "estimated", "facts": {"basis": "money"}})
+    # 没有方向共识的判词会落在 `not_judged`（只给差值、不下方向判词），所以两边都查
+    res2 = diff_packets(a2, b2)
+    ok = next(c for c in (res2.comparisons + res2.not_judged) if c.id == "saving_estimate")
+    assert ok.delta == -2.0 and ok.delta_pct == -20.0, ok.to_dict()

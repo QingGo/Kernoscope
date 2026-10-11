@@ -217,11 +217,23 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
                 "money_refusal": None, "notes": []},
         }
 
+    rep = FakeRep()
     ids = set()
     for fn in BUILDERS:
-        v = fn(FakeRep())
+        v = fn(rep)
         if v is not None:
             ids.add(v.id)
+    # M13 的两级是**两个 id**（第七轮 X-19：一个曾同时承载"时长占比 %"与"省下的钱 CNY/h"，
+    # 于是 diff 会把它们相减）。所以这里必须证明**两个 id 都能被产出**：
+    # 上面那份替身带 prescription（第二级 saving_estimate），去掉它再跑一遍（第一级）。
+    saved = rep.meta.pop("prescription")
+    try:
+        for fn in BUILDERS:
+            v = fn(rep)
+            if v is not None:
+                ids.add(v.id)
+    finally:
+        rep.meta["prescription"] = saved
     assert ids == set(VERDICT_IDS), (sorted(ids), sorted(VERDICT_IDS))
 
 

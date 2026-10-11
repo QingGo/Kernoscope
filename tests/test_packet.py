@@ -1034,7 +1034,7 @@ def test_discovery_ranking_survives_without_calibration_or_price():
 
     rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=False)
     p = build(rep)
-    sv = next((v for v in p["verdicts"] if v["id"] == "saving_estimate"), None)
+    sv = next((v for v in p["verdicts"] if v["id"] == "saving_estimate_share"), None)
     assert sv is not None, f"发现层不许缺席（拒绝≠空）：{[v['id'] for v in p['verdicts']]}"
     assert sv["facts"]["basis"] == "time_share", sv
     assert sv["facts"]["money"] == "unavailable", sv
@@ -1054,7 +1054,7 @@ def test_discovery_ranking_never_pretends_to_be_money():
     from kernoscope.packet import build
 
     p = build(_two_kernel_report(cheap_over_peak=False, top_over_peak=False))
-    sv = next(v for v in p["verdicts"] if v["id"] == "saving_estimate")
+    sv = next(v for v in p["verdicts"] if v["id"] == "saving_estimate_share")
     facts = sv["facts"]
     assert "total_per_hour" not in facts and "total_per_mtok" not in facts
     assert facts.get("basis") == "time_share"

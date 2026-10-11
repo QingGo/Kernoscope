@@ -60,7 +60,7 @@
           ]
         },
         {
-          "id": "saving_estimate",
+          "id": "saving_estimate_share",
           "status": "soft",
           "actionable": true,
           "facts": {
@@ -230,7 +230,7 @@
         "unmeasured_metrics": 6,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 3851
+        "packet_bytes": 3857
       }
     },
     "capabilities": {

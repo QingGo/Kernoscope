@@ -357,3 +357,85 @@ def test_log_error_helper_prefers_the_real_error_sink():
     plain: list[tuple[str, str]] = []
     _log_error(lambda m: plain.append(("log", m)), "error: y")   # 没挂上也不许抛
     assert plain == [("log", "error: y")], plain
+
+
+# --------------------------------------------------------------------------
+# 第七轮 X-1：**有 nsys 的机器上**，目标程序的问题被报成"nsys 的问题"
+# --------------------------------------------------------------------------
+# 机制：目标不存在/非零退出都从 `NsysError("nsys profile failed (rc=…)")` 出来，CLI 再挂上
+# "nsys 随 CUDA Toolkit 提供（或单独安装）"的提示 —— 把人送去装一个已经装好的工具，
+# 而真实原因（目标失败）一个字都没说。真机实测三例，macOS（无 nsys）全对、真机全错。
+def test_typo_target_with_nsys_present_is_still_a_target_error(monkeypatch, capsys):
+    from kernoscope.backends import nsys as N
+
+    ran: list[str] = []
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+    monkeypatch.setattr(N, "run_profile", lambda *a, **k: ran.append("ran") or "x.nsys-rep")
+
+    rc, out, err = run(capsys, "doctr")          # 拼错的子命令被当成要运行的程序
+    assert rc == 1
+    assert "目标命令无法执行" in err and "doctr" in err, err
+    assert "nsys" not in err, f"把目标的问题讲成了 nsys 的问题：{err!r}"
+    assert ran == [], "采集根本不该开始（目标已经解析失败）"
+
+
+def test_missing_input_file_is_reported_before_collection(monkeypatch, capsys):
+    """X-1④：输入文件的存在性要在采集**之前**判 —— 否则会被采集错误盖住。"""
+    from kernoscope.backends import nsys as N
+
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+    monkeypatch.setattr(N, "run_profile",
+                        lambda *a, **k: (_ for _ in ()).throw(N.NsysError("nsys died")))
+    rc, out, err = run(capsys, "--ks-calibration", "/tmp/definitely-nope.json", "--", "true")
+    assert rc == 1
+    assert "标定文件不存在" in err and "definitely-nope.json" in err, err
+    assert "nsys" not in err, f"输入错误被采集错误盖住了：{err!r}"
+
+
+def test_target_nonzero_exit_is_reported_as_the_targets_code(monkeypatch, capsys):
+    """X-1②：nsys 把目标的退出码透传回来 ⇒ 报"目标命令退出码 N"，不是"nsys 失败"。"""
+    from kernoscope.backends import nsys as N
+
+    def boom(*a, **k):
+        raise N.TargetFailed(3, rep_exists=False, detail="boom")
+
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+    monkeypatch.setattr(N, "run_profile", boom)
+    rc, out, err = run(capsys, "--", "sh", "-c", "exit 3")
+    assert rc == 1
+    assert "目标命令退出码 3" in err, err
+    assert "单独安装" not in err and "CUDA Toolkit" not in err, \
+        f"目标自己退出 3，却给了装 nsys 的提示：{err!r}"
+    assert "nsys" in err, "没有产出 .nsys-rep 时，次要可能（nsys 自身失败）要写清"
+
+
+def test_target_failure_with_a_report_says_collection_is_still_usable(monkeypatch, capsys):
+    from kernoscope.backends import nsys as N
+
+    def boom(*a, **k):
+        raise N.TargetFailed(2, rep_exists=True)
+
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+    monkeypatch.setattr(N, "run_profile", boom)
+    rc, out, err = run(capsys, "--", "true")
+    assert rc == 1
+    assert "目标命令退出码 2" in err and "可以继续分析" in err, err
+
+
+def test_nsys_own_failure_still_says_nsys(monkeypatch, capsys):
+    """③ 只有真的是 nsys 自身失败（返回 0 却没有产物）才报 nsys。"""
+    from kernoscope.backends import nsys as N
+
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+
+    def fake_run(args, capture_output=True, text=True):
+        class P:
+            returncode = 0
+            stdout = "nsys said nothing"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(N.subprocess, "run", fake_run)
+    with pytest.raises(N.NsysError) as e:
+        N.run_profile(["true"], "/tmp/ks-nope-prefix")
+    assert "nsys 没有产出 .nsys-rep" in str(e.value)

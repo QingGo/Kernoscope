@@ -257,6 +257,26 @@ def diff_packets(pa: dict[str, Any], pb: dict[str, Any], *,
         # 差值先算出来：不可比不等于"信息不给" —— 读者仍然能看到两个数差多少，
         # 只是我们不下方向判词。
         if c.a is not None and c.b is not None:
+            # X-19（第七轮 P1，口径级）：同一个判词 id 的**两侧必须是同一个量**。
+            # M13 的第一级（按实测时长占比，单位 %）与第二级（省下的钱，单位 CNY/h）曾经
+            # 共用 `saving_estimate` 这一个 id，于是这里把 96.6 % 与 1.9801 CNY/h 直接相减、
+            # 吐出 `delta_pct=-97.95%` 并把单位标成 CNY/h —— 正是本项目最老的错误族
+            # （用单一表示承载多重语义）。判词 id 已经拆分（见 packet），这里是第二道防线：
+            # 只要单位或 `facts.basis` 不同，就不给差值、不给百分比。
+            unit_a = str(A.get("unit") or "")
+            unit_b = str(B.get("unit") or "")
+            basis_a = str((A.get("facts") or {}).get("basis") or "")
+            basis_b = str((B.get("facts") or {}).get("basis") or "")
+            if unit_a != unit_b or basis_a != basis_b:
+                why = [f"单位 {unit_a!r} vs {unit_b!r}"]
+                if basis_a != basis_b:
+                    why.append(f"basis {basis_a!r} vs {basis_b!r}")
+                c.refusal = Refusal(
+                    RefusalCode.PROTOCOL_MISMATCH,
+                    f"同一个判词 id 的两次运行不是同一个量（{'、'.join(why)}）："
+                    f"不给差值、也不给百分比")
+                res.comparisons.append(c)
+                continue
             c.delta = round(float(c.b) - float(c.a), 4)
             c.delta_pct = (round(100.0 * c.delta / abs(float(c.a)), 3)
                            if float(c.a) != 0 else None)

@@ -101,6 +101,8 @@ VERDICT_PREMISES: dict[str, tuple[str, ...]] = {
                        "env_gpu_busy_pct", "env_no_throttle_pct"),
     "truth_vs_substitute": (),
     "saving_estimate": (),
+    # 第一级只按**实测时长占比**排序：零前提（时长是 exact 的），所以没有强制前提
+    "saving_estimate_share": (),
     "dram_bytes": ("window_coverage_pct", "window_mem_busy_pct"),
     "dram_bytes_per_launch": ("window_coverage_pct", "matched_kernel_kernel_share_pct"),
     "dram_bytes_trace": ("trace_vs_nvml_pct",),
@@ -911,7 +913,10 @@ def _verdict_saving(rep: Any) -> Verdict | None:
         if disc is None:
             return None
         return Verdict(
-            id="saving_estimate", question="先改哪里（按实测占比排的头寸）", status=SOFT,
+            # X-19：第一级**不能**和第二级共用 id —— 一个是"按实测时长占比"（%），
+            # 一个是"省下的钱"（CNY/h）。共用一个 id 时 `diff` 会把两者相减
+            # （实测 delta_pct=-97.95%、单位标成 CNY/h）——用单一表示承载多重语义。
+            id="saving_estimate_share", question="先改哪里（按实测占比排的头寸）", status=SOFT,
             facts=disc, value=disc["top_pct"], unit="%", provenance="exact",
             metrics=("gpu__time_duration.sum",),
             next=("先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要："
@@ -1030,6 +1035,7 @@ VERDICT_IDS: tuple[str, ...] = (
     "cost_per_token",
     "truth_vs_substitute",
     "saving_estimate",
+    "saving_estimate_share",
     "dram_bytes",
     "dram_bytes_per_launch",
     "dram_bytes_trace",
@@ -1918,7 +1924,7 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
         if cond:
             bits.append(cond)
         return "；".join(bits) or "成本账"
-    if fid == "saving_estimate":
+    if fid in ("saving_estimate", "saving_estimate_share"):
         if f.get("basis") == "time_share":
             # 发现层第一级（M13）：按实测时间占比排的头寸，**明说这不是钱**
             # 人话里带上机器字段（basis/money）：一屏契约要求"包里的每个 fact 都能在

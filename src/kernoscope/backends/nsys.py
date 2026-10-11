@@ -29,6 +29,22 @@ class NsysError(RuntimeError):
     pass
 
 
+class TargetFailed(NsysError):
+    """被测**目标程序**非零退出（nsys 会把目标的退出码透传回来）。
+
+    为什么不能并入 `NsysError`（第七轮 X-1）：旧实现把 rc≠0 一律报成
+    "nsys profile failed (rc=3)"，于是**目标自己退出 3** 这件事被讲成"nsys 失败"，
+    再挂上"nsys 随 CUDA Toolkit 提供（或单独安装）"的提示 —— 把人送去装一个已经装好的工具，
+    而真正的原因（目标失败）一个字都没说。
+    """
+
+    def __init__(self, rc: int, *, rep_exists: bool, detail: str = "") -> None:
+        super().__init__(f"target exited with rc={rc}")
+        self.rc = rc
+        self.rep_exists = rep_exists
+        self.detail = detail
+
+
 def find_nsys() -> str | None:
     """多路径发现（与 doctor 用同一份逻辑，避免"同一台机器两个答案"）。"""
     from ..toolchain import find
@@ -66,8 +82,15 @@ def run_profile(cmd: Sequence[str], out_prefix: str, nsys: str | None = None,
     proc = subprocess.run(args, capture_output=True, text=True)
     rep = out_prefix + ".nsys-rep"
     if proc.returncode != 0 or not os.path.exists(rep):
+        # nsys 把**目标程序**的退出码透传回来。目标非零退出不是"nsys 失败"（X-1）：
+        # 目标已经解析过（cli 侧先做 `_resolve_target`），所以这一条可以确定地按目标归因。
+        # 只有**没有产出 repo** 时才把"nsys 自身也可能失败"作为次要可能写进 detail。
+        if proc.returncode != 0:
+            raise TargetFailed(
+                proc.returncode, rep_exists=os.path.exists(rep),
+                detail=(proc.stderr[-300:] or proc.stdout[-300:]).strip())
         raise NsysError(
-            f"nsys profile failed (rc={proc.returncode})\n"
+            f"nsys 没有产出 .nsys-rep（它自己返回 0，这一点是 nsys 的问题）：{rep}\n"
             f"stdout tail: {proc.stdout[-800:]}\nstderr tail: {proc.stderr[-800:]}"
         )
     return rep
