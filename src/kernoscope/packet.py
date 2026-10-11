@@ -920,7 +920,7 @@ def _verdict_saving(rep: Any) -> Verdict | None:
             # X-19：第一级**不能**和第二级共用 id —— 一个是"按实测时长占比"（%），
             # 一个是"省下的钱"（CNY/h）。共用一个 id 时 `diff` 会把两者相减
             # （实测 delta_pct=-97.95%、单位标成 CNY/h）——用单一表示承载多重语义。
-            id="saving_estimate_share", question="先改哪里（按实测占比排的头寸）", status=SOFT,
+            id="saving_estimate_share", question="先改哪里（按实测时长占比排序）", status=SOFT,
             facts=disc, value=disc["top_pct"], unit="%", provenance="exact",
             metrics=("gpu__time_duration.sum",),
             next=("先看占比最高的那一条；要拿到「保守可省区间 + 钱」需要："
@@ -929,7 +929,7 @@ def _verdict_saving(rep: Any) -> Verdict | None:
                   + ("；" if "calibration" in disc["needs"] and "price" in disc["needs"] else "")
                   + ("价格（--ks-price-per-hour 或 --ks-price-per-kwh）"
                      if "price" in disc["needs"] else "")),
-            claim=(f"按**实测时间占比**排的头寸：{disc['top_kernel']} 占 {disc['top_pct']}%"
+            claim=(f"按**实测时长占比**排序：{disc['top_kernel']} 占 {disc['top_pct']}%"
                    f"（共 {disc['n']} 个 kernel）。这是时长占比，**不是**节省比例、也不是钱 —— "
                    f"要钱与区间还需：{disc['needs']}"))
     ranked = list(p.get("ranked") or [])
@@ -944,11 +944,11 @@ def _verdict_saving(rep: Any) -> Verdict | None:
             facts=(disc or {}),          # 拒绝也可以带"第一级"的实测排序（拒绝≠空）
             refusal=Refusal(code_enum, str(p.get("refusal_message")
                                           or p.get("money_refusal_message")
-                                          or "没有可辩护的头寸：缺达成值或本机实测峰值")),
+                                          or "给不出可省区间：缺达成值或本机实测峰值")),
             metrics=("ks__prescription_headroom_n",),
             next="给 --ks-gemm M,N,K（或 --ks-flops/--ks-bytes）并加 --ks-calibration "
-                 "machine-profile.json，才有实测分母来算头寸",
-            claim="不给节省估计：没有可辩护的头寸（缺少达成值或本机实测峰值）")
+                 "machine-profile.json，才有实测分母来算可省多少",
+            claim="不给节省估计：缺少达成值或本机实测峰值")
     top = ranked[0]
     facts: dict[str, Any] = {"n": len(ranked), "top_kernel": _clip(str(top.get("kernel", "")),
                                                                   FACT_STR_LIMIT),
@@ -972,7 +972,7 @@ def _verdict_saving(rep: Any) -> Verdict | None:
         metrics=("ks__prescription_total_saving_per_hour",),
         next="按 Priority 顺序改一处再重跑同一条命令；用 kernoscope diff 确认变化超过 MDD，"
              "再用 ks__cost_per_mtok 看钱有没有降",
-        claim=(f"头寸 {len(ranked)} 条：最大一条是 {facts.get('top_kernel')}"
+        claim=(f"可优化项 {len(ranked)} 条：最大的一条是 {facts.get('top_kernel')}"
                f"（保守 {facts.get('top_pct_lo')}%~上界 {facts.get('top_pct_hi')}%）"
                + (f"，合计可省 {facts.get('total_per_hour')} {unit}"
                   if facts.get("total_per_hour") else "；钱给不出（缺价格或份额）")))
@@ -1112,6 +1112,31 @@ def _clock_lock_state(rep: Any) -> str:
     return state if state in ("locked", "unlocked", "unknown") else "unknown"
 
 
+def _provenance_counts(rep: Any) -> dict[str, int]:
+    """报告里每条指标按**出处**计数（`exact`/`measured`/`estimated`/`derived`）。
+
+    只数带值的（`unavailable` 的不算"测到"）—— 这正是与 `unmeasured` 对照的那个分母。
+    """
+    # **按指标名去重**：同一个指标在每个 kernel 行上都有一条，按行数会数出上千，
+    # 而 `unmeasured` 数的是"多少个指标" —— 两个口径不同就不能并排给人看
+    # （真机实测：一屏出现"共 145 项没测到；本次测到 1017 项"，读者只会更糊涂）。
+    seen: dict[str, str] = {}
+    for k in getattr(rep, "kernels", []) or []:
+        for sec in getattr(k, "sections", []) or []:
+            for m in getattr(sec, "metrics", []) or []:
+                if getattr(m, "value", None) is None:
+                    continue
+                prov = getattr(getattr(m, "provenance", None), "value", None) \
+                    or str(getattr(m, "provenance", ""))
+                name = str(getattr(m, "name", "") or "")
+                if prov and name:
+                    seen[name] = prov
+    out: dict[str, int] = {}
+    for prov in seen.values():
+        out[prov] = out.get(prov, 0) + 1
+    return out
+
+
 def _window_mode(rep: Any) -> str:
     """只留窗口**模式**：整段窗口描述里有 wall 时间等每次都变的数字。"""
     w = str((getattr(rep, "meta", {}) or {}).get("window", ""))
@@ -1160,6 +1185,12 @@ def protocol_hash(rep: Any, extra: dict[str, Any] | None = None) -> str:
 # 不能被截断挤掉的"守卫"判词：它们一旦消失，别的判词会带着**已被推翻的前提**留在包里
 # （`over_peak` 不成立 ⇒ roofline 的达成率不可引用）。与结论四条一起进优先集合。
 GUARD_VERDICT_IDS: tuple[str, ...] = ("over_peak",)
+
+#: facts 要**留到最后**才裁的判词：结论四条 + 守卫 + occupancy。
+#: occupancy 为什么也在里面：在拿不到计数器的机器上，"理论上界 vs 实测达到"是少数几个定量
+#: 结论之一（真机实测：它被裁掉后一屏只剩 `occupancy：16.7 %（细节被裁掉）`，读者只能猜）。
+FACTS_KEEP_IDS: tuple[str, ...] = ("kernel_time", "cost_per_token", "saving_estimate",
+                                   "truth_vs_substitute", "over_peak", "occupancy")
 
 
 def _priority_ids() -> tuple[str, ...]:
@@ -1335,6 +1366,8 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
     if capabilities is not None:
         env = {"tier": capabilities.tier,
                "tier_name": capabilities.tier_obj.name,
+               # 给读者看的是**这一层需要什么**（中文），不是内部英文名
+               "tier_note": getattr(capabilities.tier_obj, "needs", ""),
                "counter_state": capabilities.env.counter_state,
                "blocked_by": sorted({d["code"] for d in capabilities.next_actions()})[:6]}
 
@@ -1342,6 +1375,9 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
         "wall_s": round((getattr(rep, "wall_time_ns", 0) or 0) / 1e9, 3),
         "launches": sum(len(getattr(k, "launches", [])) for k in getattr(rep, "kernels", [])),
         "unmeasured_metrics": sum(g["count"] for g in unmeasured_all),
+        # 与 unmeasured 对照的分母：**本次真的测到了多少条指标**（按出处分）。
+        # 没有它时，一屏只印"共 147 个没测到"，读者会把它读成"这工具基本没用"。
+        "measured_metrics": sum(_provenance_counts(rep).values()),
         "selftest_band": bool(band),
     }
     if report_path and os.path.exists(report_path):
@@ -1594,7 +1630,11 @@ def enforce_budget(packet: dict[str, Any],
         # 要裁就一起到最后一档 `facts_primary` 才裁。
         ("facts_secondary", lambda: _record_trimmed_items(
             "facts_secondary",
-            _drop_facts(lambda v: v.get("id") not in _priority_ids()))),
+            # 除了结论/守卫，**带 `uncitable_value` 的判词**也要保住 facts：那是"我们拒绝
+            # 引用哪个数"的审计痕迹 —— 真机包里它被裁掉过（新增字段挤紧预算时当场复现），
+            # 于是"拒绝"变成没有对象的一句话。拒绝也要留下你拒绝的是什么。
+            _drop_facts(lambda v: v.get("id") not in FACTS_KEEP_IDS
+                        and "uncitable_value" not in (v.get("facts") or {})))),
         # V-1（第五轮 P0）：**拒绝散文先裁、判词最后裁**。
         # 旧顺序把 `verdicts` 排在 `refusal_entries`/`refusal_action_text` 之前，
         # 与函数自己的 docstring（"结论比处置散文重要"）相反：真机 9 条判词 → 包 6 条，
@@ -2034,7 +2074,7 @@ def _phrase_verdict_impl(v: dict[str, Any], index: dict[str, dict[str, Any]]) ->
             note = "；这是时长占比**不是钱**"
             if f.get("needs"):
                 note += f"，要钱与区间还需补：{f['needs']}"
-            return (f"按**实测时间占比**排的头寸（basis={f.get('basis')}；"
+            return (f"按**实测时长占比**排序的优化清单（basis={f.get('basis')}；"
                     f"money={f.get('money')}）"
                     + (f"：{shown}" if shown else "")
                     + (f"（{'；'.join(bits)}）" if bits else "")
@@ -2045,9 +2085,9 @@ def _phrase_verdict_impl(v: dict[str, Any], index: dict[str, dict[str, Any]]) ->
                     + (f"；合计可省 {f['total_per_hour']} {f.get('currency', 'CNY')}/h"
                        if f.get("total_per_hour") is not None else "；钱给不出"))
         n = f.get("n")
-        return (f"头寸 {n} 条，但都还没有可辩护的区间" if n is not None
-                else "头寸还不给区间：缺本机标定（`tools/machine-profile.py`）与价格"
-                     "（`--ks-price-per-hour`）—— 排序本身仍然是实测的")
+        return (f"优化清单 {n} 条，但现在还给不出可省区间" if n is not None
+                else "只给了按实测时长排序的优化清单；可省区间与钱这次给不出"
+                     "（具体缺什么见下面「没测到什么」与「路径」）")
     if fid == "truth_vs_substitute":
         return (f"与 ncu {f.get('ncu', '?')} 的真值对拍 {f.get('compared')}/{f.get('pairs')} 条"
                 + (f"，最大相对偏差 {f['max_abs_err_pct']}%"
@@ -2072,7 +2112,7 @@ def _one_line_summary(packet: dict[str, Any]) -> str:
     refused = [v for v in verdicts if v.get("status") == REFUSED]
     ok = [v for v in verdicts if v.get("status") != REFUSED]
     if not verdicts:
-        return "没有可下结论的判词：先看「没测到什么」"
+        return "还没有可用的结论：先看「没测到什么」"
     parts: list[str] = []
     if refused:
         codes = []
@@ -2080,7 +2120,7 @@ def _one_line_summary(packet: dict[str, Any]) -> str:
             c = (v.get("refusal") or {}).get("code")
             if c and c not in codes:
                 codes.append(c)
-        parts.append(f"{len(refused)}/{len(verdicts)} 条判词被拒（{', '.join(codes[:3])}）"
+        parts.append(f"{len(verdicts)} 条结论里 {len(refused)} 条被拒（{', '.join(codes[:3])}）"
                      f"，它们不能当依据")
     if ok:
         parts.append(f"{len(ok)} 条成立")
@@ -2139,7 +2179,15 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
     head = (f"Kernoscope {packet.get('tool_version')} · "
             f"协议 {str((packet.get('protocol') or {}).get('hash', ''))[7:19]}")
     if env:
-        head += f" · 层 {env.get('tier')} ({env.get('tier_name')})"
+        # 印**中文说明**而不是内部英文 tier 名（"instrumented" 对读者没有意义）；
+        # 没有说明时退回英文名，再没有就不印这一段。
+        tier_bits = [str(env.get("tier"))] if env.get("tier") is not None else []
+        if env.get("tier_note") or env.get("tier_name"):
+            tier_bits.append(str(env.get("tier_note") or env.get("tier_name")))
+        if tier_bits:
+            head += " · 能力层 " + tier_bits[0]
+            if len(tier_bits) > 1:
+                head += "：" + tier_bits[1]
     if packet.get("synthetic"):
         head += " · **合成数据（不是测量）**"
     out.append(head)
@@ -2151,9 +2199,9 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
         out.append("")
 
     verdicts = packet.get("verdicts") or []
-    out.append("-- 发现（判词与前提）--")
+    out.append("-- 结论与前提 --")
     if not verdicts:
-        out.append("没有任何可下结论的判词：见下面「没测到什么」。")
+        out.append("还没有任何可用的结论：见下面「没测到什么」。")
     for v in verdicts:
         mark = _STATUS_MARK.get(v.get("status"), "?   ")
         line = f"[{mark}] {phrase_verdict(v, index)}"
@@ -2208,11 +2256,29 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
         more = packet.get("unmeasured_more") or {}
         total = sum(g["count"] for g in um) + int(more.get("metrics") or 0)
         out.append("")
-        out.append(f"没测到什么（共 {total} 个指标，按原因归组）：")
-        for g in um:
+        # 「没测到什么」的框法（真机 + 用户反馈）：只印一个"共 147 项"会读成"这工具基本没用"。
+        # 诚实的框法是**同时给分母**（本次到底测到了多少）并**按"能不能补"分组**：
+        #   · 补一个输入 / 跑一次探针就能答（有代价，有命令）
+        #   · 这台机器或平台策略挡住（不是能力缺口，且我们给了替代口径）
+        n_meas = (packet.get("cost") or {}).get("measured_metrics")
+        head = f"没测到什么（共 {total} 项"
+        if n_meas:
+            head += f"；本次**测到** {n_meas} 项"
+        head += "，按原因归组）："
+        out.append(head)
+        def _bucket(code: str) -> str:
+            r = index.get(code) or {}
+            if r.get("cost_kind") == "unavailable":
+                return "平台挡住·有替代口径"
+            if r.get("command"):
+                return "补一条命令就能答"
+            return "需要额外采集"
+
+        for g in sorted(um, key=lambda x: -int(x.get("count") or 0)):
             r = index.get(g["code"]) or {}
             cost = _cost_text(r)
-            out.append(f"  - {g['count']} 个 {g['code']}（{code_title(g['code'])}）"
+            out.append(f"  - [{_bucket(g['code'])}] {g['count']} 个 {g['code']}"
+                       f"（{code_title(g['code'])}）"
                        + (f"（例：{', '.join(g['examples'])}）" if g.get("examples") else "")
                        + (f"；怎么办：{r['action']}" if r.get("action") else "")
                        + (f"（代价 {cost}）" if cost and r.get("cost_kind")
@@ -2220,7 +2286,7 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
         for code in (env.get("blocked_by") or []):
             if code not in {g["code"] for g in um}:
                 r = index.get(code) or {}
-                out.append(f"  - 本机缺件 {code}（{code_title(code)}）"
+                out.append(f"  - 未提供：{code_title(code)}（{code}）"
                            + (f"；怎么办：{r['action']}" if r.get("action") else ""))
         if more:
             out.append(f"  … 其余 {more.get('groups')} 组 / {more.get('metrics')} 个指标见 "
@@ -2237,10 +2303,13 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
     if cost.get("trimmed"):
         # R-70/D10：只说"裁了哪一步"不够 —— 读者要知道**少了什么**。所以把三个
         # "*_more" 的计数与 id 一起印出来（它们本来就是为这个存在的机器契约字段）。
-        bits.append("包已按尺寸预算裁剪（" + ", ".join(cost["trimmed"]) + "）")
+        # 内部裁剪步骤名是**实现细节**，不进人视图（截图里更不该出现）：读者要知道的是
+        # "包被裁过、完整内容在哪"。
+        bits.append(f"包已按尺寸预算裁剪 {len(cost['trimmed'])} 处"
+                    f"（内部步骤名与完整内容见 --packet）")
     more = packet.get("verdicts_more") or {}
     if more:
-        bits.append(f"判词超上限少 {more.get('count')} 条（{', '.join(more.get('ids') or [])}）")
+        bits.append(f"结论超上限少 {more.get('count')} 条（{', '.join(more.get('ids') or [])}）")
     omitted = packet.get("refusals_omitted") or {}
     if omitted:
         codes = ", ".join(omitted.get("codes") or [])
@@ -2261,7 +2330,7 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
         elif it.get("hint"):
             out.append(f"  {i}. [{it['for']}] {_clip(it['hint'], 88)}")
     if not next_ranked(packet):
-        out.append("  （没有待办：判词都成立；改代码后再跑 diff）")
+        out.append("  （没有待办：结论都成立；改代码后再跑 diff）")
     out.append("")
     out.append("本次代价：" + " · ".join(str(b) for b in bits))
     if cost.get("report_path") or False:

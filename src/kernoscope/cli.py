@@ -1506,7 +1506,7 @@ def _attach_prescription(rep: Report, args: argparse.Namespace, cost_est, peaks,
         calib = Calibration.from_spec(
             bandwidth_gbs=(getattr(args, "ks_peak_gbps", None)
                            or (peaks.bandwidth_gbs if peaks else None)),
-            source="--ks-peak-*/规格表（不用于头寸估计）")
+            source="--ks-peak-*/规格表（不用于可省估计）")
 
     window_s = float(getattr(cost_est, "window_s", 0.0) or 0.0) or rep.wall_time_ns / 1e9
     entries = []
@@ -1559,9 +1559,9 @@ def _attach_prescription(rep: Report, args: argparse.Namespace, cost_est, peaks,
     if pre.ranked:
         hy = (f"，合计可省 {pre.total_saving_per_hour:.3g} {pre.currency}/h"
               if pre.total_saving_per_hour is not None else "（钱还给不出：见 money_refusal）")
-        log(f"prescription: {len(pre.ranked)} 条头寸{hy}")
+        log(f"prescription: {len(pre.ranked)} 条可优化项{hy}")
     else:
-        log("prescription: 没有可辩护的头寸（" +
+        log("prescription: 给不出可省区间（" +
             (pre.refusal.message[:120] if pre.refusal else "缺少达成值/实测峰值") + "）")
 
 

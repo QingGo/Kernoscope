@@ -17,6 +17,7 @@
       "env": {
         "tier": 2,
         "tier_name": "trace",
+        "tier_note": "nsys（CUPTI activity）",
         "counter_state": "denied",
         "blocked_by": [
           "no_static_input",
@@ -233,9 +234,10 @@
         "wall_s": 1.3,
         "launches": 300,
         "unmeasured_metrics": 6,
+        "measured_metrics": 5,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 3875
+        "packet_bytes": 3935
       }
     },
     "capabilities": {

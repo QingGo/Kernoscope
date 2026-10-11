@@ -141,7 +141,7 @@ _MISSING_BASIS = {
                        command="kernoscope --ks-calibration machine-profile.json "
                                "--ks-window auto --ks-instr-hist opcode_hist.txt -- python bench.py",
                        cost_s=600.0, then_answers=("prescription",)),
-    "peak_gbs": Remedy("跑一次本机标定并把结果传进来（规格表峰值不能用于头寸估计）",
+    "peak_gbs": Remedy("跑一次本机标定并把结果传进来（规格表峰值不能用来估计能省多少）",
                        command="python tools/machine-profile.py --out machine-profile.json",
                        cost_s=300.0, then_answers=("prescription",)),
     "peak_issue": Remedy("给出本机实测可达的发射槽利用率上限（标定/探针），"

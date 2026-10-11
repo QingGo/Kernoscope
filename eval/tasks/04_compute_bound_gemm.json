@@ -17,6 +17,7 @@
       "env": {
         "tier": 3,
         "tier_name": "instrumented",
+        "tier_note": "NVBit 自行编译（+ nvcc）",
         "counter_state": "denied",
         "blocked_by": [
           "no_instr_hist",
@@ -193,13 +194,14 @@
         "wall_s": 1.75,
         "launches": 120,
         "unmeasured_metrics": 3,
+        "measured_metrics": 13,
         "selftest_band": false,
         "trimmed": [
           "unmeasured_examples",
           "verdict_metrics",
           "next_pointers"
         ],
-        "packet_bytes": 3877
+        "packet_bytes": 3944
       }
     }
   },

@@ -36,10 +36,10 @@ def _packet():
 def test_onepage_is_three_sections_with_a_one_line_conclusion():
     text = render_onepage(_packet())
     assert "结论：" in text
-    assert "-- 发现（判词与前提）--" in text
+    assert "-- 结论与前提 --" in text
     assert "-- 路径（下一步，按挡住决策的程度排序）--" in text
     # 段落顺序：结论 → 发现 → 路径 → 代价
-    order = [text.index("结论："), text.index("-- 发现"), text.index("-- 路径"),
+    order = [text.index("结论："), text.index("-- 结论与前提"), text.index("-- 路径"),
              text.index("本次代价")]
     assert order == sorted(order)
 
@@ -64,7 +64,7 @@ def test_one_line_summary_counts_refused_verdicts():
     packet_bytes(p)
     text = render_onepage(p)
     refused = [v for v in p["verdicts"] if v["status"] == "refused"]
-    assert f"{len(refused)}/{len(p['verdicts'])} 条判词被拒" in text
+    assert f"{len(p['verdicts'])} 条结论里 {len(refused)} 条被拒" in text
 
 
 # --------------------------------------------------------------------------

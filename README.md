@@ -2,9 +2,9 @@
 
 [![PyPI](https://img.shields.io/pypi/v/kernoscope)](https://pypi.org/project/kernoscope/) [![Python](https://img.shields.io/pypi/pyversions/kernoscope)](https://pypi.org/project/kernoscope/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**已发布到 PyPI**（`0.2.0`，alpha）：`uv tool install kernoscope`。**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化头寸 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
+**已发布到 PyPI**（`0.2.0`，alpha）：`uv tool install kernoscope`。**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化清单 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
 
-它回答：**先改哪里能省多少**（按实测占比排序的头寸，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。与 `ncu` **CLI 兼容但数据源不同**（绝不占用它的指标名）；`nsys` 与 `torch.profiler` 是互补关系（见 §4）。
+它回答：**先改哪里能省多少**（按实测占比排序的优化清单，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。与 `ncu` **CLI 兼容但数据源不同**（绝不占用它的指标名）；`nsys` 与 `torch.profiler` 是互补关系（见 §4）。
 
 30 秒上手（没有 GPU 也能跑通，三条命令都返回 0）：`kernoscope capabilities --brief` 看这台机器能答什么（约 1 KB）→ `kernoscope doctor` 看拿不到什么、为什么（`--no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读）→ `kernoscope --packet - -- <你的命令>` 拿一份 <4 KB 决策包。
 
@@ -57,7 +57,7 @@ $ ncu --set basic -- python train.py
 | 训练/推理各阶段占多少 kernel 时间 | nsys 的 NVTX 区间按重叠时长归因 | `derived` |
 | 窗口/设备级能耗与功率 | NVML 能量累加器 / 窗口内功率积分（ncu 没有这个指标） | `measured` |
 | **每 kernel** 能耗与成本 | 窗口能耗 × **该 kernel 窗口时间占比**（代理口径，假设窗口内功率大致均匀） | `estimated` |
-| **每百万 token 多少钱、先改哪里** | 实测能耗 + 你给的 token 数与价格 + 实测峰值头寸 | `measured`/`derived`/`estimated` |
+| **每百万 token 多少钱、先改哪里** | 实测能耗 + 你给的 token 数与价格 + 本机实测峰值 | `measured`/`derived`/`estimated` |
 | 真值校准我们的替代口径 | 导入一份 `.ncu-rep`（官方只读 API）逐条对拍 —— **包装逻辑已验；真报告口径未验证**（见 §4.3） | `exact` / `derived` |
 | 让已有 ncu 工作流继续能用 | 导出**带署名**的替代口径 `.ncu-rep` | `estimated` / `derived` |
 | L2/DRAM 精确字节、命中率、warp stall 细分 | **不给数字**，报 `n/a` + 原因 | `unavailable` |
@@ -160,7 +160,7 @@ kernoscope --plan -o rep -- python bench_loop.py
 
 ### 先把本机峰值标定出来（强烈建议）
 
-roofline 与处方头寸都用**本机实测峰值**而非规格表。一台 RTX 4090（450 W 功耗墙）的实测差异：
+roofline 与「能省多少」都用**本机实测峰值**而非规格表。一台 RTX 4090（450 W 功耗墙）的实测差异：
 
 | 指标 | 规格表 | 本机实测 |
 |---|---|---|
@@ -178,7 +178,7 @@ kernoscope --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-d
 标定产物记录**累加口径**（`acc_caliber` / `precision_settings` / `method`）与
 **口径离散度**（`caliber_spread_pct` / `caliber_distinguishable`）——
 因为"口径能不能被分辨"本身是测量结果：同一台机器相隔一天的两次标定给出 0.4% 与 5.0% 两种结论。
-缺这些字段时，Kernoscope **拒绝用它算 roofline 拐点与处方头寸**（带宽侧照常给数）。
+缺这些字段时，Kernoscope **拒绝用它算 roofline 拐点与能省多少**（带宽侧照常给数）。
 详见 [CALIBRATION.md](CALIBRATION.md)。
 
 > 数字来自 [`bench/artifacts/`](bench/artifacts/) 里那次完整标定，见 §12。
@@ -195,7 +195,7 @@ kernoscope --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-d
 | `exact` | 与 ncu 同源可得（CUPTI activity 时间戳、launch 配置、cubin 静态属性） | ncu 的名字（`gpu__time_duration.sum`、`launch__*`） |
 | `measured` | 我们的探针**实测读数**（NVML 管理计数器、区间重叠探针） | `meas__*` |
 | `derived` | 由实测/精确量**再算出来**的统计量与判词（均值、占比、成本、判词） | `ks__*` |
-| `estimated` | 模型或采样推算（代理口径、访存轨迹模型、roofline 达成率、处方头寸） | `est__*` / `model__*` |
+| `estimated` | 模型或采样推算（代理口径、访存轨迹模型、roofline 达成率、可优化项） | `est__*` / `model__*` |
 | `unavailable` | 给不出，只报 `n/a` | 任何名字，必须带 `code=` |
 
 两条硬纪律：

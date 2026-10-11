@@ -290,7 +290,7 @@ def test_onepage_text_is_passed_through_and_conclusion_is_derived():
     packet = _built_packet()
     # 不传：结论从包里派生（复用 render_onepage 的「结论：」行）
     derived = render_html(packet)
-    assert "条判词被拒" in derived, "包里有 refused 时结论必须点出来"
+    assert "条被拒" in derived, "包里有 refused 时结论必须点出来"
 
     onepage = "Kernoscope 0.2.0 · 协议 0123\n结论：先解 instrumentation_missing\n尾部 & <b>"
     html = render_html(packet, onepage_text=onepage)
