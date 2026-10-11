@@ -114,6 +114,18 @@
 | `selftest` | `-o, --out <f>` / `--json` / `--size-mb` / `--duration` / `--runs` / `--dtype` / `--only` / `--cross-process` / `--quick` / `--strict` / `--quiet` | 纯 torch 的已知答案自检：写 `--ks-selfcheck` 用的文件（**不是** `--ks-calibration`，见 `PEAK_CAVEAT`）；`--cross-process` 把跨进程复测算进 MDD |
 | `diff` | `--selfcheck <f>` / `--json` / `--fail-on {none,regressed,change}` / `--strict` / `--quiet` | 误差带对拍；**`--fail-on` 是唯一能拿去卡 CI 退出码的开关**（`regressed`/`change` 命中即非零退出） |
 
+### 输出与案件目录（C5）
+
+- 一屏（`--screen only`，`-o` 时也落 `*.onepage.txt`）改为**三段式**，段落标题固定可解析：
+  `结论：` 一行 → `-- 发现（判词与前提）--` → `-- 路径（下一步，按挡住决策的程度排序）--`
+  → `本次代价：`。「路径」段的排序是确定的：**先列被拒的判词**（它们挡住了决策），
+  再列成立判词自带的提示，最后列未测到的组；同一 code/提示只出现一次。
+- 新增**案件目录**（`-o <前缀>` 时默认写 `<前缀>.case/`，`--no-case` 关闭）：
+  `manifest.json`（工具版本、协议哈希、**输入指纹**、参数、输出清单）、`env.json`、
+  `journal.jsonl`（**追加式**：每次调用一条，含 rc/判词状态/拒绝码/包大小）、
+  `next.md`（可直接交给下一个会话的"下一步"）、`README.md`。
+  目的是让一次优化任务**跨会话可继续、可交接**；案件目录写入失败不影响主产物（只 warn）。
+
 ### 命令行
 
 - 新增子命令：`capabilities`（`--json` / `--brief` / `--probe`）、`selftest`、`diff`。

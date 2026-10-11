@@ -1200,6 +1200,73 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
     return v.get("id", "")
 
 
+def _one_line_summary(packet: dict[str, Any]) -> str:
+    """一屏顶部的**一行结论**：最能决定下一步的那件事。
+
+    派生规则（确定、可读）：
+      * 有 `refused` 判词 → "N 条判词被拒（code…），它们不能当依据"；
+      * 否则全部成立 → "M 条判词成立"；再补一句"最该动的一步"（取 next_ranked 第一条）。
+    永远不编造"应该改哪一行代码" —— 那是 C2（收益预估/处方排序）的活，且必须由测量推出。
+    """
+    verdicts = packet.get("verdicts") or []
+    refused = [v for v in verdicts if v.get("status") == REFUSED]
+    ok = [v for v in verdicts if v.get("status") != REFUSED]
+    if not verdicts:
+        return "没有可下结论的判词：先看「没测到什么」"
+    parts: list[str] = []
+    if refused:
+        codes = []
+        for v in refused:
+            c = (v.get("refusal") or {}).get("code")
+            if c and c not in codes:
+                codes.append(c)
+        parts.append(f"{len(refused)}/{len(verdicts)} 条判词被拒（{', '.join(codes[:3])}）"
+                     f"，它们不能当依据")
+    if ok:
+        parts.append(f"{len(ok)} 条成立")
+    ranked = next_ranked(packet, limit=1)
+    if ranked and ranked[0].get("code"):
+        parts.append(f"先解 {ranked[0]['code']}")
+    return "；".join(parts)
+
+
+def next_ranked(packet: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    """「路径」：按**挡住决策的程度**排序的下一步。
+
+    排序规则（确定、可测，不是模板话术）：
+      1. `refused` 的判词（它们的数不能当依据 ⇒ 挡路最狠），按判词顺序（判词顺序本身就是
+         "先看哪个"的意图：kernel_time → dram_bytes → …）；
+      2. 其余判词自带的 `next` 提示（已经成立，但可以更省/更准）；
+      3. 未测到的组（缺数据源 ⇒ 换口径或补依赖）。
+    同一 code / 同一提示只出现一次。
+    """
+    index = refusal_index(packet)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(item: dict[str, Any]) -> None:
+        key = item.get("code") or item.get("hint") or item.get("for", "")
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(item)
+
+    for v in packet.get("verdicts") or []:
+        if v.get("status") == REFUSED:
+            code = (v.get("refusal") or {}).get("code", "?")
+            r = index.get(code) or {}
+            add({"for": v.get("id"), "code": code, "action": r.get("action"),
+                 "cmd": r.get("cmd"), "kind": "refused"})
+    for v in packet.get("verdicts") or []:
+        if v.get("status") != REFUSED and v.get("next"):
+            add({"for": v.get("id"), "hint": v["next"], "kind": "advisory"})
+    for g in packet.get("unmeasured") or []:
+        add({"for": g.get("code"), "code": g.get("code"),
+             "action": (index.get(g.get("code")) or {}).get("action"),
+             "hint": f"{g.get('count')} 个指标没测到", "kind": "unmeasured"})
+    return out[:limit]
+
+
 def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
     """结论优先的一屏：判词 + 前提值 + 下一步 + 什么没测到 + 代价。
 
@@ -1217,8 +1284,14 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
         head += " · **合成数据（不是测量）**"
     out.append(head)
     out.append("-" * min(width, 96))
+    # C5：三段式（结论 → 发现 → 路径）的**结论**一行 —— agent 先读这一行就够决定要不要往下看
+    _summary = _one_line_summary(packet)
+    if _summary:
+        out.append(f"结论：{_summary}")
+        out.append("")
 
     verdicts = packet.get("verdicts") or []
+    out.append("-- 发现（判词与前提）--")
     if not verdicts:
         out.append("没有任何可下结论的判词：见下面「没测到什么」。")
     for v in verdicts:
@@ -1318,6 +1391,17 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
     if un_more:
         bits.append(f"未测项合并了 {un_more.get('groups')} 组"
                     f"（共 {un_more.get('metrics')} 个指标）")
+    out.append("")
+    out.append("-- 路径（下一步，按挡住决策的程度排序）--")
+    for i, it in enumerate(next_ranked(packet), 1):
+        if it.get("code"):
+            out.append(f"  {i}. [{it['for']}] 先解 {it['code']}"
+                       + (f"：{it['action']}" if it.get("action") else "")
+                       + (f"  [{it['cmd']}]" if it.get("cmd") else ""))
+        elif it.get("hint"):
+            out.append(f"  {i}. [{it['for']}] {_clip(it['hint'], 88)}")
+    if not next_ranked(packet):
+        out.append("  （没有待办：判词都成立；改代码后再跑 diff）")
     out.append("")
     out.append("本次代价：" + " · ".join(str(b) for b in bits))
     if cost.get("report_path") or False:

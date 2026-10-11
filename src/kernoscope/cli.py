@@ -95,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "（去掉 est__/meas__ 前缀会隐藏出处，本工具不做）")
     o.add_argument("--print-units", default="auto", choices=["base", "auto"],
                    help="base=原始单位；auto=自适应换单位（MB→GB/TB，默认）")
+    o.add_argument("--no-case", action="store_true",
+                   help="不写案件目录（默认在 -o <前缀> 旁写 <前缀>.case/：manifest/env/"
+                        "journal/next.md，供跨会话继续与交接）")
     o.add_argument("--page", default="details", choices=["details", "raw", "source"],
                    help="details=默认；raw=额外打印每个指标的数据来源；"
                         "source=同 raw（SASS/源码对照不可得，会给出说明）")
@@ -883,8 +886,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     if args.check_exit_code and target_rc:
-        return target_rc
+        rc = target_rc
+    _write_case_if_needed(rep, args, rc, argv)
     return rc
+
+
+def _write_case_if_needed(rep: Report, args: argparse.Namespace, rc: int,
+                          argv: Sequence[str]) -> None:
+    """C5：案件目录 —— 让一次优化任务可跨会话恢复、可交接。
+
+    默认在 `-o <前缀>` 旁写 `<前缀>.case/`；`--no-case` 关掉。写失败**不影响主流程**
+    （它是辅助产物，不该让一次成功的测量变成失败），但会把原因说清楚。
+    """
+    if getattr(args, "no_case", False) or not getattr(args, "export", None):
+        return
+    packet = rep.meta.get("_packet")
+    if not packet:
+        return
+    try:
+        from .case import write_case
+
+        outputs = {"report": rep.meta.get("out_json"),
+                   "perfetto": rep.meta.get("out_perfetto"),
+                   "launch_csv": rep.meta.get("out_launch_csv"),
+                   "packet": getattr(args, "packet", None),
+                   "onepage": rep.meta.get("out_onepage")}
+        write_case(packet, args.export, argv, rc, outputs, quiet=bool(args.quiet))
+    except OSError as e:
+        print(f"warn: 案件目录写入失败（{type(e).__name__}: {e}）—— 主产物不受影响",
+              file=sys.stderr)
 
 
 def _calibration_identity(path: str) -> str:
@@ -1152,6 +1182,7 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
 
     if args.log_file:
         Path(args.log_file).write_text("\n".join(logged) + "\n")
+    rep.meta["_packet"] = packet
     return 0
 
 
