@@ -692,6 +692,24 @@ kernoscope mcp --stdio
   `_environment_premises`：三个 id 都在标签表里）在 `agentrefs` 门禁 rc=0、116 条相关测试全绿。
   现在 `gen_agent_refs.py --check` 会红，并且有一条测试**复刻 A4** 证明它真的会红。
 
+### CALIBRATION 散文门禁改成"全部产物字段"（第七轮 X-9，最后一个 P2）
+
+- 旧门禁是一份**手写白名单**：`ts`、`measured_dram.{copy,read,write}_gbs`、
+  `l2_read_peak_gbs`、matmul 的 `tflops`/`caliber_spread_pct`。而产物有 90 多个叶子，
+  漏掉的那片（`clocks_during_measurement.*`、`measured_matmul_tflops.<dtype>` 的其它读法、
+  `l2_info.*`、`bandwidth_sweep[*].*`…）里新旧值确实不同的有一大批 —— 散文手抄它们的旧值时
+  **没有任何门禁会红**，而"公开数字要能追到产物"正是这个仓库的核心承诺。
+- 现在**递归取全部标量叶子**（路径带出来，报文点名到 `clocks_during_measurement.sm_clock_mean`
+  这一层），由"这个值有没有被散文引用"决定要不要管。两条防噪声规则是实测踩出来的：
+  **数字至少 3 位**（`128`/`96`/`1.5` 会在正文里合法出现），**字符串必须带数字**
+  （`reduced_precision_reduction_off`、`ieee` 这类是**协议标签**，散文引用它们讲的是"用哪种
+  口径"，与产物版本无关 —— 第一版递归实现就是被它们报了两条假阳性）；同时把产物字符串
+  **内部**的数字也登记为"现行产物也有"（`method` 里的 sweep 参数 `[4096, 8192, 16384]`）。
+- 负样本测试同步加强：不只要求五类老字段能被抓，还要求
+  `clocks_during_measurement.sm_clock_mean` 与 `measured_matmul_tflops.torch.bfloat16.tflops`
+  这**两族**都有旧值注入并变红（并写清"值从没变过的字段产生不了负样本"这条前提），
+  另加一条点名 X-9 例子的变异测试。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

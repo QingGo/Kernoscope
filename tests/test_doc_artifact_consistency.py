@@ -21,7 +21,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import pytest
 
@@ -590,28 +590,62 @@ def test_a_new_bench_run_forces_the_docs_to_follow():
 # 逐字段登记的理由：散文既讲道理也会点名数字，点名时只能是现行产物的值；旧门禁只登记了
 # matmul 的 `tflops`/`caliber_spread_pct`，于是注入旧的 `copy_gbs 910.0` /
 # `l2_read_peak_gbs 2195.8` / 旧 `ts` 都无人拦（W-8/R-62）。
+def _iter_scalar_leaves(obj: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
+    """产物 JSON → **(路径, 标量)** 的全部叶子（递归，路径带出来才能点名）。
+
+    X-9（第七轮，P2）：旧实现只登记了一份**手写白名单**（`ts`、`measured_dram.*` 三个、
+    `l2_read_peak_gbs`、matmul 的两个读法），而产物有 90 多个叶子 —— 漏掉的字段（例如
+    `clocks_during_measurement.*`、`l2_info.l2_resident_max_mb`）里，新旧值确实不同的一大片，
+    散文手抄它们的旧值时**没有任何门禁会红**。R-104 要的是"所有被引产物字段"，所以这里改成
+    **递归取全部标量**，由"这个值有没有被散文引用"来决定要不要管。
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _iter_scalar_leaves(v, f"{prefix}.{k}" if prefix else str(k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _iter_scalar_leaves(v, f"{prefix}[{i}]")
+    elif isinstance(obj, bool) or obj is None:
+        return
+    elif isinstance(obj, (str, int, float)):
+        yield prefix, obj
+
+
+def _digit_count(s: str) -> int:
+    return sum(ch.isdigit() for ch in s)
+
+
 def _calib_prose_needles(prof: dict) -> dict[str, set[str]]:
-    """`字段路径 -> 该产物在这个字段上的字面串集合`（只收散文可能引用的标量）。"""
+    """`字段路径 -> 该产物在这个字段上的字面串集合`（**全部标量**，不再手写白名单）。
+
+    两条"别把噪声当漂移"的过滤（都是实测踩出来的形状，不是拍脑袋）：
+      * 数字要**至少 3 位数字**（`128`/`96`/`1.5` 这类会在正文里合法出现；
+        `909.2`/`2193.1`/`52.0468`/`2775.0` 这类才有指向性）；
+      * 字符串要 ≥6 字符；同时把字符串**内部**的数字也登记进来（产物的 `method` 字段里写着
+        `size sweep [4096, 8192, 16384]`，那些 sweep 参数在正文里合法出现，不该被当成漂移）。
+
+    另外"新旧同名同值"的字段（`sm_count=128`、`gpu` 名字等）由调用方的 `allowed` 集合兜住：
+    现行产物也有的值一律放过。
+    """
     out: dict[str, set[str]] = {}
 
-    def add(what: str, val: Any) -> None:
-        if val is None or isinstance(val, bool):
-            return
-        out.setdefault(what, set()).add(str(val))
+    def add(what: str, needle: str) -> None:
+        out.setdefault(what, set()).add(needle)
 
-    add("ts", prof.get("ts"))
-    dram = prof.get("measured_dram") or {}
-    for k in ("copy_gbs", "read_gbs", "write_gbs"):
-        add(f"measured_dram.{k}", dram.get(k))
-    l2_peak = (prof.get("l2_info") or {}).get("l2_read_peak_gbs") or prof.get("l2_read_peak_gbs")
-    add("l2_read_peak_gbs", l2_peak)
-    for dtype, v in (prof.get("measured_matmul_tflops") or {}).items():
-        v = v or {}
-        add(f"{dtype}.tflops", v.get("tflops"))
-        pct = v.get("caliber_spread_pct")
-        if pct is not None:
-            add(f"{dtype}.caliber_spread_pct", f"{pct}%")
-            out.setdefault(f"{dtype}.caliber_spread_pct", set()).add(str(pct))
+    for path, val in _iter_scalar_leaves(prof):
+        s = str(val)
+        if isinstance(val, str):
+            # 字符串要 ≥6 字符**且带数字**才算 needle：`reduced_precision_reduction_off`、
+            # `ieee`、`bf16 (fp32 accumulate)` 这类是**协议标签**，散文引用它们讲的是"用哪种
+            # 口径"，与产物版本无关 —— 实测正是它们造成了第一批假阳性（X-9 的复现里报了两条）。
+            # 带数字的字符串（驱动串 `580.105.08, …`、`ts`、`method` 里的 sweep 参数）才有指向性。
+            if len(s) >= 6 and any(ch.isdigit() for ch in s):
+                add(path, s)
+            for tok in re.findall(r"\d+(?:\.\d+)?", s):
+                if _digit_count(tok) >= 3:
+                    add(f"{path}#num", tok)
+        elif _digit_count(s) >= 3:
+            add(path, s)
     return out
 
 
@@ -721,10 +755,19 @@ def test_calibration_prose_gate_goes_red_for_every_stale_field():
             miss.append(f"{what}={needle}")
     assert not miss, ("这些旧值注入散文后门禁没有红（W-8 的字段没纳管）：\n  - "
                       + "\n  - ".join(miss))
-    # 五类字段都要有负样本（copy/read/write/l2/ts），否则"每类字段"这句话是空的
+    # 每类被引产物字段都要有负样本，否则"每类字段"这句话是空的。
+    # 路径按**递归**取（`l2_info.l2_read_peak_gbs` 而不是手写别名），并按后缀匹配 ——
+    # 这样产物结构挪一层也不会让这条断言变成"检查一个不存在的名字"。
+    # X-9 点名的 `clocks_during_measurement` / `measured_matmul_tflops` 两族必须在内：
+    # 它们正是手写白名单漏掉、而新旧值确实不同的那片字段。
     for needed in ("measured_dram.copy_gbs", "measured_dram.read_gbs",
-                   "measured_dram.write_gbs", "l2_read_peak_gbs", "ts"):
-        assert needed in fields, f"没有 {needed} 的旧值负样本（历史产物缺这个字段？）"
+                   "measured_dram.write_gbs", "l2_read_peak_gbs", "ts",
+                   "clocks_during_measurement.sm_clock_mean",
+                   "measured_matmul_tflops.torch.bfloat16.tflops"):
+        # 注意：只列**新旧值确实不同**的字段 —— 值从没变过的字段（例如
+        # `l2_info.l2_resident_max_mb` 一直是 64）产生不了"旧值"负样本，拿它当断言是错的。
+        assert any(f == needed or f.endswith(needed) or needed in f for f in fields), \
+            f"没有 {needed} 的旧值负样本（历史产物缺这个字段，或门禁又退回白名单了？）"
 
 
 # --------------------------------------------------------------------------
@@ -916,3 +959,41 @@ def test_artifacts_without_a_pinned_revision_are_marked_unpinnable():
                 bad.append(f"{art.name}: revision={rev.group(1) if rev else None} "
                            f"dirty={dirty.group(1) if dirty else None}，但登记表没说明它钉不住")
     assert not bad, "\n  - ".join(bad)
+
+
+def test_calibration_gate_catches_a_hand_copied_old_clock_reading():
+    """X-9（P2）的验收变异：`clocks_during_measurement.*` 这类**手写白名单漏掉**的字段，
+    旧值被抄进散文必须报出来，而且报文要点名到字段路径。
+
+    为什么单列一条：老门禁只登记 `ts` / `measured_dram.*` / `l2_read_peak_gbs` /
+    matmul 的两读法，把 `clocks_during_measurement`（时钟与功耗读数）整族漏在外面 ——
+    而它在两份产物之间确实不同（`sm_clock_mean` 2397.0 vs 2356.5 …）。
+    """
+    mod = _load_calib_excerpt()
+    art, newest = mod.newest_profile()
+    allowed: set[str] = set()
+    for needles in _calib_prose_needles(newest).values():
+        allowed |= needles
+
+    candidate = None
+    for d in _artifact_dirs():
+        if d.name == art.name or not (d / "machine-profile.json").exists():
+            continue
+        prof = json.loads((d / "machine-profile.json").read_text(encoding="utf-8"))
+        for what, needles in _calib_prose_needles(prof).items():
+            if "clocks_during_measurement" not in what:
+                continue
+            for needle in sorted(needles - allowed):
+                candidate = (d.name, what, needle)
+                break
+            if candidate:
+                break
+        if candidate:
+            break
+    assert candidate, "找不到 clocks_during_measurement 的旧值 —— 历史产物被删了？"
+    name, what, needle = candidate
+
+    problem = _calibration_prose_problem(
+        _calibration_prose() + f"\n\n（正文补一句：实测 SM 时钟均值 {needle} MHz。）\n")
+    assert problem is not None, f"旧值 {needle}（{name} {what}）抄进散文，门禁没红"
+    assert needle in problem and "clocks_during_measurement" in problem, problem
