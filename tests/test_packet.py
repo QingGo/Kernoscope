@@ -1395,3 +1395,37 @@ def test_same_row_over_peak_still_poisons_its_own_roofline():
     assert by_id["over_peak"]["status"] == "refused"
     assert by_id["roofline"]["status"] == "refused", by_id["roofline"]
     assert by_id["roofline"]["actionable"] is False
+
+
+# ---------------------------------------------------------------------------
+# 真机一屏抓到的两处文案缺陷（空话 / 印出 None）
+# ---------------------------------------------------------------------------
+def test_phrase_is_never_empty_even_when_facts_were_trimmed():
+    """`occupancy` 的 facts 被尺寸预算裁光时，人话**不许为空**。
+
+    真机（AutoDL 4090）实测一屏上出现 `[soft]   (16.7 %, exact)`：`facts={}`，而它的分支把
+    空 bits `join` 成 `""` 后就 return 了，永远走不到"facts 被裁掉"的兜底。空话 = 读者只能猜。
+    """
+    from kernoscope.packet import phrase_verdict
+
+    v = {"id": "occupancy", "status": "soft", "value": 16.7, "unit": "%",
+         "provenance": "exact", "facts": {}}
+    text = phrase_verdict(v, {})
+    assert text.strip(), "人话是空的"
+    assert "16.7" in text, text
+
+
+def test_phrase_for_positions_without_a_count_does_not_print_none():
+    """`saving_estimate` 缺 `n` 时不许印成「头寸 None 条」（真机一屏实测）。"""
+    from kernoscope.packet import phrase_verdict
+
+    # ① 第一级（time_share）在 facts 被裁光时也必须读得通
+    first = {"id": "saving_estimate", "status": "soft", "value": 12.1, "unit": "%",
+             "provenance": "exact", "facts": {"basis": "time_share", "money": "unavailable"}}
+    text1 = phrase_verdict(first, {})
+    assert "None" not in text1 and text1.strip(), text1
+    # ② 第二级（钱/区间）缺 n 时，旧实现印「头寸 None 条」
+    second = {"id": "saving_estimate", "status": "soft", "value": None,
+              "provenance": "exact", "facts": {"money": "unavailable"}}
+    text2 = phrase_verdict(second, {})
+    assert "None" not in text2 and text2.strip(), text2

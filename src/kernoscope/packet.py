@@ -1912,7 +1912,25 @@ def _conditional_phrase(f: dict[str, Any]) -> str:
 
 
 def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
-    """判词的一句话（散文只在这里生成，包与报告里都不存它）。"""
+    """判词的一句话（散文只在这里生成，包与报告里都不存它）。
+
+    **后置条件**：返回值永远不是空串 —— 真机实测（AutoDL 4090）出现过 `occupancy` 的
+    `facts` 被包预算裁光、而它的分支把一堆空 bit `join` 成 `""`，于是走不到函数末尾的兜底，
+    一屏上只剩 `[soft]   (16.7 %, exact)` 这种"有数字没人话"的行。空话 = 读者只能猜，
+    而我们的整条纪律是"数字必须带出处与语义"。所以这里统一收口：任何分支给出空话，
+    都退到"id：value unit（细节被预算裁掉）"。
+    """
+    text = _phrase_verdict_impl(v, index)
+    if text and text.strip():
+        return text
+    if v.get("value") is not None:
+        return (f"{v.get('id')}：{v.get('value')} {v.get('unit', '')}"
+                f"（细节被尺寸预算裁掉，见完整报告）").replace("  ", " ").strip()
+    return str(v.get("id", ""))
+
+
+def _phrase_verdict_impl(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
+    """各判词的人话实现（`phrase_verdict` 负责它的后置条件）。"""
     fid = v.get("id", "")
     f = v.get("facts") or {}
     if v.get("status") == REFUSED:
@@ -2005,16 +2023,31 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
                 shown = "；".join(f"{t.get('kernel')} {t.get('pct')}%" for t in top)
             else:
                 shown = str(top)           # 旧包（v1.2 消费者）可能还是拼接串：照印
+            # **有什么印什么**：facts 被尺寸预算裁掉时不能印出 `None`（真机一屏实测：
+            # "共 None 个 kernel；最大一条 None%…还需补：None"）。缺哪段就省哪段，
+            # 整句仍要读得通 —— 这是给人截图看的一行。
+            bits: list[str] = []
+            if f.get("n") is not None:
+                bits.append(f"共 {f['n']} 个 kernel")
+            if f.get("top_pct") is not None:
+                bits.append(f"最大一条 {f['top_pct']}%")
+            note = "；这是时长占比**不是钱**"
+            if f.get("needs"):
+                note += f"，要钱与区间还需补：{f['needs']}"
             return (f"按**实测时间占比**排的头寸（basis={f.get('basis')}；"
-                    f"money={f.get('money')}）：{shown}"
-                    f"（共 {f.get('n')} 个 kernel；最大一条 {f.get('top_pct')}%）"
-                    f"；这是时长占比**不是钱**，要钱与区间还需补：{f.get('needs')}")
+                    f"money={f.get('money')}）"
+                    + (f"：{shown}" if shown else "")
+                    + (f"（{'；'.join(bits)}）" if bits else "")
+                    + note)
         if f.get("top_pct_lo") is not None:
             return (f"先改 {f.get('top_kernel')}（保守可省 {f['top_pct_lo']}%"
                     f"~上界 {f['top_pct_hi']}%）"
                     + (f"；合计可省 {f['total_per_hour']} {f.get('currency', 'CNY')}/h"
                        if f.get("total_per_hour") is not None else "；钱给不出"))
-        return f"头寸 {f.get('n')} 条，但都还没有可辩护的区间"
+        n = f.get("n")
+        return (f"头寸 {n} 条，但都还没有可辩护的区间" if n is not None
+                else "头寸还不给区间：缺本机标定（`tools/machine-profile.py`）与价格"
+                     "（`--ks-price-per-hour`）—— 排序本身仍然是实测的")
     if fid == "truth_vs_substitute":
         return (f"与 ncu {f.get('ncu', '?')} 的真值对拍 {f.get('compared')}/{f.get('pairs')} 条"
                 + (f"，最大相对偏差 {f['max_abs_err_pct']}%"
