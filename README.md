@@ -1,10 +1,10 @@
 # Kernoscope 内核镜
 
-**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化头寸 + 成本折算，结论可被人与 agent 独立复核。
+**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化头寸 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
 
 它回答：**先改哪里能省多少**（按实测占比排序的头寸，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。
 
-30 秒上手（没有 GPU 也能跑通）：先 `kernoscope doctor` 看这台机器能答什么、拿不到什么、为什么（`--no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读），再 `kernoscope --packet - -- <你的命令>` 拿一份 <4 KB 决策包。
+30 秒上手（没有 GPU 也能跑通，三条命令都返回 0）：`kernoscope capabilities --brief` 看这台机器能答什么（约 1 KB）→ `kernoscope doctor` 看拿不到什么、为什么（`--no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读）→ `kernoscope --packet - -- <你的命令>` 拿一份 <4 KB 决策包。
 
 与 `ncu` 的关系：CLI 兼容但数据源不同（它读硬件计数器，我们读物理观测量，**绝不占用它的指标名**）；与 `nsys` 的关系：复用它的 CUPTI activity，是消费者不是替代品；与 `torch.profiler` 的关系：它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信、改它值多少钱"。
 
@@ -97,7 +97,10 @@ $ ncu --set basic -- python train.py
 # uv（推荐）
 uv tool install kernoscope
 
-# 或从源码
+# 跟 main（不想等发布、或要自己审一遍代码时）
+uv tool install git+https://github.com/QingGo/Kernoscope
+
+# 开发：克隆后本地跑
 git clone https://github.com/QingGo/Kernoscope && cd Kernoscope
 uv sync && uv run kernoscope --help
 ```
@@ -117,10 +120,10 @@ kernoscope skill --client agents --apply   # 或装到 ~/.agents/skills（其它
 ```
 
 ```bash
-# 第一分钟：这台机器能答什么、拿不到什么、为什么
-kernoscope doctor            # 默认会实测确认计数器门（1 秒）
+# 第一分钟：这台机器能答什么（任何机器都 rc=0）
+kernoscope capabilities --brief      # 入口层（约 1 KB，只有 id/状态/计数）
+kernoscope doctor            # 拿不到什么、为什么；默认实测确认计数器门（1 秒）
 kernoscope doctor --no-probe # 只做静态推断：不跑 ncu 实测探测
-kernoscope capabilities --brief      # agent 用的入口层（<1.2 KB，只有 id/状态/计数）
 kernoscope capabilities --json       # 完整三态矩阵 + 补救动作 + 代价
 
 # 带问题来的时候先路由（只输出计划，不跑测量）
@@ -129,6 +132,9 @@ kernoscope route "每百万 token 花多少钱" --json
 
 # 测一次，拿决策包（判词 + 前提 + 结构化拒绝 + 代价；<4 KB）
 kernoscope --packet - -- python bench_loop.py
+
+# 人读的**一屏**（结论 → 发现 → 路径 → 代价；约 4 KB / 40 行）
+kernoscope --ks-synthetic --screen only
 
 # 没有 GPU 也能跑通全流程（合成数据，明确标注 SYNTHETIC）
 kernoscope --ks-synthetic --set detailed

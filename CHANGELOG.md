@@ -281,10 +281,10 @@
 - `capabilities --brief` 的 `next_layer.bytes` 现在等于**它自己命名的那个命令的真实输出
   字节数**（以前用紧凑序列化算，低估 35%）；新增 `blocked_by_unavailable`。
 - `capabilities --json` 的输出不再多一个换行。
-- 文档命令门禁：**全部**可检命令（当前 56 条）都交给**真实解析器**（10 个子命令各有自己的
+- 文档命令门禁：**全部**可检命令（当前 57 条）都交给**真实解析器**（10 个子命令各有自己的
   `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
-  其中**读者面 11 条**逐字执行并断言结论（比例 11/56，不是"每条都断言"）。
+  其中**读者面 11 条**逐字执行并断言结论（比例 11/57，不是"每条都断言"）。
   注：这三个数字随代码走动，若与 `tests/test_documented_commands.py` 的断言不一致，以测试为准。
 
 ### 访存轨迹口径（NVBit）
@@ -411,6 +411,23 @@
   数字是占比，**不是**节省比例、也不是钱 —— 有测试钉住（不许出现 `total_per_hour`/`total_per_mtok`）。
 - **拒绝也带上第一级排序**：有 `prescription` 但 `ranked` 为空时，`refused` 判词同样携带
   `basis/time_share` 与 `top[]`，让"拒绝"仍然给出可行动的方向。
+
+### 公开 alpha 前的首用路径（接口变化；README 已加 Alpha 声明）
+
+- **`doctor` 的退出码改了语义**：0 = **诊断完成**（结论可以是"这台机器拿不到计数器"），
+  1 = **诊断本身没完成**（探针异常，此时**必须**往 stderr 打一行），2 = 用法错误。
+  修前 `return 0 if rep.ok else 1`：一台没有 GPU/nsys 的笔记本上 rc=1 且 stderr **0 B** ——
+  而它是 README 推荐的第一条命令，陌生人与 CI 第一眼看到"失败且没有解释"。
+  `doctor --json` 新增 `diagnosed` 字段（把"结论"与"过程"分开），文本模式结论行也写明这点。
+  **按旧语义写脚本的人**：如果你用 `kernoscope doctor` 的 rc 判断"这台机器能不能跑主路径"，
+  请改读 `--json` 的 `ok`（rc 现在只表示诊断是否完成）。
+- **README 的第一分钟换成三条都返回 0 的命令**：`capabilities --brief`（约 1 KB，带 `next[]`
+  与每条的代价）→ `doctor` → `--packet -`；人读的"一屏"显式写成 `--screen only`
+  （约 4.4 KB / 40 行），并给出"跟 main"的安装方式 `uv tool install git+https://…`。
+- **新增 `bench/preflight-first-run.sh` + `tests/test_preflight.py`**：把开放门槛 G1
+  「陌生人首跑」变成**可重跑、能变红**的检查 —— 现场构建 wheel、装进隔离目录
+  （等价 `uv tool install`）、逐条断言 rc=0 与产出非空、并给"一屏"一个字节/行数预算
+  （≤8 KB / ≤60 行）。脚本第一版是**假绿**（装了上一个提交的 `dist/*.whl`），已改成默认现场构建。
 
 ## 0.2.0
 

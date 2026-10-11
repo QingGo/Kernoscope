@@ -25,6 +25,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -71,7 +72,12 @@ class Capability:
 
 @dataclass
 class DoctorReport:
+    # `ok` = **这台机器的主路径可用吗**（结论）；`diagnosed` = **我们给出诊断了吗**（过程）。
+    # 退出码跟后者走（见 `doctor_main`）：一台没有 GPU 的笔记本上，doctor 完全成功
+    # （它给出了结论、物理原因与补救），却曾经 rc=1 —— 陌生人与 CI 的第一条命令
+    # 显示"失败"，而 stderr 是 0 字节（易用性实测）。
     ok: bool = True
+    diagnosed: bool = True
     checks: list[Check] = field(default_factory=list)
     capabilities: list[Capability] = field(default_factory=list)
     backend_plan: list[str] = field(default_factory=list)
@@ -94,6 +100,7 @@ class DoctorReport:
             "tool": "kernoscope",
             "tool_version": __version__,
             "ok": self.ok,
+            "diagnosed": self.diagnosed,
             "host": {"platform": platform.platform(), "python": platform.python_version()},
             "device": self.device,
             "tools": self.tools,
@@ -564,7 +571,8 @@ def render(report: DoctorReport, color: bool = False) -> str:
         out.append(f"  · {a}")
     out.append("")
     out.append(f"结论: {'核心路径可用' if report.ok else '核心路径不可用（见上方 ✗）'}"
-               "   （用 --json 获取机器可读结果）")
+               f"   （诊断{'已完成' if report.diagnosed else '未完成'}；退出码只表示诊断是否完成，"
+               "不表示这台机器好不好。用 --json 获取机器可读结果）")
     return "\n".join(out)
 
 
@@ -589,4 +597,9 @@ def doctor_main(argv: list[str]) -> int:
         print(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
     else:
         print(render(rep))
-    return 0 if rep.ok else 1
+    if not rep.diagnosed:
+        # 只有"诊断本身没完成"才算失败；而且**不许静默**（脚本与 agent 只读 stderr）。
+        print("error: 环境自检没能完成（探针异常）：上面的输出可能不完整；"
+              "可先用 --no-probe 只做静态推断，或带上下文报 issue", file=sys.stderr)
+        return 1
+    return 0

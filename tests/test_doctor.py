@@ -49,7 +49,10 @@ def test_doctor_fails_without_nsys(no_tools, capsys):
     assert any(c.name == "nsys" and c.status == D.FAIL for c in rep.checks)
     rc = D.doctor_main(["--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert rc == 1
+    # 退出码表示"诊断是否完成"，不是"这台机器好不好"（用户 2026-10 拍板）：
+    # 这台机器没有 nsys 是**结论**，而诊断本身完全成功 ⇒ rc=0。结论在 payload["ok"] 里。
+    assert rc == 0
+    assert payload["diagnosed"] is True
     assert payload["ok"] is False
     # R-17："未安装"必须可证伪 —— 找过哪些目录要留在产物里
     assert payload["counter_state"] == "not-installed"
@@ -167,7 +170,8 @@ def test_cli_dispatches_doctor_subcommand(monkeypatch, capsys):
     rc = main(["doctor", "--no-probe"])
     out = capsys.readouterr().out
     assert "环境自检" in out
-    assert rc == 1  # 无 nsys → 核心路径不可用
+    assert "结论: 核心路径不可用" in out      # 结论仍然照实说
+    assert rc == 0                            # 但"诊断没完成"才是失败（新语义）
 
 
 def test_unknown_probe_does_not_claim_restriction(monkeypatch, tmp_path):
@@ -287,3 +291,42 @@ def test_no_probe_policy_zero_is_not_reported_as_measured(monkeypatch, tmp_path)
     rep = D.run_doctor(probe_counters=False)
     assert rep.counter_state == "unknown"
     assert "未做实测探测" in rep.counter_state_note
+
+
+def test_exit_code_means_did_we_diagnose_not_is_the_machine_good(no_tools, capsys):
+    """退出码语义（用户 2026-10 拍板）：**"我能不能给出诊断"**，不是"这台机器好不好"。
+
+    修前：一台没有 GPU/nsys 的笔记本上 `doctor` rc=1、stderr 0 B —— 而它是 README 推荐的
+    第一条命令，陌生人（和 CI）第一眼看到的就是"失败且没有解释"（易用性实测）。
+    现在：诊断成功就 rc=0（结论可以是"核心路径不可用"）；只有诊断本身没完成才 rc=1，
+    且**必须**往 stderr 打一行（脚本与 agent 只读 stderr）。
+    """
+    import kernoscope.doctor as D2
+
+    rep = D2.run_doctor(probe_counters=False)
+    assert rep.diagnosed is True
+    assert D2.doctor_main(["--no-probe", "--json"]) == 0
+    capsys.readouterr()
+
+
+def test_incomplete_diagnosis_is_rc1_and_never_silent(monkeypatch, capsys):
+    """诊断本身失败（探针炸了）⇒ rc=1 + stderr 一行，不许静默。"""
+    import kernoscope.doctor as D2
+
+    real_fn = D2.run_doctor          # 先留引用：下面 monkeypatch 之后它就指向 boom 了
+
+    def boom(*a, **k):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(D2, "run_doctor", boom)
+    with pytest.raises(RuntimeError):
+        D2.doctor_main(["--no-probe"])          # 程序 bug 不许被吞（顶层兜底也不吞它）
+
+    # 而"诊断完成但拿到的是坏消息"这条路：直接把 diagnosed 置 False
+    real = real_fn(probe_counters=False)
+    real.diagnosed = False
+    monkeypatch.setattr(D2, "run_doctor", lambda **k: real)
+    rc = D2.doctor_main(["--no-probe"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err and "没能完成" in err, err
