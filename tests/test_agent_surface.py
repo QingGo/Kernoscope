@@ -339,3 +339,24 @@ def test_every_subcommand_flag_is_documented():
                 elif flag not in all_text:
                     missing.append(f"{sub} {flag}（任何 tracked 文档里都没有）")
     assert not missing, "这些子命令开关没有任何文档：\n  - " + "\n  - ".join(missing)
+
+
+def test_skill_scripts_resolve_python_without_relying_on_path(tmp_path):
+    """第五轮真机教训：容器里 `python3` 常常不在 PATH（只有绝对路径的解释器）。
+
+    脚本写死 `python3` ⇒ 真机上 `setup-check.sh` 直接 127 退出（验收报告 §4.6 的那条失败）。
+    现在 `_ks.sh` 提供 `ks_python`：`KS_PY` → `kernoscope` shebang（仅当它是 python）
+    → PATH 上的 python3/python → 仓库 .venv → 兜底。
+    """
+    import subprocess
+
+    ks = ROOT / "skills" / "kernoscope" / "scripts" / "_ks.sh"
+    assert "ks_python()" in ks.read_text(encoding="utf-8"), "_ks.sh 必须提供 ks_python"
+    setup = (ROOT / "skills" / "kernoscope" / "scripts" / "setup-check.sh").read_text(
+        encoding="utf-8")
+    assert '"$(ks_python)"' in setup, "setup-check.sh 不许把解释器写死成 python3"
+
+    # KS_PY 显式给定时必须优先（这是脚本的可替换契约）
+    r = subprocess.run(["bash", "-c", f'source "{ks}" && KS_PY=/bin/echo ks_python'],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "/bin/echo", (r.stdout, r.stderr)

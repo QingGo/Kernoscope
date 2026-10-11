@@ -27,7 +27,7 @@ if [[ ! -f "$selfcheck" && "${1:-}" == "--run" ]]; then
 fi
 
 KS_BRIEF="$brief" KS_SELFCHECK_RESOLVED="$selfcheck" \
-"${KS_PY:-python3}" - <<'PY'
+"$(ks_python)" - <<'PY'
 import json, os, pathlib
 b = json.loads(os.environ["KS_BRIEF"])
 sc = pathlib.Path(os.environ["KS_SELFCHECK_RESOLVED"])
