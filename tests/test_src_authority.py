@@ -25,6 +25,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 try:                                    # Python 3.10 没有 tomllib（打包元数据断言会跳过）
     import tomllib
 except ModuleNotFoundError:             # pragma: no cover
@@ -35,8 +37,20 @@ SRC = ROOT / "src"
 
 
 def _pytest_ini() -> dict:
-    if tomllib is None:                 # pragma: no cover - 3.10 上退化成只跑行为断言
-        return {}
+    """读 `[tool.pytest.ini_options]`。**读不到就跳（带原因），不许静默返回空字典**。
+
+    X-12（第七轮）：旧实现 `if tomllib is None: return {}`，调用方再 `if not ini: return` ——
+    于是整段配置被删掉、或在没有 `tomllib` 的 3.10 上跑时，这条断言**看起来通过**而其实一步没做
+    （"空转的绿"）。这里把两种"读不到"分开：缺 `tomllib` ⇒ skip 并写明；配置段不存在 ⇒ 抛错，
+    由调用方判成失败。
+    """
+    if tomllib is None:                 # pragma: no cover - 3.10 上明确跳过
+        pytest.skip("Python 3.10 没有 tomllib：只跑行为断言（配置断言被显式跳过，不是空转）")
+    with open(ROOT / "pyproject.toml", "rb") as fh:
+        ini = tomllib.load(fh).get("tool", {}).get("pytest", {}).get("ini_options")
+    assert ini is not None, (
+        "pyproject 里没有 [tool.pytest.ini_options] 段 —— 配置断言不能因此静默通过（X-12）")
+    return ini
     with open(ROOT / "pyproject.toml", "rb") as fh:
         return tomllib.load(fh).get("tool", {}).get("pytest", {}).get("ini_options", {})
 
@@ -44,8 +58,8 @@ def _pytest_ini() -> dict:
 def test_pytest_config_puts_this_repo_src_first():
     """配置必须显式声明 `pythonpath = ["src"]`（去掉它，下面那条行为断言就该红）。"""
     ini = _pytest_ini()
-    if not ini:                         # pragma: no cover
-        return
+    if not ini:                         # pragma: no cover - 段存在但为空：单独点名
+        raise AssertionError("[tool.pytest.ini_options] 是空的（X-12：空段也算配置漂移）")
     assert "src" in ini.get("pythonpath", []), (
         "pyproject 的 [tool.pytest.ini_options] 必须写 pythonpath = [\"src\"] —— "
         "editable 的 .pth 可以指向别的源码树，没有这一条时单跑测试文件会给出假绿（R-109）")

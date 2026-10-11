@@ -649,6 +649,16 @@ kernoscope mcp --stdio
   这条证据依然成立。`references/refusal-codes.md`、`diagnosis-playbook.md` 与
   `eval/tasks/*.json` 已按新 code 重生成。
 
+### 两处"空转的绿"与一处手写计数（第七轮 X-10 余项 / X-12）
+
+- `tests/test_src_authority.py`：配置断言在"`[tool.pytest.ini_options]` 段不存在"或
+  "Python 3.10 没有 `tomllib`"时**静默返回空字典**，调用方再 `if not ini: return` ⇒
+  这条断言一步没做却看起来通过。现在：缺 `tomllib` **显式 skip 并写明原因**（不是空转），
+  段不存在/为空 ⇒ 直接判失败。顺手修掉同一改动引入的隐患：该文件此前**没有** `import pytest`
+  （只在 3.10 那条分支上才会用到，于是 3.13 上永远不炸、3.10 上会 NameError）。
+- `tests/test_meta_gates.py` 的模块 docstring 里"8 条门禁 + 400 多个测试"是手写计数（实际已是
+  9 条 / 950+）—— 改成不带数字的说法。手写计数在这个仓库已经红过好几次，能删就删。
+
 ### 又一条"只在某种机器上成立"的测试（第七轮 X-3）
 
 `test_export_substitute_empty_launch_table_has_its_own_error` 原来直接跑 `-- true`，于是它的
