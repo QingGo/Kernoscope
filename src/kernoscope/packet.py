@@ -485,6 +485,31 @@ def _verdict_l2(rep: Any) -> Verdict | None:
         claim="；".join(bits))
 
 
+def _environment_premises(rep: Any) -> list[Premise]:
+    """把"这钱是在什么环境下花的"变成前提（R-61 延伸）。
+
+    不重放 ⇒ 数字是真实时间，但**真实时间只在环境可比时才能互相比较**。三条：
+      * 同卡有没有别的计算进程（多租户：数字被稀释）
+      * GPU 空转占比（宿主间隙：比值类口径被稀释）
+      * 降频占比（功率封顶/热降频：能效数字偏乐观或偏保守）
+    任一不成立 → 结论自动降级（`premises.ok=False` 时 `Verdict` 会降级），
+    而不是假装环境干净。
+    """
+    out: list[Premise] = []
+    others = metric_value(rep, "meas__other_procs_on_gpu")
+    if others is not None:
+        out.append(Premise("env_gpu_exclusive", float(others), 0.0, float(others) <= 0.0, "个"))
+    idle = metric_value(rep, "meas__gpu_idle_pct")
+    if idle is not None:
+        out.append(Premise("env_gpu_busy_pct", round(100.0 - float(idle), 1), 80.0,
+                           (100.0 - float(idle)) >= 80.0, "%"))
+    thr = metric_value(rep, "meas__throttle_limited_pct")
+    if thr is not None:
+        out.append(Premise("env_no_throttle_pct", round(float(thr), 1), 5.0,
+                           float(thr) < 5.0, "%"))
+    return out
+
+
 def _verdict_cost(rep: Any) -> Verdict | None:
     """成本判词（C1）—— 这个工具存在的理由：把秒换算成钱。
 
@@ -511,6 +536,7 @@ def _verdict_cost(rep: Any) -> Verdict | None:
         premises.append(Premise("window_energy_j", round(float(energy.value), 1), unit="J"))
     if tokens_s is not None:
         premises.append(Premise("tokens_per_s", round(float(tokens_s), 1), unit="token/s"))
+    premises.extend(_environment_premises(rep))
 
     # ---- ① 单位成本可用：这是主结论 ----
     if per_mtok is not None and per_mtok.value is not None:

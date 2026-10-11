@@ -86,6 +86,8 @@ class BuildOptions:
     cubin_res: dict[str, dict[str, int]] = field(default_factory=dict)
     cubin_sass: dict[str, Any] | None = None
     nvml_summary: dict[str, float] = field(default_factory=dict)
+    #: 窗口的环境证据（时钟驻留 / 降频画像 / 同卡其他进程），来自 SamplerResult.environment()
+    nvml_env: dict[str, Any] = field(default_factory=dict)
     dram: Any = None      # analyze.dram.DramEstimate（避免循环 import）
     cost: Any = None      # analyze.cost.CostEstimate（成本账；None = 本次不给成本结论）
     memtrace: Any = None  # {kernel: analyze.memtrace.MemTraceStats}
@@ -144,6 +146,47 @@ def build_device_kernel(opt: BuildOptions) -> Section:
             s.add(Metric.measured("meas__device_energy_j", round(n["energy_j"], 3), "J",
                                   source="NVML total energy accumulator",
                                   note="ncu 不提供能耗指标", resolution="1 mJ"))
+        # ---- 窗口的环境证据（R-61 延伸：不重放 ⇒ 必须说清环境是否可比）----
+        env = opt.nvml_env or {}
+        clock = env.get("clock") or {}
+        if clock:
+            s.add(Metric.measured(
+                "meas__sm_clock_p50_mhz", round(clock["p50_mhz"], 1), "MHz",
+                source="NVML/nvidia-smi 采样中位数（管理计数器，免 admin）",
+                note=(f"**只在干活的时候统计**（{clock['active_samples']:.0f}/"
+                      f"{clock['samples']:.0f} 个采样点算活跃）：{clock['at_max_pct']:.1f}% 跑在标称"
+                      f"最高时钟附近（参考 {clock['ref_mhz']:.0f} MHz，活跃期最低 "
+                      f"{clock['min_mhz']:.0f} MHz）；含空闲点的话中位数是 "
+                      f"{clock['p50_all_mhz']:.0f} MHz（空闲降频不算问题）"),
+                resolution=f"{env.get('interval_s', 0.0)} s/采样点"))
+        thr = env.get("throttle") or {}
+        if thr:
+            reasons = "、".join(f"{k} {v:.0f}%" for k, v in (thr.get("reasons") or {}).items())
+            if reasons:
+                note = f"窗口内存在**性能受限**降频原因（按采样占比）：{reasons}"
+            else:
+                note = "窗口内没有观察到性能受限降频（空闲位不算受限）"
+            s.add(Metric.measured(
+                "meas__throttle_limited_pct", round(thr["limited_pct"], 1), "%",
+                source="clocks_throttle_reasons.active 位图（NVML 公开位名解码）",
+                note=note + "。降频不改变「耗时是真实时间」这个事实，但会改变**它能说明什么**",
+                resolution="位图口径，按采样点占比"))
+            s.add(Metric.measured(
+                "meas__gpu_idle_pct", round(thr["idle_pct"], 1), "%",
+                source="clocks_throttle_reasons.active 的 gpu_idle 位",
+                note="窗口内 GPU 处于空闲的采样占比：越高说明窗口越被宿主间隙稀释，"
+                     "除以它的比值（如带宽/利用率）越不可信",
+                resolution="位图口径，按采样点占比"))
+        if env.get("other_procs") is not None:
+            others = int(env["other_procs"])
+            note = ("采样期间同卡上**没有**其他计算进程，数字是独占环境下的"
+                    if others == 0 else
+                    f"采样期间同卡上检测到最多 {others} 个其他计算进程：**数字可能被同租户稀释**，"
+                    "按它做的成本/能效结论要打折")
+            s.add(Metric.measured(
+                "meas__other_procs_on_gpu", float(others), "个",
+                source="NVML nvmlDeviceGetComputeRunningProcesses / nvidia-smi --query-compute-apps",
+                note=note, resolution="采样点最大值（每 5 个采样点探测一次）"))
     if not s.metrics:
         s.add(Metric.unavailable("meas__nvml_mem_busy_mean_pct",
                                  "没有 NVML 采样点：采样被关闭（--ks-no-nvml）、"

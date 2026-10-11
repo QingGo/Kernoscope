@@ -816,6 +816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cubin_res=cubin_res,
         cubin_sass=cubin_sass,
         nvml_summary=nvml_summary,
+        nvml_env=sampler.result.environment(),
         sm_count=sm_count,
         device_name=device.name,
         arch=arch,
