@@ -17,8 +17,12 @@ REF="${1:-HEAD}"
 command -v uv >/dev/null 2>&1 || { echo "CI-PARITY SKIP: 没有 uv（CI 用 uv；装上再跑）"; exit 3; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ks-ci-parity.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$WORK/uv-cache}"
+# uv 缓存必须放在快照**外面**：放在里面时 `uv build` 会把 uv-cache/ 一起打进 sdist，
+# 而缓存里有指向 uv 托管解释器的**符号链接** ⇒ sdist 直接报 "symlink destination … is outside
+# of the target directory"（本脚本第一版就踩了这个，`build` 门禁因此假红）。
+CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ks-ci-cache.XXXXXX")"
+trap 'rm -rf "$WORK" "$CACHE"' EXIT
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE}"
 
 echo "[1/3] 导出 $REF 的干净快照（只有被跟踪的文件）→ $WORK"
 git -C "$ROOT" archive "$REF" | tar -x -C "$WORK" || { echo "CI-PARITY FAIL: git archive 失败"; exit 1; }
