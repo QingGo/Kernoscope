@@ -651,3 +651,17 @@ def test_over_peak_refusal_propagates_into_roofline():
     plain = build(_rich_report())
     r2 = next(v for v in plain["verdicts"] if v["id"] == "roofline")
     assert r2["status"] != "refused" and r2.get("actionable") is True
+
+
+def test_written_packet_size_equals_packet_bytes(tmp_path):
+    """D30②：落盘字节数必须**等于** `cost.packet_bytes`（它是读者拿来比 4 KB 预算的数）。
+
+    旧实现写 `text + "\\n"` 却返回 `len(text)`，于是文件总比包声称的多 1 B —— 一个
+    "数字与文件对不上"的小谎，而这类小谎正是这个仓库最不该有的东西。
+    """
+    from kernoscope.packet import write_packet
+
+    p = build(_rich_report())
+    path, n = write_packet(p, str(tmp_path / "pk.json"))
+    on_disk = (tmp_path / "pk.json").stat().st_size
+    assert n == on_disk == p["cost"]["packet_bytes"], (n, on_disk, p["cost"]["packet_bytes"])

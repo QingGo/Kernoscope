@@ -18,7 +18,7 @@ Kernoscope 的形态是「**探测 → 选最高可用层 → 采集 → 每个�
 | 加/改一个指标（数字 + 出处） | `src/kernoscope/provenance.py` | `src/kernoscope/sections.py` | — | `tests/test_provenance.py` / `tests/test_output_consistency.py` | §①（2.9 KB） |
 | 加一族数据源（nsys / NVML / cuobjdump / NVBit） | `src/kernoscope/backends` | `src/kernoscope/doctor.py` / `src/kernoscope/capabilities.py` | — | `tests/test_doctor.py` / `tests/test_toolchain.py` | §②（2.3 KB） |
 | 加一个已知答案负载（selftest 那一族） | `src/kernoscope/selftest.py` | — | — | `tests/test_diff_selftest.py` | §③（1.4 KB） |
-| 加/改一个能力问题 | `src/kernoscope/capabilities.py` | — | `tools/gen_coverage.py` | `tests/test_capabilities.py` / `tests/test_opening_package.py` | §④（1.3 KB） |
+| 加/改一个能力问题 | `src/kernoscope/capabilities.py` | — | `tools/gen_coverage.py` / `eval/make_tasks.py` | `tests/test_capabilities.py` / `tests/test_opening_package.py` | §④（1.3 KB） |
 | 加一种拒绝理由（我们不给数） | `src/kernoscope/refusals.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` | `tests/test_refusals.py` / `tests/test_agent_surface.py` | §⑤（1.9 KB） |
 | 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | `tools/gen_calibration_excerpt.py`；门禁 `sanitize` | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
 | 加/改一个判词或决策包字段 | `src/kernoscope/packet.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` / `eval/make_tasks.py` | `tests/test_packet.py` / `tests/test_agent_surface.py` / `tests/test_eval_harness.py` | §⑧（2.3 KB） |

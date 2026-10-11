@@ -1003,10 +1003,17 @@ def packet_bytes(packet: dict[str, Any]) -> int:
 
 
 def write_packet(packet: dict[str, Any], path: str) -> tuple[str, int]:
-    text = dumps(packet)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text + "\n")
-    return path, len(text.encode("utf-8"))
+    """落盘并返回 `(路径, 字节数)`。
+
+    D30②：返回的字节数必须**等于文件里真实的字节数**。旧实现写 `text + "\\n"` 却返回
+    `len(text)`，于是包比 `cost.packet_bytes` 说的多 1 B —— 而 `packet_bytes` 是"这个包
+    花了多少上下文"的那个数，正是读者拿来跟 4 KB 预算比的。多一个换行的收益（POSIX 文本
+    惯例）抵不过"数字与文件对不上"的代价，所以不再追加换行。
+    """
+    data = dumps(packet).encode("utf-8")
+    with open(path, "wb") as f:
+        f.write(data)
+    return path, len(data)
 
 
 def load_packet(path: str) -> dict[str, Any]:

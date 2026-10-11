@@ -96,7 +96,9 @@ CHANGES = [
            tests=["tests/test_diff_selftest.py"], sec="③"),
     Change("question", "加/改一个能力问题",
            truth=["src/kernoscope/capabilities.py"],
-           regen=["tools/gen_coverage.py"],
+           # D30④：评测任务材料里嵌了 `capabilities`（`build(rep, capabilities=cap, ...)`），
+           # 所以改能力问题也必须重跑 make_tasks，否则材料与 capabilities 不同源。
+           regen=["tools/gen_coverage.py", "eval/make_tasks.py"],
            tests=["tests/test_capabilities.py", "tests/test_opening_package.py"], sec="④"),
     Change("refusal", "加一种拒绝理由（我们不给数）",
            truth=["src/kernoscope/refusals.py"],
