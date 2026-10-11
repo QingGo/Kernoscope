@@ -112,7 +112,16 @@
 |---|---|---|
 | `capabilities` | `--json` / `--brief` / `--probe` / `--out <f>` / `--quiet` | 参考层 JSON / 入口层（<1.2 KB，带下一层字节价格）/ 实测探测 / 写文件 / 静音 |
 | `selftest` | `-o, --out <f>` / `--json` / `--size-mb` / `--duration` / `--runs` / `--dtype` / `--only` / `--cross-process` / `--quick` / `--strict` / `--quiet` | 纯 torch 的已知答案自检：写 `--ks-selfcheck` 用的文件（**不是** `--ks-calibration`，见 `PEAK_CAVEAT`）；`--cross-process` 把跨进程复测算进 MDD |
+| `route` | `--list` / `--json` / `--probe` | **先路由再动手**：把一条问题（中文口语也行）转成「走哪条口径 + 命令 + 期望输出 + **会被拒的条件**」；只输出计划，不跑测量；匹配不上就说匹配不上（不许硬套） |
 | `diff` | `--selfcheck <f>` / `--json` / `--fail-on {none,regressed,change}` / `--strict` / `--quiet` | 误差带对拍；**`--fail-on` 是唯一能拿去卡 CI 退出码的开关**（`regressed`/`change` 命中即非零退出） |
+
+### 路由与顺序（A1）
+
+- 新增子命令 **`kernoscope route "<问题>"`**：回答"我该走哪条口径、跑哪条命令、会看到什么、
+  什么条件下会被拒"。路由表是**代码**（`route_cmd.ROUTES` + `capabilities.QUESTIONS`，
+  `--json` 是给 agent 的真源），文档只是视图；匹配不上会明说"不要硬套"。
+  口径决策规则（有 NVBit 走轨迹、否则走代理）跟着路由一起输出，避免 agent 自己猜。
+- `route` **只输出计划，不跑任何测量**（有测试守着它的实现里不出现采集调用）。
 
 ### 输出与案件目录（C5）
 

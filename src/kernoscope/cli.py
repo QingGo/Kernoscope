@@ -354,7 +354,7 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
 # 主流程
 # --------------------------------------------------------------------------
 SUBCOMMANDS: tuple[str, ...] = (
-    "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff")
+    "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff", "route")
 
 
 def subcommand_parser(name: str) -> Any:
@@ -371,12 +371,13 @@ def subcommand_parser(name: str) -> Any:
     from .issue_cmd import build_parser as issue_parser
     from .memtrace_cmd import build_parser as memtrace_parser
     from .occupancy_cmd import build_parser as occupancy_parser
+    from .route_cmd import build_parser as route_parser
     from .selftest import build_parser as selftest_parser
 
     return {"doctor": doctor_parser, "occupancy": occupancy_parser,
             "memtrace": memtrace_parser, "issue": issue_parser,
             "capabilities": capabilities_parser, "selftest": selftest_parser,
-            "diff": diff_parser}[name]()
+            "diff": diff_parser, "route": route_parser}[name]()
 
 
 def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
@@ -387,11 +388,12 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     from .issue_cmd import issue_main
     from .memtrace_cmd import memtrace_main
     from .occupancy_cmd import occupancy_main
+    from .route_cmd import route_main
     from .selftest import selftest_main
 
     return {"doctor": doctor_main, "occupancy": occupancy_main, "memtrace": memtrace_main,
             "issue": issue_main, "capabilities": capabilities_main,
-            "selftest": selftest_main, "diff": diff_main}
+            "selftest": selftest_main, "diff": diff_main, "route": route_main}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

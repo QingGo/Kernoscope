@@ -583,6 +583,14 @@ def _make_diff_argv(work: Path):
     return adapt
 
 
+def _assert_route_plan(rc, out, err):
+    """路由的"结论"：给出**口径决策规则 + 命令 + 会被拒的条件**，且不跑测量。"""
+    assert rc == 0, err
+    assert "走哪条口径" in out or "命令：" in out, out[:200]
+    assert "命令：" in out and "可能被拒：" in out
+    assert "kernoscope" in out
+
+
 def _make_occupancy_argv(argv: list[str], work: Path) -> list[str]:
     """把 `occupancy-records.txt` 换成仓库里那份真记录、把 `occ.json` 指到临时目录。"""
     rec = str(ROOT / "bench/artifacts/20261011-094535/occupancy-records.txt")
@@ -633,6 +641,9 @@ DOC_VERBATIM: list[Registered] = [
     Registered("skills/kernoscope/SKILL.md", "--selfcheck machine-selfcheck.json",
                _assert_diff_json, _make_diff_argv(None),
                "闭环最后一步：对拍给方向与三态"),
+    Registered("README.md", 'kernoscope route "为什么这个 kernel 慢"',
+               _assert_route_plan, None,
+               "A1：先路由再动手 —— 路线里要有口径决策规则、命令与会被拒的条件"),
     Registered("README.md", "occupancy --from occupancy-records.txt --write-json",
                _assert_occupancy_json, _make_occupancy_argv,
                "Occupancy 的区间重叠法（ncu 计数器之外的那条路）"),
