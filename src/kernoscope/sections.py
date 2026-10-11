@@ -118,6 +118,26 @@ def build_device_kernel(opt: BuildOptions) -> Section:
     """
     s = Section("DeviceStatistics")
     n = opt.nvml_summary
+    # 锁频状态与**采样**无关（它是驱动查询，不是采样读数），所以放在 `if n:` **外面**：
+    # 采样被关掉/一次都没采到时，这条证据照样成立。
+    lock = (opt.nvml_env or {}).get("clock_lock") or {}
+    if lock:
+        state = str(lock.get("state") or "unknown")
+        label = {"locked": "已锁频", "unlocked": "未锁频",
+                 "unknown": "读不到锁频状态"}.get(state, state)
+        if state == "locked":
+            note = (f"跨运行可比性：已锁频（{lock.get('min_mhz', 0):.0f}–"
+                    f"{lock.get('max_mhz', 0):.0f} MHz）—— 两次运行跑在同一个频率上")
+        else:
+            note = ("跨运行可比性：" + label
+                    + "。没锁频时两次运行可能跑在不同频率上，时长/能效**不可直接相减**；"
+                      "要做 A/B 先锁频：`sudo nvidia-smi -lgc <min>,<max>`（跑完 "
+                      "`sudo nvidia-smi -rgc` 复位）。我们**不会替你锁** —— 改设备时钟是写操作，"
+                      "不在只读工具的授权里（见 NON-GOALS）。"
+                    + (f"（{lock.get('note')}）" if lock.get("note") else ""))
+        s.add(Metric.derived("ks__clock_lock_state", label, "",
+                             source=f"锁频状态查询（{lock.get('source', 'n/a')}）",
+                             note=note))
     if n:
         if "mem_util_mean" in n:
             # R-31：把 NVML 自身的分辨率与采样周期随数字一起报出来。

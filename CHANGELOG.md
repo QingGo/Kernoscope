@@ -628,6 +628,27 @@ kernoscope mcp --stdio
   （可传 `<commit>` 复现历史提交的 CI 结果）。这条脚本的价值就是本轮的两次红：
   "本地工作树 + 本地环境"与"刚 clone 的某次提交"不是同一个东西。
 
+### 时钟状态进协议哈希 + 锁频处方（择中项 ⑥）
+
+- **锁频状态成为协议的一部分**：新增 `ks__clock_lock_state`（`已锁频` / `未锁频` /
+  `读不到锁频状态`）与顶层 `clock_lock` 字段；协议哈希里放的是**粗粒度状态**
+  （`locked` / `unlocked` / `unknown`），**不含**实测时钟 —— 后者每次都变，放进去会让每一次比较
+  都判"协议不同"（把噪声当口径）。有测试同时钉住这两条（状态变 ⇒ 哈希变；只有实测值变 ⇒ 哈希不变）。
+- **`diff` 点名**：锁频状态不同时不可比，并在协议差异里给出
+  `clock_lock: locked → unlocked（锁频状态不同 ⇒ 两次运行的时长/能效不可相减）`
+  —— 只说"协议不同"太含糊，读者要的是"怎么才可比"。
+- **三态且"读不到"≠"没锁"**：只有 pynvml 能问 `nvmlDeviceGetGpuLockedClocks`；
+  `NotSupported`/`(0,0)` ⇒ `unlocked`，查不动 ⇒ `unknown`，没有 pynvml ⇒ `unknown`。
+  不拿时钟读数去猜"看起来像锁了"（那是把观测当身份）。
+- **锁频处方**：新增拒绝码 `clock_not_locked`（+ `DEFAULT_REMEDIES`）：
+  `sudo nvidia-smi -lgc <min>,<max>`，跑完 `sudo nvidia-smi -rgc` 复位，并写明
+  **我们不替你锁**（改设备时钟是写操作，不在只读工具的授权里，见 NON-GOALS N2）。
+  只有**确定未锁**时才挂这条告示（避免每次真实运行都被"去锁频"刷屏）；`unknown` 时状态照样进
+  协议哈希与 `ks__clock_lock_state`，只是不冒充确定结论。
+- 该 metric 与**采样**无关（驱动查询），因此放在设备节的采样门之外：采样被关/一次都没采到时
+  这条证据依然成立。`references/refusal-codes.md`、`diagnosis-playbook.md` 与
+  `eval/tasks/*.json` 已按新 code 重生成。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

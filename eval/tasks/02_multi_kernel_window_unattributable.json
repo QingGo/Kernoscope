@@ -9,7 +9,7 @@
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {
-        "hash": "sha256:ed24210b5b47c04b",
+        "hash": "sha256:73ff8d061922cf80",
         "basis": "per-launch",
         "window_mode": "auto",
         "calibration": "machine-profile.json"

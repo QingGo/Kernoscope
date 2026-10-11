@@ -595,7 +595,7 @@ kernoscope --set detailed --ks-cubin kernel.cubin -o rep       # 加 SASS 指令
 
 ---
 
-### 6.4 平台已授权的遥测：`--ks-telemetry`（最便宜的补法）
+### 6.5 平台已授权的遥测：`--ks-telemetry`（最便宜的补法）
 
 平台管理员**可能已经在提供**这些读数 —— K8s GPU operator 常装的 `dcgm-exporter`（Prometheus
 文本格式 `http://<host>:9400/metrics`）、云厂商的 GPU 监控 API。读一个平台自愿开给你的只读端点
@@ -714,6 +714,21 @@ kernoscope --repeat 3 -o rep.json -- python bench.py    # 另写 rep.repeat.json
   （所以跨运行分布里同时含仪器噪声与缓存效应）；
 - `-i`（回读已有报告）与 `--repeat` 不能一起用（重跑的是采集，不是解析）—— 显式报用法错误，
   不静默忽略。
+
+### 8.1.2 锁频状态：跨运行可比性的前提
+
+没锁频时，两次运行可能跑在不同频率上 —— 把它们的时长/能效相减就是**拿两个口径做减法**
+（与"换了标定"同类）。所以我们把**锁频状态**当协议的一部分，并且**只放粗粒度状态**
+（`locked` / `unlocked` / `unknown`），不把实测时钟放进去：后者每次都变，放进去会让每一次比较
+都成了"协议不同"（把噪声当口径）。
+
+- 报告里有一条 `ks__clock_lock_state`（`已锁频` / `未锁频` / `读不到锁频状态`）。只有 pynvml 能问
+  `nvmlDeviceGetGpuLockedClocks`；拿不到就老实写 `unknown` —— **不拿时钟读数去猜**"看起来像锁了"。
+- 状态一变，`diff` **不可比**，并且会点名：`含 clock_lock: locked → unlocked（锁频状态不同 ⇒
+  两次运行的时长/能效不可相减）`，而不是只说一句"协议不同"。
+- 两条纪律：**"读不到"与"没锁"分开**（`unknown` 不等于 `unlocked`：一个是我不知道，一个是我知道它没锁）；
+  **我们不替你锁** —— 改设备时钟要 root、是**写操作**，不在只读工具的授权里（见 NON-GOALS N2）。
+  处方只给怎么做：`sudo nvidia-smi -lgc <min>,<max>`，跑完 `sudo nvidia-smi -rgc` 复位。
 
 ### 8.2 接进 CI：`kernoscope gate`
 

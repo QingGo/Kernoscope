@@ -1091,6 +1091,23 @@ def _protocol_inputs(rep: Any) -> dict[str, Any]:
     return out
 
 
+def _clock_lock_state(rep: Any) -> str:
+    """锁频状态的**粗粒度**取值（进协议哈希的就只有这一个词）。
+
+    为什么不把实测时钟（p50）放进哈希：那是个每次都变的数字，放进去会让**每一次**比较都
+    判"协议不同"（把噪声当口径）。进哈希的只有"锁了 / 没锁 / 不知道"这个状态。
+    """
+    meta = getattr(rep, "meta", {}) or {}
+    lock = meta.get("clock_lock")
+    if isinstance(lock, dict):
+        state = str(lock.get("state") or "unknown")
+    elif isinstance(lock, str) and lock:
+        state = lock
+    else:
+        state = "unknown"
+    return state if state in ("locked", "unlocked", "unknown") else "unknown"
+
+
 def _window_mode(rep: Any) -> str:
     """只留窗口**模式**：整段窗口描述里有 wall 时间等每次都变的数字。"""
     w = str((getattr(rep, "meta", {}) or {}).get("window", ""))
@@ -1112,6 +1129,9 @@ def protocol_hash(rep: Any, extra: dict[str, Any] | None = None) -> str:
         "report_schema": getattr(rep, "schema_version", None),
         "dtype": meta.get("dtype"),
         "window_mode": _window_mode(rep),
+        # 锁频状态（已批准择中项 ⑥）：没锁频 ⇒ 两次运行可能跑在不同频率上，不可相减。
+        # 只有粗粒度状态进哈希（locked/unlocked/unknown），实测值不进。
+        "clock_lock": _clock_lock_state(rep),
         "warmup_s": meta.get("warmup_s"),
         "window_s": meta.get("window_s"),
         "calibration": meta.get("calibration") or meta.get("calibration_source"),
@@ -1329,6 +1349,11 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
         packet["verdicts_more"] = verdicts_more
     if getattr(rep, "meta", {}).get("synthetic"):
         packet["synthetic"] = True
+    # 锁频状态（择中项 ⑥）：顶层给一个可读的标量，`diff` 才能把"协议不同"讲成
+    # "锁频状态不同 ⇒ 不可相减"；哈希里用的是同一个词（粗粒度，不含实测值）。
+    lock_state = _clock_lock_state(rep)
+    if lock_state != "unknown" or (getattr(rep, "meta", {}) or {}).get("clock_lock"):
+        packet["clock_lock"] = lock_state
     for d in _env_refusals(rep):
         packet.setdefault("environment_refusals", []).append(
             {"code": d.get("code"), "message": _clip(str(d.get("message", "")), 120)})

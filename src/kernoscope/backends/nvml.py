@@ -158,6 +158,8 @@ class SamplerResult:
     other_procs_probe: str = "not_run"
     #: 设备标称最高 SM 时钟（nvidia-smi clocks.max.sm；拿不到就是 0）
     max_sm_clock_mhz: float = 0.0
+    #: 锁频状态（`{"state": locked|unlocked|unknown, ...}`）：跨运行可比性的前提（择中项 ⑥）
+    clock_lock: dict[str, object] | None = None
 
     def _col(self, attr: str) -> list[float]:
         return [getattr(s, attr) for s in self.samples]
@@ -241,6 +243,9 @@ class SamplerResult:
         `other_procs_probe="failed"` 且**不写** `other_procs`，让下游能报"未知"而不是 0。
         """
         out: dict[str, object] = {}
+        lock = self.clock_lock
+        if lock:
+            out["clock_lock"] = lock
         res = self.clock_residency()
         thr = self.throttle_profile()
         if res:
@@ -314,8 +319,40 @@ class Sampler:
             self._pynvml = pynvml
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
             self.result.source = "pynvml"
+            # 锁频状态只有 pynvml 能问（择中项 ⑥）：拿到 handle 时就读一次
+            self.result.clock_lock = self._clock_lock_state()
         except Exception:
             self._pynvml = None
+            self.result.clock_lock = {"state": "unknown", "source": "no_pynvml",
+                                      "note": "没有 pynvml：读不到锁频状态（不等于没锁）"}
+
+    def _clock_lock_state(self) -> dict[str, object]:
+        """SM 时钟有没有被**锁住**（`nvidia-smi -lgc`）。
+
+        为什么这件事要进协议哈希（已批准的择中项 ⑥）：没锁频时两次运行可能跑在不同频率上，
+        把它们的时长/能效相减就是拿两个口径做减法 —— 与"标定不同"同类。三态，且
+        **"读不到"与"没锁"必须分开**：`unknown` 是"我不知道"，`unlocked` 是"知道它没锁"
+        （前者一样进处方，但不冒充确定结论）。
+
+        只有 pynvml 有 `nvmlDeviceGetGpuLockedClocks`；拿不到就老实报 `unknown`
+        —— 不拿时钟读数去猜"看起来像锁了"，那是把观测当身份。
+        """
+        if self._pynvml is None or self._handle is None:
+            return {"state": "unknown", "source": "no_pynvml",
+                    "note": "没有 pynvml：读不到锁频状态（不等于没锁）"}
+        try:
+            lo, hi = self._pynvml.nvmlDeviceGetGpuLockedClocks(self._handle)
+        except Exception as exc:                       # noqa: BLE001 —— 各版本异常类型不同
+            name = type(exc).__name__
+            if "NotSupported" in name:
+                return {"state": "unlocked", "source": "pynvml",
+                        "note": "驱动不支持锁频查询 ⇒ 视为未锁（该设备族不支持 `-lgc`）"}
+            return {"state": "unknown", "source": "pynvml", "note": f"查询失败：{name}"}
+        if lo or hi:
+            return {"state": "locked", "source": "pynvml",
+                    "min_mhz": float(lo), "max_mhz": float(hi)}
+        return {"state": "unlocked", "source": "pynvml",
+                "note": "锁频区间是 0,0 ⇒ 未锁频"}
 
     def _energy_j(self) -> float:
         if not self._pynvml:

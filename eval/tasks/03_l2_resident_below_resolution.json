@@ -9,7 +9,7 @@
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {
-        "hash": "sha256:debfbea867f94b69",
+        "hash": "sha256:043c79d41f632328",
         "basis": "est__dram_bytes_total = NVML 显存忙碌 × 本机实测峰值",
         "window_mode": "auto",
         "calibration": "machine-profile.json"

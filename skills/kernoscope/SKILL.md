@@ -92,9 +92,9 @@ kernoscope gate --packet rep.packet.json --report rep.ksreport.json \
 
 | 文件 | 字节 | 里面有什么 |
 |---|---|---|
-| `references/refusal-codes.md` | ~15 KB（生成） | 每个拒绝码什么意思、怎么办、代价 |
+| `references/refusal-codes.md` | ~16 KB（生成） | 每个拒绝码什么意思、怎么办、代价 |
 | `references/verdicts.md` | ~4 KB（生成） | 判词目录、方向、前提、MDD 键 |
-| `references/diagnosis-playbook.md` | ~32 KB（生成） | 受限环境诊断手册：signal→cause→fix、任务路由、补不回来的采集 |
+| `references/diagnosis-playbook.md` | ~33 KB（生成） | 受限环境诊断手册：signal→cause→fix、任务路由、补不回来的采集 |
 | `references/provenance-rules.md` | ~2 KB | 出处纪律的短版 |
 | `references/recipes.md` | ~3 KB | 四个闭环配方 |
 

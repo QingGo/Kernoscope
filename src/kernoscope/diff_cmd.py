@@ -192,6 +192,11 @@ def _protocol_diffs(pa: dict[str, Any], pb: dict[str, Any]) -> dict[str, Any]:
         diffs["tool_version"] = f"{pa.get('tool_version')} → {pb.get('tool_version')}"
     if pa.get("schema_version") != pb.get("schema_version"):
         diffs["packet_schema"] = f"{pa.get('schema_version')} → {pb.get('schema_version')}"
+    # 锁频状态不同：只说"协议不同"太含糊，读者要的是"怎么才可比"（择中项 ⑥ 的处方面）
+    la = (pa.get("environment") or {}).get("clock_lock") or pa.get("clock_lock")
+    lb = (pb.get("environment") or {}).get("clock_lock") or pb.get("clock_lock")
+    if la and lb and la != lb:
+        diffs["clock_lock"] = f"{la} → {lb}（锁频状态不同 ⇒ 两次运行的时长/能效不可相减）"
     ha = (pa.get("protocol") or {}).get("hash")
     hb = (pb.get("protocol") or {}).get("hash")
     if ha != hb:

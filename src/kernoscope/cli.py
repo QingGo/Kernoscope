@@ -1137,6 +1137,19 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
     rep = Report(device=device)
     rep.meta.update(meta)
+    # ---- 锁频状态（已批准择中项 ⑥）：进 meta ⇒ 进协议哈希 ⇔ `diff` 会说"不可比" ----
+    # 只有**确定未锁**才给处方（`clock_not_locked`）：`unknown`（例如没有 pynvml）不该在每次
+    # 真实运行上都挂一条"去锁频"的告示 —— 那时我们连它锁没锁都不知道（metric 里写清了）。
+    clock_lock = (sampler.result.environment() or {}).get("clock_lock")
+    if clock_lock:
+        rep.meta["clock_lock"] = clock_lock
+        if str(clock_lock.get("state")) == "unlocked":
+            rep.meta.setdefault("environment_refusals", []).append({
+                "code": RefusalCode.CLOCK_NOT_LOCKED.value,
+                "message": "时钟没被锁住：两次运行可能跑在不同频率上，时长/能效不可直接相减",
+                "observed": {"clock_lock": "unlocked",
+                             "source": clock_lock.get("source", "")},
+            })
     # 设备名/CC 在容器里常常取不到（NVML 不可用），但标定文件是 nvidia-smi 跑出来的，
     # 里面记了 `gpu`/`cc`。用它补齐：导出的 `.ncu-rep` 靠这两个事实渲染设备行
     # （缺了 ncu 会读成 `Device 255, CC 0.0`），JSON 报告里也不再是空串。

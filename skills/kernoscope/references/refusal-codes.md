@@ -2,11 +2,11 @@
 
 # 拒绝码（`refusal.code`）参考
 
-每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；55 个 code 里 36 个带可直接执行的命令、19 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
+每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；56 个 code 里 37 个带可直接执行的命令、19 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
 **硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，
 或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。
 
-共 55 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
+共 56 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
 
 | code | 什么意思 | 怎么办 | 命令 | 代价 |
 |---|---|---|---|---|
@@ -35,6 +35,7 @@
 | `env_shared_gpu` | 同卡还有别的计算进程：读数被他人负载稀释 | 等到同卡其他进程结束，或换一张独占的卡再测：多租户下读数含他人负载，比值类口径（每 token 成本、显存带宽达成率）会被系统性稀释；拿不到独占环境时，结论按 env_gpu_exclusive 降级为不可引用 |  | 需人工 |
 | `env_throttled` | 窗口内有降频（功率封顶/热降频）：能效读数被扰动 | 等降频结束再测（温度回落/功率回到上限内），或提高功耗上限/换散热更好的实例；降频期间的时间与能耗数字仍然真实，但把它当作能效结论会偏乐观（同一份工作花了更多电） | `nvidia-smi -q -d PERFORMANCE` | ≈30s |
 | `env_reading_unknown` | 环境读数读不到（未知）：不能当成"没有" | 环境读数读不到时我们不猜：确认 NVML/nvidia-smi 可用（`kernoscope doctor`）、驱动在采样期间没有重启，或换一个能读到管理计数器的实例；"未知"与"零"是两件事，结论按未知降级 | `kernoscope doctor` | ≈5s |
+| `clock_not_locked` | 时钟没被锁住（或锁频状态读不到）：跨运行不可比 | 把两次运行放在**同一个时钟状态**下再比：锁住 SM 时钟（`nvidia-smi -lgc`），跑完用 `nvidia-smi -rgc` 复位；或者两次都在同样的未锁状态下测，并把这条当作已知扰动。**我们不会替你锁**：改设备时钟需要 root、且会改设备状态 —— 那是写操作，不在只读工具的授权里（见 NON-GOALS「不改设备状态」）。 | `sudo nvidia-smi -lgc <min>,<max>    # 跑完：sudo nvidia-smi -rgc` | ≈5s |
 | `no_launch_activity` | 没有采到任何 kernel 活动 | 确认被测命令真的在 GPU 上跑 kernel，且采集时带上了 CUDA activity（--ks-sqlite 指向的库要有 CUPTI_ACTIVITY_KIND_KERNEL 表） | `nsys profile --trace=cuda -o run -- python app.py` | ≈30s |
 | `no_kernel_match` | 过滤后没有匹配的 kernel | 放宽 -k 过滤（用更短的正则片段），或先不加 -k 看有哪些 kernel 名字 | `kernoscope --ks-sqlite kernels.sqlite --launch-csv` | ≈5s |
 | `no_kernels` | 报告里没有 kernel | 先确认采集到了 kernel 活动（见 no_launch_activity 的补救办法） |  | ≈30s |

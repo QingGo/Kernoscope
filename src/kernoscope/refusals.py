@@ -57,6 +57,7 @@ class RefusalCode(str, Enum):
     ENV_SHARED_GPU = "env_shared_gpu"         # 同卡还有别的计算进程：读数被他人负载稀释
     ENV_THROTTLED = "env_throttled"           # 窗口内有降频（功率封顶/热降频）：能效读数被扰动
     ENV_READING_UNKNOWN = "env_reading_unknown"  # 环境读数**读不到**（不是读到 0）：多租户/降频状态未知
+    CLOCK_NOT_LOCKED = "clock_not_locked"     # 时钟没被锁住：两次运行可能跑在不同频率上，不可相减
 
     # ---- 前提不成立：数据源在，但口径不成立 ----
     NO_LAUNCH_ACTIVITY = "no_launch_activity"  # 采到了但没有任何 kernel 活动
@@ -116,6 +117,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.NOT_APPLICABLE: "该指标在本设备上无定义",
     RefusalCode.MIXED_LAUNCH_CONFIG: "同名 kernel 有多组 launch 配置，单值会误导",
     RefusalCode.NO_CLOCK_READING: "没有 SM 时钟读数",
+    RefusalCode.CLOCK_NOT_LOCKED: "时钟没被锁住（或锁频状态读不到）：跨运行不可比",
     RefusalCode.ENV_SHARED_GPU: "同卡还有别的计算进程：读数被他人负载稀释",
     RefusalCode.ENV_THROTTLED: "窗口内有降频（功率封顶/热降频）：能效读数被扰动",
     RefusalCode.ENV_READING_UNKNOWN: "环境读数读不到（未知）：不能当成\"没有\"",
@@ -260,6 +262,13 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "同名 kernel 有多组 launch 配置时我们不报单一数值（会误导多数 launch）："
         "逐组读数见 LaunchConfigs section；只关心一组时用 -c/-k 固定它",
         cost_s=0.0, then_answers=("launch_configs",)),
+    RefusalCode.CLOCK_NOT_LOCKED: Remedy(
+        "把两次运行放在**同一个时钟状态**下再比：锁住 SM 时钟（`nvidia-smi -lgc`），跑完用 "
+        "`nvidia-smi -rgc` 复位；或者两次都在同样的未锁状态下测，并把这条当作已知扰动。"
+        "**我们不会替你锁**：改设备时钟需要 root、且会改设备状态 —— 那是写操作，不在只读工具"
+        "的授权里（见 NON-GOALS「不改设备状态」）。",
+        command="sudo nvidia-smi -lgc <min>,<max>    # 跑完：sudo nvidia-smi -rgc",
+        cost_s=5.0),
     RefusalCode.NO_CLOCK_READING: Remedy(
         "加 --ks-clock-mhz <MHz>（或让 NVML 采样开着）：没有 SM 时钟就算不出发射槽上限",
         command="kernoscope --ks-clock-mhz 2520 ...", cost_s=0.0,
