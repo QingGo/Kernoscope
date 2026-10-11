@@ -197,6 +197,11 @@ for scene in "${SCENES[@]}"; do
   fi
   say "  一屏：$(wc -c <"$OUT/onepage-${scene}.txt" | tr -d ' ') B / $(wc -l <"$OUT/onepage-${scene}.txt" | tr -d ' ') 行"
   say "  单文件 HTML：$OUT/rep-${scene}.html（自包含，可直接截图/发帖）"
+  if grep -q "coverage_too_low" "$OUT/onepage-${scene}.txt"; then
+    say "  提示：有结论被 coverage_too_low 挡住（窗口里 GPU 忙占比 <80% ⇒ 比值类口径不成立）。"
+    say "        共享容器上这很常见（宿主间隙/采样粒度都会稀释它）。想让它成立：把负载跑长跑大"
+    say "        （DEMO_SECONDS=10 DEMO_BATCH=32），或换独占机器。"
+  fi
   cat "$OUT/onepage-${scene}.txt" | sed 's/^/    /'
 done
 

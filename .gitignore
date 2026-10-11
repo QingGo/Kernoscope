@@ -39,3 +39,5 @@ dist/
 /build/
 *.egg-info/
 
+# demo 产物（截图/HTML/决策包都在这里，不入库）
+demo/out/
