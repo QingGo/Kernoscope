@@ -166,43 +166,59 @@ def bandwidth_sweep(sizes_mb, dtype_bytes=4, reps=5):
 # 2) matmul 可达算力（并测量"累加口径可区分性"，R-09/R-10）
 # --------------------------------------------------------------------------
 CALIBER_VARIANTS = [
-    # (名字, 设置函数, 记录进 profile 的 precision_settings)
-    ("default", lambda: None, {"allow_fp16_reduced_precision_reduction": None,
-                               "fp32_precision": "none"}),
+    # (名字, 要应用的精度设置)
+    # 只描述"要改什么"，记录的是**测量那一刻**从 torch 后端读回的实况（R-50/D7）。
+    # 空 dict = 不改动现场（各 torch 版本的"默认"本来就不一样，写死字面量就是编造）。
+    ("default", {}),
+    ("reduced_precision_reduction_off", {"allow_fp16_reduced_precision_reduction": False}),
+    ("fp32_ieee", {"fp32_precision": "ieee"}),
 ]
+
+# 产物里对 null 的说明（R-50/D7）：读不到就留空，不编造
+PRECISION_SETTINGS_NOTE = (
+    "precision_settings 与 caliber_variant_settings 都是**测量那一刻**从 torch 后端读回的"
+    "实况（不是字面量）；某项为 null 表示这个 torch 版本读不到它 —— 如实留空，未编造。")
 
 
 def _precision_settings_snapshot():
-    """读回当前的 torch 精度设置，作为标定产物的一部分（R-09）。"""
+    """读回当前的 torch 精度设置，作为标定产物的一部分（R-09/R-50）。
+
+    读不到的项**如实写 None**（这个 torch 版本没有/读不了这一项），不填猜测值：
+    产物里的 `precision_settings_note` 说明了 null 的含义。
+    """
     snap = {}
     try:
         snap["allow_fp16_reduced_precision_reduction"] = bool(
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
     except Exception:
         snap["allow_fp16_reduced_precision_reduction"] = None
-    for attr in ("fp32_precision", "float32_matmul_precision"):
-        try:
-            snap[attr] = str(getattr(torch.backends.cuda.matmul, attr))
-        except Exception:
-            pass
     try:
         snap["allow_tf32"] = bool(torch.backends.cuda.matmul.allow_tf32)
     except Exception:
-        pass
+        snap["allow_tf32"] = None
+    try:
+        snap["fp32_precision"] = str(torch.backends.cuda.matmul.fp32_precision)
+    except Exception:
+        snap["fp32_precision"] = None
+    try:  # 老 torch 没有 fp32_precision 时，这个字符串档位是能读到的最接近的东西
+        snap["float32_matmul_precision"] = str(
+            torch.backends.cuda.matmul.float32_matmul_precision)
+    except Exception:
+        snap["float32_matmul_precision"] = None
     return snap
 
 
 def _apply_precision(settings: dict):
-    """把一份精度设置快照写回 torch（写不动的项静默跳过 —— torch 版本差异很大）。"""
+    """把一份精度设置写回 torch（写不动的项静默跳过 —— torch 版本差异很大）。
+
+    `None` 表示"这一项当时读不到"，跳过而不是编一个值。
+    `fp32_precision` 最后写：它是新 torch 的权威字段，`allow_tf32` 是它的旧布尔别名，
+    这样恢复现场时以权威字段为准（老 torch 没有前者，才退回写别名）。
+    """
     if settings.get("allow_fp16_reduced_precision_reduction") is not None:
         try:
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = \
                 settings["allow_fp16_reduced_precision_reduction"]
-        except Exception:
-            pass
-    if "fp32_precision" in settings:
-        try:
-            torch.backends.cuda.matmul.fp32_precision = settings["fp32_precision"]
         except Exception:
             pass
     if settings.get("allow_tf32") is not None:
@@ -210,29 +226,30 @@ def _apply_precision(settings: dict):
             torch.backends.cuda.matmul.allow_tf32 = settings["allow_tf32"]
         except Exception:
             pass
+    if settings.get("fp32_precision") is not None:
+        try:
+            torch.backends.cuda.matmul.fp32_precision = settings["fp32_precision"]
+        except Exception:
+            if settings.get("allow_tf32") is None:
+                try:  # 老 torch 只有 allow_tf32 这个布尔别名
+                    torch.backends.cuda.matmul.allow_tf32 = (
+                        settings["fp32_precision"] != "ieee")
+                except Exception:
+                    pass
 
 
-def _set_precision(allow_reduced: bool | None = None, fp32_precision: str | None = None,
-                   baseline: dict | None = None):
-    """设置一项精度开关，并返回"恢复到 baseline"的可调用对象。
+def _set_precision(settings: dict | None = None, baseline: dict | None = None):
+    """应用一份精度设置，并返回"恢复到 baseline"的可调用对象。
+
+    调用方必须按「应用 → 测量 → 恢复」用：先 `restore = _set_precision(settings, baseline)`，
+    再测量，测量完 `restore()`。只有这个顺序才能保证"每个变体都在自己的设置下被测"，
+    并且让测量时刻读回的快照与产物记录一致（R-50/D7）。
 
     baseline 必须**在外面算一次**再传进来：如果每个变体各自快照，链式设置会让后面的
     快照记下前面变体改过的值，于是"恢复现场"实际恢复成了中间状态（这个坑有测试守）。
     """
     prev = dict(baseline) if baseline is not None else _precision_settings_snapshot()
-    if allow_reduced is not None:
-        try:
-            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = allow_reduced
-        except Exception:
-            pass
-    if fp32_precision is not None:
-        try:
-            torch.backends.cuda.matmul.fp32_precision = fp32_precision
-        except Exception:
-            try:
-                torch.backends.cuda.matmul.allow_tf32 = (fp32_precision != "ieee")
-            except Exception:
-                pass
+    _apply_precision(settings or {})
 
     def restore():
         _apply_precision(prev)
@@ -241,16 +258,16 @@ def _set_precision(allow_reduced: bool | None = None, fp32_precision: str | None
 
 
 def _variants():
-    """三种累加口径设置（default / fp16 reduced-reduction off / fp32 ieee）。"""
-    baseline = _precision_settings_snapshot()
-    out = [("default", _set_precision(baseline=baseline),
-            {"allow_fp16_reduced_precision_reduction": True, "fp32_precision": "none"})]
-    out.append(("reduced_precision_reduction_off",
-                _set_precision(allow_reduced=False, baseline=baseline),
-                {"allow_fp16_reduced_precision_reduction": False, "fp32_precision": "none"}))
-    out.append(("fp32_ieee", _set_precision(fp32_precision="ieee", baseline=baseline),
-                {"allow_fp16_reduced_precision_reduction": True, "fp32_precision": "ieee"}))
-    return out
+    """三种累加口径设置（default / fp16 reduced-reduction off / fp32 ieee）。
+
+    只返回**设置描述** `(名字, 要应用的设置)`，构造期不做任何写入；应用与恢复由调用方
+    在每次测量前后成对完成（应用 → 测量 → 恢复）。
+
+    为什么不能在这里应用：旧实现把三次 `_set_precision` 都放在构造列表时调用，三个副作用
+    在第一次测量之前全部落地，于是"default"与"reduced_precision_reduction_off"实际是在
+    fp32_ieee 的设置下测的，而产物里记的却是写死的字面量（R-50 / 验收报告 D7）。
+    """
+    return [(name, dict(settings)) for name, settings in CALIBER_VARIANTS]
 
 
 def matmul_peak(sizes, dtypes, caliber_probe=True, reps=3):
@@ -299,12 +316,17 @@ def matmul_peak(sizes, dtypes, caliber_probe=True, reps=3):
             a = torch.randn(probe_size, probe_size, device="cuda", dtype=dt)
             b = torch.randn(probe_size, probe_size, device="cuda", dtype=dt)
             try:
-                for name, restore, settings in _variants():
-                    variant_settings[name] = dict(settings)
+                baseline = _precision_settings_snapshot()
+                for name, settings in _variants():
+                    # 顺序：应用 → 测量 → 恢复。快照在**应用之后、测量之时**读，
+                    # 记录的才是这一次测量的实况，而不是写死的字面量（R-50/D7）。
+                    restore = _set_precision(settings, baseline)
                     try:
+                        measured_settings = _precision_settings_snapshot()
                         t, _ = timeit(lambda: a @ b, reps=reps, warmup=2)
                         variant_tflops[name] = round(2.0 * probe_size ** 3 / t / 1e12, 1)
                         variant_ms[name] = round(t * 1e3, 4)
+                        variant_settings[name] = measured_settings
                     except Exception as e:
                         print(f"  {dt} 口径探针 {name} 失败: {e}")
                     finally:
@@ -340,6 +362,7 @@ def matmul_peak(sizes, dtypes, caliber_probe=True, reps=3):
                  "ms": headline_ms,
                  "acc_caliber": _caliber_name(dt),
                  "precision_settings": headline_settings,
+                 "precision_settings_note": PRECISION_SETTINGS_NOTE,
                  "tflops_protocol": protocol,
                  "tflops_is_variant_reading": bool(variant_tflops),
                  "method": f"torch.matmul, {reps} iters best-of, size sweep {list(sizes)}",
