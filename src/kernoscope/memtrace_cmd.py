@@ -38,28 +38,36 @@ def _graded_metrics(metrics, sampling_ratio: float):
     return out
 
 
-def memtrace_main(argv: list[str]) -> int:
+def build_parser() -> "argparse.ArgumentParser":
+    """`kernoscope memtrace` 的解析器。**唯一真源**：`--help`、文档命令门禁与
+    下面的 `*_main` 都从这里取（两处各写一份，门禁就会与真实 CLI 漂移）。
+    """
     ap = argparse.ArgumentParser(
-        prog="kernoscope memtrace",
-        description="分析 NVBit 访存轨迹：sectors/request、合并效率、工作集、"
-                    "L1/L2 命中率模型、DRAM 字节（均为 measured/estimated，非硬件计数器）",
-    )
+            prog="kernoscope memtrace",
+            description="分析 NVBit 访存轨迹：sectors/request、合并效率、工作集、"
+                        "L1/L2 命中率模型、DRAM 字节（均为 measured/estimated，非硬件计数器）",
+        )
     ap.add_argument("--from", dest="src", required=True,
-                    help="轨迹文件：ks-memtrace v1，或 NVBit 官方 mem_trace 的输出（自动判别）")
+                        help="轨迹文件：ks-memtrace v1，或 NVBit 官方 mem_trace 的输出（自动判别）")
     ap.add_argument("--sm-count", type=int, default=0,
-                    help="SM 数量（官方 mem_trace 输出没有 SM id，用它近似分配；也用于 DRAM 放大）")
+                        help="SM 数量（官方 mem_trace 输出没有 SM id，用它近似分配；也用于 DRAM 放大）")
     ap.add_argument("--l2-bytes", type=int, default=None, help="覆盖 L2 容量（默认取轨迹头部）")
     ap.add_argument("--l1-bytes", type=int, default=None, help="L1 每 SM 容量（默认 128 KiB）")
     ap.add_argument("--line-bytes", type=int, default=32,
-                    help="建模粒度（默认 32 B = sector，与 ncu 的 sector 命中率口径对齐）")
+                        help="建模粒度（默认 32 B = sector，与 ncu 的 sector 命中率口径对齐）")
     ap.add_argument("--l1-ways", type=int, default=4)
     ap.add_argument("--l2-ways", type=int, default=16)
     ap.add_argument("--max-accesses", type=int, default=4_000_000,
-                    help="缓存模型最多分析多少次访问（超出则拒绝给 DRAM 字节，避免偏小的假值）")
+                        help="缓存模型最多分析多少次访问（超出则拒绝给 DRAM 字节，避免偏小的假值）")
     ap.add_argument("--kernel", default=None,
-                    help="只分析名字含该子串的 kernel（官方 mem_trace 输出会包含所有 kernel）")
+                        help="只分析名字含该子串的 kernel（官方 mem_trace 输出会包含所有 kernel）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def memtrace_main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+
 
     # L2 容量：优先显式参数，其次本机 nvidia-smi，最后留空（分析器会拒绝给 DRAM 字节并说明原因）
     l2_bytes = args.l2_bytes or 0

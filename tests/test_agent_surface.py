@@ -21,6 +21,7 @@ import subprocess
 import sys
 
 import pytest
+from pathlib import Path
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -251,3 +252,62 @@ def test_setup_check_script_prints_one_small_json_object():
     d = json.loads(r.stdout)                     # stdout 必须是纯 JSON
     assert "blocked_by" in d and "next" in d
     assert len(r.stdout.encode("utf-8")) < 1500, "入口层不许变大"
+
+
+def test_nothing_promises_selftest_output_as_a_calibration():
+    """R-66 / D14 残留：**任何地方**都不许说 selftest 的产物能当 `--ks-calibration`。
+
+    第四轮验收报告的原形：`PEAK_CAVEAT` 写"不要当 --ks-calibration"，而同一个文件的模块
+    docstring、`--out` 帮助文本、以及 `no_calibration` 的处方命令三处都在许诺它能当 ——
+    读者照着做会拿到 >100% 的物理不可能值。所以这里扫**源码 + 生成物 + 文档**。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    for path in [*root.glob("*.md"), *root.glob("src/**/*.py"), *root.glob("skills/**/*.md")]:
+        for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            low = line.lower()
+            # 只查"把 selftest/自检 与 --ks-calibration 连起来说"的行 ——
+            # 普通的 `--ks-calibration machine-profile.json` 命令当然允许
+            if "ks-calibration" not in low or not ("selftest" in low or "自检" in low
+                                                   or "machine-selfcheck" in low):
+                continue
+            # 只有"否定式"的说法才允许（不要/不能/别/不是/参考）
+            if re.search(r"(不要|不能|别|不是|仅供参考|不可)", line):
+                continue
+            offenders.append(f"{path.relative_to(root)}:{i}: {line.strip()[:100]}")
+    assert not offenders, ("这些地方还在暗示 selftest 的产物能当 --ks-calibration：\n  - "
+                           + "\n  - ".join(offenders))
+
+
+def test_every_subcommand_flag_is_documented():
+    """R-67/P5：`capabilities`/`selftest`/`diff` 的每个长开关都必须写进 CHANGELOG。
+
+    本文件开头自己定的判据是"外部消费者要改代码或改解析逻辑，就必须写在这里" ——
+    而 `diff --fail-on`（唯一能卡 CI 退出码的开关）在包里出现 0 次、任何文档里 0 次。
+    """
+    from kernoscope import cli
+
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    ch = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    docs = subprocess.run(["git", "ls-files", "*.md", "*.txt"], cwd=root,
+                          capture_output=True, text=True).stdout.split()
+    all_text = "\n".join((root / d).read_text(encoding="utf-8", errors="replace")
+                         for d in docs)
+    missing: list[str] = []
+    for sub in cli.SUBCOMMANDS:
+        for a in cli.subcommand_parser(sub)._actions:
+            for flag in a.option_strings:
+                if not flag.startswith("--"):
+                    continue
+                if sub in ("capabilities", "selftest", "diff"):
+                    # 新子命令的开关是**接口**：必须写进 CHANGELOG（本文件的判据）
+                    if flag not in ch:
+                        missing.append(f"{sub} {flag}（不在 CHANGELOG）")
+                elif flag not in all_text:
+                    missing.append(f"{sub} {flag}（任何 tracked 文档里都没有）")
+    assert not missing, "这些子命令开关没有任何文档：\n  - " + "\n  - ".join(missing)

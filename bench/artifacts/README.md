@@ -9,9 +9,9 @@
 
 | 产物目录 | 修订号 | 工具版本 | 状态 |
 |---|---|---|---|
-| `20261011-094535` | `2b9a7e3`（`environment.txt` / `manifest.json` 的 `revision`；`revision_source: git`、`revision_dirty: no`，另附 `source_sha256: dcbe29605b3340c0`） | 0.2.0 | **现行**：文档里引用的数字以它为准。46 个步骤里只有 `strict-lowduty` 非零退出，那是**预期**的（请求账本对拍但覆盖率不足，`--strict` 就该 exit 2）。这一轮多出一类证据：**R-47 的窗口分母验收**（`window-denominator.txt` + `window-auto|warmup1|warmup2.packet.json`）—— 同一个单 kernel 负载（每次 launch 读+写 1073.74 MB，解析可知）换三种窗口：1057.64 / 1056.22 / 1047.88 MB，相对离散 **0.93%**（判据 ≤5%），与解析真值最大偏差 2.41%。同一份代码在旧实现下是 1.06 GB / 0.86 GB / 0.52 GB 且**无任何告警**。决策包 `rep-copy.packet.json` 4088 B （≤ 4096 预算，裁剪 3 步）、`rep-copy.packet-only.json` 3842 B。 |
+| `20261011-094535` | `2b9a7e3`（`environment.txt` / `manifest.json` 的 `revision`；`revision_source: git`、`revision_dirty: no`，另附 `source_sha256: dcbe29605b3340c0`） | 0.2.0 | **现行**：文档里引用的数字以它为准。46 个步骤里只有 `strict-lowduty` 非零退出，那是**预期**的（请求账本对拍但覆盖率不足，`--strict` 就该 exit 2）。这一轮多出一类证据：**R-47 的窗口分母验收**（`window-denominator.txt` + `window-auto|warmup1|warmup2.packet.json`）—— 同一个单 kernel 负载（每次 launch 读+写 1073.74 MB，解析可知）换三种窗口：1057.64 / 1056.22 / 1047.88 MB，相对离散 **0.93%**（判据 ≤5%），与解析真值最大偏差 2.41%。同一份代码在旧实现下是 1.06 GB / 0.86 GB / 0.52 GB 且**无任何告警**。决策包 `rep-copy.packet.json` 内的 `cost.packet_bytes` 是 4088 B（≤ 4096 预算，裁剪 3 步），磁盘文件 4089 B；`rep-copy.packet-only.json` 是 3842 / 3843 B。**多了 1 B 是因为该产物由 `80825e9` 之前的写入器产生**（那时落盘会多写一个换行）；从 `80825e9` 起 `write_packet` 保证「落盘字节数 == `packet_bytes`」（有测试守）。 |
 | `20261009-012257` | `fc1cdba`（`environment.txt` / `manifest.json` 里的 `revision`） | 0.2.0 | **历史**（曾经的现行，保留可查）：42 个步骤里只有 `strict-lowduty` 非零退出，那是**预期**的（请求了账本对拍但覆盖率不足，`--strict` 就该 exit 2）。这一轮除了既有实验，还多出四类新证据：`capabilities*.json`（能力分层与三态矩阵）、`machine-selfcheck.json` + `selftest.txt`（本机误差带与 MDD）、`rep-*.packet.json` + `rep-copy.onepage.txt`（决策包与一屏，包 3934 B ≤ 4 KB 预算）、`diff-same-protocol.*` 与 `diff-protocol-mismatch.*`（同协议两次运行全部 `indistinguishable`；换窗口模式则 `incomparable`，只给差值不给方向） |
-| `20261008-235142` | `0f296f3`（`environment.txt` / `manifest.json` 里的 `revision`） | 0.2.0 | **历史**：仍保留可查（误差带的另一侧 −4.3% ~ +12.7% 来自它与更早那次的并集），但**不要再**拿它当现行证据 —— 它比现行产物早一轮，没有决策包/自检/对拍那几类文件 |
+| `20261008-235142` | `807a025`（`environment.txt` / `manifest.json` 里的 `revision`） | 0.2.0 | **历史**：仍保留可查（误差带的另一侧 −4.3% ~ +12.7% 来自它与更早那次的并集），但**不要再**拿它当现行证据 —— 它比现行产物早一轮，没有决策包/自检/对拍那几类文件 |
 | `20261008-225555` | 未留存（`environment.txt` 写 `git: n/a` —— 仓库同步到租用机器时没带 `.git`，也没有 `REVISION` 文件） | 0.1.0（报告头） | **历史**：保留它是为了让"上一次运行是多少"可查（例如误差带的另一侧）。它**不能**当现行证据：既钉不住修订号，报告头版本也早于当前代码。R-40 之后不再产生这种产物 |
 
 ## 怎么读这些文件
@@ -47,10 +47,11 @@ W1 的验收条件是"缺件时也要成功"。这一份是 `bench/degradation-c
 
 - 逐 launch 的大 JSON、`.nsys-rep`、`.sqlite` 与 NVBit 的原始轨迹**不入库**（体积大、按需重采），
   所以 `rep-*.ksreport.json` 不在本目录里；体积数字由 `size-comparison.csv` 给出（它是机器读的）。
-- `diff-same-protocol.json` 里 `dram_bytes` 的 MDD 是 14.0%：这一轮的自检在跨进程复测里
-  量到了约 4.7% 的漂移（`machine-selfcheck.json` 的 `mdd.cross_process_samples` 有原始样本），
-  于是 `dram_bytes_per_launch` / `dram_bytes` 分别只差 −3.6% / −3.6% 时被判为
-  `indistinguishable`。这正是想要的结论：同协议同命令的两次运行**不该**报"改进"。
+- `diff-same-protocol.json` 里 `dram_bytes` 的 MDD 是 **5.0%**（`machine-selfcheck.json` 的
+  `mdd.dram_bytes_pct`；本次自测的 run-to-run SD 是 0.31%，另有 5% 的保守下限常量兜底），
+  于是 `dram_bytes` / `dram_bytes_per_launch` 分别只差 **−0.025% / −0.202%** 时被判为
+  `indistinguishable`（`kernel_time` 差 0.059 ms、`occupancy` 差 0.0% 同样如此）。
+  这正是想要的结论：同协议同命令的两次运行**不该**报"改进"。
 
 ### `20261008-235142` 的一处补算（如实说明）
 

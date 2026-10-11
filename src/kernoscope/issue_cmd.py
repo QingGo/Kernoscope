@@ -24,23 +24,31 @@ from .backends.opcode_hist import OpcodeHistError, load
 from .provenance import provenance_for_name
 
 
-def issue_main(argv: list[str]) -> int:
+def build_parser() -> "argparse.ArgumentParser":
+    """`kernoscope issue` 的解析器。**唯一真源**：`--help`、文档命令门禁与
+    下面的 `*_main` 都从这里取（两处各写一份，门禁就会与真实 CLI 漂移）。
+    """
     ap = argparse.ArgumentParser(
-        prog="kernoscope issue",
-        description="从 NVBit opcode_hist 的动态指令数算发射槽利用率上界与瓶颈方向"
-                    "（estimated；不是 ncu 的 stall 计数器细分）",
-    )
+            prog="kernoscope issue",
+            description="从 NVBit opcode_hist 的动态指令数算发射槽利用率上界与瓶颈方向"
+                        "（estimated；不是 ncu 的 stall 计数器细分）",
+        )
     ap.add_argument("--from", dest="src", required=True, help="opcode_hist 的 stdout 文件")
     ap.add_argument("--kernel", default=None, help="只分析名字含该子串的 kernel")
     ap.add_argument("--sm-count", type=int, default=0, help="SM 数（必需）")
     ap.add_argument("--clock-mhz", type=float, default=0.0, help="测量期 SM 时钟（必需）")
     ap.add_argument("--duration-ms", type=float, default=0.0,
-                    help="这些 launch 的总时长（ms，取自 gpu__time_duration.sum）")
+                        help="这些 launch 的总时长（ms，取自 gpu__time_duration.sum）")
     ap.add_argument("--dram-pct", type=float, default=None,
-                    help="同一次运行的显存忙碌占比（用于判断「是在等数据还是发不出去」）")
+                        help="同一次运行的显存忙碌占比（用于判断「是在等数据还是发不出去」）")
     ap.add_argument("--schedulers", type=int, default=4, help="每 SM 的 warp 调度器数（默认 4）")
     ap.add_argument("--json", action="store_true")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def issue_main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+
 
     try:
         hist = load(args.src)

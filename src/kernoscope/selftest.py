@@ -12,10 +12,12 @@
      仪器分辨率下限（NVML 显存忙碌是整数百分比），得到"两次运行差多少才算真差别"。
      `kernoscope diff` 没有它就只能报"变了"，而不是"真的变了 / 还是噪声"。
 
-输出文件同时是**两种输入**：
-  * `--ks-selfcheck machine-selfcheck.json` → 判词带误差带与 MDD；
-  * `--ks-calibration machine-selfcheck.json` → 至少带宽侧的 roofline 可用
-    （matmul 峰值也测，并如实标注口径是 torch.matmul）。
+这个文件的用途只有一个：**`--ks-selfcheck machine-selfcheck.json`** —— 让判词带上误差带与 MDD。
+
+⚠ **不要**把它当 `--ks-calibration` 用（这一条以前在本文档、`--out` 的帮助文本和
+`no_calibration` 的处方里都写反了，三处互相矛盾）：它的 matmul 峰值来自**单一尺寸**，
+真机实测比多尺寸 sweep 低约 17%，拿它当标定会把正常结果推过 100%。要标定请跑
+`tools/machine-profile.py`。带宽侧它确实也量，但同样只在单一尺寸下，所以仍然只作参考。
 """
 
 from __future__ import annotations
@@ -154,7 +156,7 @@ class SelftestResult:
                 out.append(f"  适用范围：{m['caveat']}")
         if self.peaks:
             out.append("")
-            out.append("顺带量到的本机峰值（copy 侧可当 --ks-calibration 的带宽输入；matmul 侧见下方适用范围）："
+            out.append("顺带量到的本机峰值（**仅供参考，别当 --ks-calibration**）："
                        f"copy {self.peaks.get('copy_gbs', 0):.0f} GB/s"
                        + (f" · read {self.peaks.get('read_gbs', 0):.0f} GB/s"
                           if self.peaks.get("read_gbs") else "")
@@ -545,7 +547,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="纯 torch 的已知答案自检：量出本机误差带与 MDD（不需要 nsys/nvcc/NVBit）",
     )
     p.add_argument("-o", "--out", default=None,
-                   help="写机器可读自检文件（同时可当 --ks-selfcheck 与 --ks-calibration 用）")
+                   help="写机器可读自检文件（给 --ks-selfcheck 用；**不要**当 --ks-calibration："
+                        "它的峰值是单一尺寸读数，要标定请跑 tools/machine-profile.py）")
     p.add_argument("--json", action="store_true", help="把自检结果打到 stdout（JSON）")
     p.add_argument("--size-mb", type=int, default=DEFAULT_SIZE_MB, help="张量大小（MB）")
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION_S,

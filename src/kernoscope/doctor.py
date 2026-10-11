@@ -17,6 +17,8 @@ doctor 把这些检查收敛成一条命令，并且把结论直接映射到 pro
 
 from __future__ import annotations
 
+import argparse
+
 import glob
 import json
 import os
@@ -566,15 +568,21 @@ def render(report: DoctorReport, color: bool = False) -> str:
     return "\n".join(out)
 
 
-def doctor_main(argv: list[str]) -> int:
-    import argparse
-
+def build_parser() -> "argparse.ArgumentParser":
+    """`kernoscope doctor` 的解析器。**唯一真源**：`--help`、文档命令门禁与
+    下面的 `*_main` 都从这里取（两处各写一份，门禁就会与真实 CLI 漂移）。
+    """
     ap = argparse.ArgumentParser(prog="kernoscope doctor",
-                                 description="环境自检：这台机器上能拿到什么、拿不到什么、为什么")
+                                     description="环境自检：这台机器上能拿到什么、拿不到什么、为什么")
     ap.add_argument("--json", action="store_true", help="输出 JSON（机器可读）")
     ap.add_argument("--no-probe", action="store_true",
-                    help="不做 ncu 实测探测，只用静态信息推断计数器是否可用")
-    args = ap.parse_args(argv)
+                        help="不做 ncu 实测探测，只用静态信息推断计数器是否可用")
+    return ap
+
+
+def doctor_main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+
 
     rep = run_doctor(probe_counters=not args.no_probe)
     if args.json:

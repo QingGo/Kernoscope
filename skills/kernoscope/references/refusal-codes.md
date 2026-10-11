@@ -45,7 +45,7 @@
 | `trace_too_many_accesses` | 访问数超过分析上限 | 提高 --ks-max-accesses（内存换精度），或缩小被追踪 kernel 的迭代数：超上限时我们拒绝给一个偏小的字节数 | `kernoscope --ks-max-accesses 20000000 --ks-memtrace t.txt ...` | 需人工 |
 | `ledger_basis_unavailable` | 账本对拍口径不成立 | 换对拍口径：--ks-ledger-total-mb 走整窗口，--ks-ledger-mb 走 per-launch（后者要求窗口主导性达标） | `kernoscope --ks-ledger-total-mb 512 -- python bench_loop.py` | ≈0 |
 | `zero_baseline` | 基线为 0，相对误差带不适用 | 基线是 0 时相对差无定义（除以 0），所以不能用相对误差带判「变了多少」。要么给出一个非零基线，要么按绝对差值自行判断 —— 我们只把绝对差值报出来，不下方向 |  | 需人工 |
-| `no_calibration` | 缺少本机实测峰值（未标定） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它） | `kernoscope selftest --out machine-profile.json` | ≈60s |
+| `no_calibration` | 缺少本机实测峰值（未标定） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它） | `python tools/machine-profile.py --out machine-profile.json` | ≈5min |
 | `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致 | `python tools/machine-profile.py --quick` | ≈5min |
 | `no_workload` | 没有给工作量（FLOPs/bytes） | 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes | `kernoscope --ks-gemm 4096,4096,4096 -- python app.py` | ≈0 |
 | `unknown_arch` | 未知架构，算不出上界 | 用 --ks-sm-count 指定 SM 数，或报告里带上 compute capability：未知架构算不出 occupancy 上界，我们不猜 |  | 需人工 |

@@ -144,12 +144,25 @@ matmul 的 TFLOP/s 不是机器常数，它取决于**累加口径**：fp16/bf16
 只改这几个设置就能差出可观的比例。
 
 更关键的是：**"口径能不能被分辨"本身就是一个测量结果，不是一个可以假设的常量。**
-同一台机器相隔一天的两次标定，一次给出三种设置最大相对差 0.4%（不可分辨），
-另一次给出 5.0%（可分辨）。5% 的离散度足以让 roofline 在拐点附近翻转判定。
+几个百分点的离散度就足以让 roofline 在拐点附近翻转判定，而同一个 dtype 在不同次标定里
+可以给出**相反**的结论（见下表最后一句的跨产物范围）。
 
-同一次标定里，不同 dtype 的结论也可以**相反** —— 上面那份产物就是：
-bf16 三个口径差 3.8%（可分辨）、fp16 差 13.2%（可分辨）、而 fp32 只差 0.7%（**不可分辨**，
-三种设置下都是 54.5 TFLOP/s 上下）。所以 fp32 那一档报"精确单值"是不诚实的，
+同一次标定里，不同 dtype 的结论也可以**相反** —— 有的档位三种口径差到 4% 以上
+（可分辨），有的只差不到 1%（**不可分辨**，此时报"精确单值"不诚实）。具体数字见下表
+（由最新产物渲染，与上面的节选同源）：
+
+<!-- calib-caliber:begin -->
+<!-- 由 tools/gen_calibration_excerpt.py 生成（取自最新产物）；不要手改本块 -->
+
+| dtype | 头条 TFLOP/s | 头条来自哪个变体 | 三个口径变体的读数 | 最大相对差 | 可分辨（≥2%） |
+|---|---|---|---|---|---|
+| `torch.bfloat16` | **163.3** | `default` | default 163.3 / reduced_precision_reduction_off 163.3 / fp32_ieee 156.8 | 4.0% | **是** |
+| `torch.float16` | **159.5** | `reduced_precision_reduction_off` | default 158.2 / reduced_precision_reduction_off 159.5 / fp32_ieee 159.5 | 0.8% | **否** |
+| `torch.float32` | **53.8** | `fp32_ieee` | default 52.4 / reduced_precision_reduction_off 53.1 / fp32_ieee 53.8 | 2.6% | **是** |
+
+（本表由 `bench/artifacts/20261011-094535/machine-profile.json` 渲染。同一 dtype 的三口径最大相对差在不同产物里可以跨过 2% 门槛 —— 跨已登记产物看：`torch.bfloat16` 3.8%~4.0%；`torch.float16` 0.8%~13.2%；`torch.float32` 0.4%~2.6%。所以「口径能不能被分辨」本身是**测量结果**，不是常量。本产物的三个 dtype 头条**都等于**某个变体读数 ✓。）
+<!-- calib-caliber:end -->
+
 报告里会带上 `caliber_spread_pct` 与 `caliber_distinguishable`，让读者自己判断。
 
 所以标定产物必须带：
@@ -167,11 +180,12 @@ bf16 三个口径差 3.8%（可分辨）、fp16 差 13.2%（可分辨）、而 f
 | `caliber_variant_settings` | 每个变体**自己的** precision 设置（从前 `_settings` 被丢弃，只剩一个事后快照） |
 | `caliber_probe_size` / `caliber_probe_method` | 口径探针的尺寸与方法 —— `caliber_spread_pct` 只在**同协议**之间比较，读者要能复核这一点 |
 
-**为什么头条必须能对应到一次具体测量**：真机产物曾经出现 fp16 的 `tflops` 是 167.4，
-而同一尺寸下三个变体是 145.5 / 163.2 / 163.3 —— 头条**不等于任何一个变体**，
-而 `precision_settings` 记的却是 `fp32_precision="ieee"`（对应 `fp32_ieee` 那一档）。
+**为什么头条必须能对应到一次具体测量**：真机产物曾经出现过 fp16 的 `tflops`
+**不等于任何一个变体读数**（而 `precision_settings` 记的却是另一档的设置）—— 那个数字
+读者既复现不了、也无法判断该信哪个。
 读者拿着这份产物无法复现这个数字，也无法判断该信哪一个。现在头条取"变体里最快的那一个"，
-并写明它是谁：上面那份产物里 fp16 的头条 166.9 就是 `fp32_ieee` 变体的读数。
+并写明它是谁 —— **上表**里每个 dtype 的"头条来自哪个变体"就是那个字段（`tflops_protocol`），
+它必须等于三个变体读数里的某一个。
 
 口径探针会在测完后恢复原始设置（有测试守这一点）。
 
@@ -188,9 +202,9 @@ kernoscope --set basic --ks-calibration machine-profile.json \
   字段时，Kernoscope 拒绝用它算 roofline 拐点**（`est__achieved_tflops`、`est__bound`、
   `est__pct_of_measured_compute_peak` 变成 `n/a` + 原因），带宽侧照常给数 ——
   字节数与显存忙碌代理不依赖累加口径。
-- 报告里的每个峰值都会带上**来源与标定时间**（例如
-  `measured peak (machine-profile.json @ 2026-10-08 22:00:00, dtype=bf16, bw=907 GB/s,
-  compute=169.0 TFLOP/s, 累加口径=bf16 (fp32 accumulate), 口径离散=3.9%)`）。
+- 报告里的每个峰值都会带上**来源与标定时间**：`measured peak (<标定文件> @ <时间>,
+  dtype=…, bw=… GB/s, compute=… TFLOP/s, 累加口径=…, 口径离散=…%)` —— 括号里的具体数字
+  来自那次标定的产物（本页的生成块里就有当前这一份的对应值）。
 
 ⚠️ `--ks-peak-tflops` / `--ks-peak-gbps` 是**覆盖值**，不是标定：用它们时报告会明确标注来源
 为覆盖值，并且不用于拐点判定。

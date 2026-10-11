@@ -39,8 +39,19 @@ ROOT = Path(__file__).resolve().parents[1]
 DOC_EXCLUDE = ("bench/artifacts/",)
 
 # 允许出现在 `kernoscope` 之前的"前缀"，只有这些才说明这一行是在调用我们
-CALL_PREFIX_WORDS = {"uv", "run", "sudo", "time", "env", "command", "exec", "nohup", "xargs"}
 PLACEHOLDER = "PLACEHOLDER"          # 文档里的 `<真值>` 占位符归一成它
+
+# 允许的"包装形式"：这些写法都算**在调用我们**，必须被解析（不许静默丢弃）。
+#   真事（验收报告第四轮 P1）：`python -m kernoscope … --smoke` 与
+#   `xargs -n1 kernoscope … --smoke` 两条整行被丢弃，于是编出来的开关没人管。
+_WRAPPERS = r"""(?:
+      sudo\s+|time\s+|nohup\s+|command\s+|exec\s+            # 常见前缀
+    | env\s+(?:\S+\s+)*                                        # env VAR=x …
+    | uv\s+run\s+(?:--\S+\s+)*|uv\s+                            # uv run [--flags]
+    | (?:python|python3)\s+-m\s+                                # python -m <module>
+    | xargs\s+(?:-\S+\s+)*                                      # xargs -n1 <cmd>
+)?(?<![\w./-])(?P<prog>kernoscope)\b"""
+CALL_RE = re.compile(_WRAPPERS, re.X)
 
 # --------------------------------------------------------------------------
 # 从文档里取命令
@@ -120,6 +131,15 @@ def _split_metachars(tokens: list[str]) -> list[str]:
     return out
 
 
+def tokens_after(s: str, pos: int) -> list[str]:
+    """`pos` 之后的 shell token（含元字符截断与注释剥离）。"""
+    try:
+        toks = shlex.split(s[pos:], comments=True)
+    except ValueError:
+        return []
+    return _split_metachars(toks)
+
+
 def kernoscope_argv(line: str) -> list[str] | None:
     """把一条文档行切成 **kernoscope 的 argv**；不是调用我们的一律返回 None。
 
@@ -145,31 +165,25 @@ def kernoscope_argv(line: str) -> list[str] | None:
         tokens.pop(0)
     if not tokens:
         return None
-    # `kernoscope` 必须出现在"调用位置"：前面只允许 CALL_PREFIXES 里的词
-    try:
-        idx = tokens.index("kernoscope")
-    except ValueError:
+    # `kernoscope` 必须出现在**调用位置**（或某种被承认的包装形式里）。
+    # 用正则定位而不是"前缀词都要在白名单里"：白名单会漏掉 `python -m`、`xargs -n1`。
+    m = CALL_RE.search(s)
+    if m is None:
         return None
-    if any(t not in CALL_PREFIX_WORDS for t in tokens[:idx]):
-        return None
-    argv = ["kernoscope", *tokens[idx + 1:]]
+    argv = ["kernoscope", *tokens_after(s, m.end("prog"))]
     if "--" in argv:
         argv = argv[:argv.index("--")]
     return argv[1:]                       # 去掉程序名，方便喂给 main()
 
 
 def _subcommand_flags() -> dict[str, set[str]]:
-    """每个子命令自己的合法长开关（从各自的 `--help` 抓，不手抄）。"""
-    out: dict[str, set[str]] = {}
-    for sub in cli.SUBCOMMANDS:
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                cli.main([sub, "--help"])
-        except SystemExit:
-            pass
-        out[sub] = set(re.findall(r"--[a-z][a-z0-9-]+", buf.getvalue()))
-    return out
+    """每个子命令自己的合法开关 —— 来自**真实解析器**（`cli.subcommand_parser`）。
+
+    旧实现从各子命令 `--help` 的散文里正则刮 `--long`，那是"看起来像开关的字符串"，
+    不是"解析器认识的东西"。
+    """
+    return {sub: {s for a in cli.subcommand_parser(sub)._actions for s in a.option_strings}
+            for sub in cli.SUBCOMMANDS}
 
 
 def _main_flags() -> set[str]:
@@ -209,18 +223,20 @@ def _parse_problem(argv: list[str], sub_flags: dict[str, set[str]],
     bad = [t.split("=")[0] for t in argv if t.startswith("--") and t.split("=")[0] not in allowed]
     if bad:
         return f"不存在的开关：{bad}"
-    if sub:
-        return None
     if PLACEHOLDER in argv:
         # 带占位符的行是**示意**（读者要替换成真值）：类型校验没意义
         # （`--ks-ledger-mb <每次 launch 的 MB>` 里那个值本来就不是数字）。
         # 但开关与子命令的存在性**已经查过了** —— 那才是这一层的职责。
         return None
+    # 4) **真的解析一遍** —— 子命令走子命令自己的解析器（旧实现在这里 `return None`，
+    #    于是 `diff … --packet foo` / `capabilities -Z` 这类命令门禁永远放行）。
+    parser = cli.subcommand_parser(sub) if sub else cli.build_parser()
     try:
-        cli.build_parser().parse_args(argv)
+        parser.parse_args(argv[1:] if sub else argv)
     except SystemExit as e:
         # `--help` 也是 SystemExit，但那是成功路径
-        return None if e.code in (0, None) else f"主解析器拒绝（exit {e.code}）"
+        return None if e.code in (0, None) else \
+            f"{'子命令' if sub else '主'}解析器拒绝（exit {e.code}）"
     return None
 
 
@@ -246,7 +262,52 @@ def test_every_documented_command_is_parseable():
                     problems.append(f"{doc.relative_to(ROOT)}:{start + offset}: {why}\n"
                                     f"    {line.strip()[:110]}")
     assert seen >= 20, f"只扫到 {seen} 条文档命令 —— 扫描范围或取词逻辑退化了"
+    # P1 的第二半：**不许静默丢弃**。提到 kernoscope 又带长开关、却没被认成命令的行，
+    # 说明取词逻辑漏了一种包装形式 —— 那种行里的编造开关永远不会被查（P1 的原形）。
+    suspicious = [f"{d.relative_to(ROOT)}:{ln}: {s.strip()[:90]}"
+                  for d, ln, s in _unclassified_with_flags()]
+    assert not suspicious, ("这些行提到了 kernoscope 还带长开关，却没被当成命令解析"
+                            "（包装形式没认全）：\n  - " + "\n  - ".join(suspicious))
     assert not problems, "文档里的命令跑不通（读者会照抄失败）：\n  - " + "\n  - ".join(problems)
+
+
+def _unclassified_with_flags() -> list[tuple[Path, int, str]]:
+    out = []
+    for doc in DOCS:
+        for start, block in _fenced_blocks(doc):
+            for offset, line in enumerate(_logical_lines(block)):
+                s = line.strip()
+                if "kernoscope" not in s or s.startswith("#"):
+                    continue
+                if kernoscope_argv(line) is None and re.search(r"(?<![\w-])--[a-z][a-z0-9-]+", s):
+                    out.append((doc, start + offset, s))
+    return out
+
+
+@needs_git
+def test_no_documented_subcommand_bypasses_its_real_parser():
+    """R-60：**未解析的子命令数必须为 0**。
+
+    旧门禁对子命令只比对开关集合就 `return None`，于是三类不合法命令被放行
+    （`diff … --packet foo`、`selftest --ks-calibration …`、`capabilities -Z`）。
+    这条把"每个子命令调用都真的过了它自己的解析器"变成可断言的事实。
+    """
+    unparsed: list[str] = []
+    seen_sub = 0
+    for doc in DOCS:
+        for start, block in _fenced_blocks(doc):
+            for offset, line in enumerate(_logical_lines(block)):
+                argv = kernoscope_argv(line)
+                if not argv or argv[0] not in cli.SUBCOMMANDS:
+                    continue
+                seen_sub += 1
+                try:
+                    cli.subcommand_parser(argv[0]).parse_args(argv[1:])
+                except SystemExit as e:
+                    if e.code not in (0, None):
+                        unparsed.append(f"{doc.relative_to(ROOT)}:{start + offset}: {line.strip()[:80]}")
+    assert seen_sub > 0, "文档里一条子命令都没有？扫描范围退化了"
+    assert unparsed == [], ("这些子命令没有通过它自己的真实解析器：\n  - " + "\n  - ".join(unparsed))
 
 
 @needs_git

@@ -19,21 +19,29 @@ from .analyze.occupancy import (ARCH, analyze_probe_records, load_probe_records,
                                 to_injection_json)
 
 
-def occupancy_main(argv: list[str]) -> int:
+def build_parser() -> "argparse.ArgumentParser":
+    """`kernoscope occupancy` 的解析器。**唯一真源**：`--help`、文档命令门禁与
+    下面的 `*_main` 都从这里取（两处各写一份，门禁就会与真实 CLI 漂移）。
+    """
     ap = argparse.ArgumentParser(
-        prog="kernoscope occupancy",
-        description="从探针记录（ks-occupancy-records v1）计算达到的 occupancy —— "
-                    "ncu 用硬件计数器，这里用 (smid, 起止时间) 的区间重叠重建",
-    )
+            prog="kernoscope occupancy",
+            description="从探针记录（ks-occupancy-records v1）计算达到的 occupancy —— "
+                        "ncu 用硬件计数器，这里用 (smid, 起止时间) 的区间重叠重建",
+        )
     ap.add_argument("--from", dest="src", required=True, help="探针输出文件")
     ap.add_argument("--kernel", default=None, help="覆盖记录中的 kernel 名")
     ap.add_argument("--threads", type=int, default=None, help="每 block 线程数（默认取记录头部）")
     ap.add_argument("--arch", default=None, help=f"目标架构（默认取记录头部），可用: {', '.join(ARCH)}")
     ap.add_argument("--sm-count", type=int, default=None, help="SM 数量（默认取记录头部）")
     ap.add_argument("--write-json", default=None,
-                    help="把结果写成 --ks-achieved-occupancy 可用的 JSON")
+                        help="把结果写成 --ks-achieved-occupancy 可用的 JSON")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出分析结果")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def occupancy_main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+
 
     try:
         rec = load_probe_records(args.src)

@@ -4,7 +4,7 @@
 它回答三类问题：① 哪个 kernel 慢、launch 配置如何（`exact`）；② 离 roofline 多远、是不是 DRAM bound（`estimated`，带误差带）；③ 实际达到的 occupancy、发射槽上界与瓶颈方向（`measured`/`estimated`）。
 它**不能回答**：精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 这些与 ncu 同源的硬件计数器我们不给数字，只报 `n/a` + 原因 + 替代口径；完整三态清单见 [COVERAGE.md](COVERAGE.md)。
 
-30 秒上手（没有 GPU 也能跑通）：`kernoscope doctor` —— 先看这台机器能答什么、拿不到什么、为什么。
+30 秒上手（没有 GPU 也能跑通）：`kernoscope doctor` —— 先看这台机器能答什么、拿不到什么、为什么（`doctor --no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读）。
 
 与 `ncu` 的关系：CLI 兼容，但数据源不同（它读硬件计数器，我们读物理观测量，绝不占用它的指标名）；与 `nsys` 的关系：复用它的 CUPTI activity，是它的消费者而不是替代品；与 `torch.profiler` 的关系：它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信"。
 
@@ -287,7 +287,7 @@ kernoscope -i rep.ksreport.json --csv | grep -E 'ledger|window_coverage|share|me
 这张表要说的是**两件常被搞混的事**：
 
 1. **时长只决定"前提是否成立"，不决定"准不准"。** 1.2 秒时覆盖率 71.4% < 80%，
-   工具直接拒绝给数（正确地）；而 3 秒到 20 秒，覆盖率从 88.2% 涨到 98.0%，
+   工具直接拒绝给数（正确地）；而 3 秒到 20 秒，覆盖率从 88.2% 涨到 98.1%，
    误差却在 +8.3% ~ +10.2% 之间**不收敛**（20 秒那次比 8 秒更大，这是反方向的不收敛）。
    也就是说"多跑一会儿就更准"是错的，正确说法是"多跑一会儿才**有资格**给数"。
 2. 同一个时长在不同运行里也会变（20 秒那一点在有产物的三次运行里是 +6.2%、+6.6%，
@@ -342,6 +342,8 @@ ncu 的 Achieved Occupancy 来自计数器；这里用**区间重叠法**重建 
 make -C tools/probes run                      # 编译并采集 occupancy-records.txt
 kernoscope occupancy --from occupancy-records.txt                      # 看结果
 kernoscope occupancy --from occupancy-records.txt --write-json occ.json  # 产出注入用 JSON
+# 记录头部缺信息时手动指定：--arch sm_89 --threads 256 --sm-count 128；--kernel 覆盖名字
+# （默认全部从记录头部取；--json 给机器读）
 kernoscope --ks-achieved-occupancy occ.json -k regex:<kernel> -- your_app
 ```
 
@@ -375,6 +377,7 @@ NO_EAGER_LOAD=0 CUDA_INJECTION64_PATH=$NVBIT/tools/build/opcode_hist/opcode_hist
 
 kernoscope issue --from hist.txt --kernel my_kernel \
                  --sm-count 128 --clock-mhz 2450 --duration-ms 86.7 --dram-pct 3.2
+# 发射槽分母默认按每 SM 4 个调度器（可改：--schedulers <N>）；--json 给机器读
 # 或直接并进报告（SchedulerStats / WarpStateStats 两个 section）
 kernoscope --set full --ks-instr-hist hist.txt --ks-sm-count 128 --ks-clock-mhz 2450 -- ./app
 ```
@@ -404,6 +407,8 @@ kernoscope --set full --ks-instr-hist hist.txt --ks-sm-count 128 --ks-clock-mhz 
 make -C tools/probes/nvbit_memtrace NVBIT_PATH=~/nvbit_release_x86_64
 NVBIT_PATH=~/nvbit_release_x86_64 bash tools/probes/nvbit_memtrace/collect.sh -- ./your_app
 kernoscope memtrace --from memtrace-official.txt --l2-bytes 75497472
+# 缓存模型可调：--line-bytes（默认 32 = sector 口径）、--l1-bytes、--l1-ways、--l2-ways
+# --max-accesses（默认 4M；超过就拒绝给 DRAM 字节，避免偏小的假值）
 kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o rep -- ./your_app
 ```
 
@@ -448,8 +453,9 @@ kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o 
 
 DRAM 字节代理 = 显存忙碌时间 × 本机实测峰值带宽。`utilization.memory` 在高负载下
 **先于** DRAM 达到可达峰值而饱和（读数 95% 时实际吞吐约为可达峰值的 87%），
-所以误差不是对称的：本轮三个已知答案负载的实测是 **−4.2% / +12.8% / +9.6%**，
-更早两次运行分别是 −4.3% ~ +9.0% 与 −4.3% ~ +12.7%，三次并集 **−4.3% ~ +12.7%**。
+所以误差不是对称的：本轮三个已知答案负载的实测是 **−4.2% / +12.8% / +9.6%**
+（逐次运行与并集见上文「这个误差带的口径与边界」—— 那里是唯一一处列出各次带的地方，
+免得同一句话在文档里出现两遍、然后各自漂）。
 **它不是上界，也不是对称误差**：真实负载的访存模式与微基准不同，误差可以更大；
 引用时必须写"落在代理误差带内"，而不是"两次方向一致所以可信"。
 

@@ -318,7 +318,7 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         then_answers=("ledger_verdict",)),
     RefusalCode.NO_CALIBRATION: Remedy(
         "跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）",
-        command="kernoscope selftest --out machine-profile.json", cost_s=60.0,
+        command="python tools/machine-profile.py --out machine-profile.json", cost_s=300.0,
         then_answers=("dram_bytes", "roofline")),
     RefusalCode.CALIBRATION_CALIBER_MISMATCH: Remedy(
         "标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）："

@@ -392,6 +392,10 @@ def test_calibration_excerpt_is_generated_from_the_current_artifact():
     assert mod.BEGIN in text and mod.END in text
     have = text[text.index(mod.BEGIN):text.index(mod.END) + len(mod.END)]
     assert have == mod.render(), "产物节选被手改了（它是生成物）"
+    # R-62：**正文**里那节口径数字也是生成物（旧正文与节选直接矛盾，而覆盖它的 needle
+    # 门禁被删掉了 —— 手抄的正文必须没有藏身处）
+    body_block = text[text.index(mod.CALIB_BEGIN):text.index(mod.CALIB_END) + len(mod.CALIB_END)]
+    assert body_block == mod.render_caliber(), "正文里的口径表被手改了（它是生成物）"
     # 节选里的每个数字都必须能在产物里找到（不是"看起来像"）
     art, prof = mod.newest_profile()
     body = have[have.index("```jsonc") + 9:have.rindex("```")]
@@ -408,9 +412,16 @@ def test_calibration_excerpt_gate_can_go_red(monkeypatch, tmp_path):
     changed = json.loads(json.dumps(prof))
     changed["measured_dram"]["read_gbs"] = round(changed["measured_dram"]["read_gbs"] + 5.0, 1)
     monkeypatch.setattr(mod, "newest_profile", lambda: (art, changed))
-    assert mod.render() != mod.render.__wrapped__() if hasattr(mod.render, "__wrapped__") else True
-    text = (ROOT / "CALIBRATION.md").read_text(encoding="utf-8")
-    assert mod.render() not in text, "换了产物值之后，节选文本必须与文档里的不同（否则门禁是摆设）"
+    # 走**真实代码路径**（`sync(check=True)`），而不是自己跟自己比 ——
+    # 旧版本这里写着 `assert X if hasattr(...) else True`，恒真（N7）。
+    assert mod.sync(check=True) == 1, "换了产物值之后 --check 必须变红"
+    # 两个块都要能红：口径表那个块同样来自产物
+    changed2 = json.loads(json.dumps(prof))
+    changed2["measured_matmul_tflops"]["torch.bfloat16"]["caliber_spread_pct"] = 42.0
+    monkeypatch.setattr(mod, "newest_profile", lambda: (art, changed2))
+    assert mod.sync(check=True) == 1, "口径表块也要能红"
+    monkeypatch.undo()
+    assert mod.sync(check=True) == 0, "恢复之后必须重新一致"
 
 
 def _bands_by_artifact() -> dict[str, str]:
@@ -461,3 +472,211 @@ def test_a_new_bench_run_forces_the_docs_to_follow():
     band = bands[newest]
     assert band in readme or band.replace("-", "\u2212") in readme, \
         f"README 的「本次」误差带必须是 {band}"
+
+
+def test_calibration_prose_does_not_hand_copy_artifact_numbers():
+    """R-62：CALIBRATION 的**散文**里不许再出现"属于某份产物的数字"。
+
+    第四轮验收报告 P3 的原形：正文写 bf16 3.8%（可分辨）、fp16 13.2%、fp32 0.7%/54.5、
+    头条 166.9 —— 全部来自 `20261008-235142`，而紧邻上方的生成节选来自新产物，两者
+    直接矛盾。现在所有这类数字都在生成块里，散文只讲道理。
+    """
+    mod = _load_calib_excerpt()
+    text = (ROOT / "CALIBRATION.md").read_text(encoding="utf-8")
+    # 去掉两个生成块，剩下的才是"散文"
+    for b, e in ((mod.BEGIN, mod.END), (mod.CALIB_BEGIN, mod.CALIB_END)):
+        text = text[:text.index(b)] + text[text.index(e) + len(e):]
+    newest = mod.newest_profile()[1]
+    newest_vals = set()
+    for v in (newest.get("measured_matmul_tflops") or {}).values():
+        for k in ("tflops", "caliber_spread_pct"):
+            if v.get(k) is not None:
+                newest_vals.add(str(v[k]))
+    offenders: list[str] = []
+    for art in _artifact_dirs():
+        p = art / "machine-profile.json"
+        if not p.exists():
+            continue
+        prof = json.loads(p.read_text(encoding="utf-8"))
+        for dtype, v in (prof.get("measured_matmul_tflops") or {}).items():
+            for k in ("caliber_spread_pct", "tflops"):
+                val = v.get(k)
+                if val is None:
+                    continue
+                needle = f"{val}%" if k == "caliber_spread_pct" else str(val)
+                if needle in newest_vals:
+                    continue          # 现行产物的数会出现在生成块里，散文里也允许（下面再查）
+                if needle in text:
+                    offenders.append(f"{art.name} {dtype}.{k}={needle}")
+    assert not offenders, ("CALIBRATION 散文里手抄了产物数字（它们必须由生成块渲染，"
+                           "否则会像 P3 那样漂）：\n  - " + "\n  - ".join(offenders))
+
+
+# --------------------------------------------------------------------------
+# R-63：登记表里的**每个数字**都要能追到产物
+# --------------------------------------------------------------------------
+def _registry_rows() -> dict[str, str]:
+    """产物目录名 → 登记表里那一行。"""
+    reg = (ROOT / "bench" / "artifacts" / "README.md").read_text(encoding="utf-8")
+    out: dict[str, str] = {}
+    for line in reg.splitlines():
+        m = re.match(r"\|\s*`(\d{8}-\d{6})`\s*\|", line)
+        if m:
+            out[m.group(1)] = line
+    return out
+
+
+def test_registry_revision_matches_both_files():
+    """S1：每行写的修订号必须**真的**出现在该产物的 `environment.txt` 与 `manifest.json` 里。
+
+    真事：`20261008-235142` 那行写 `0f296f3`（"environment.txt / manifest.json 里的 revision"），
+    而两份文件里都是 `807a025` —— `0f296f3` 在那个目录的任何文件里都不存在。
+    """
+    rows = _registry_rows()
+    bad: list[str] = []
+    for art in _artifact_dirs():
+        row = rows.get(art.name)
+        if row is None:
+            bad.append(f"{art.name}: 登记表里没有这一行")
+            continue
+        env = art / "environment.txt"
+        man = art / "manifest.json"
+        revs = []
+        if env.exists():
+            m = re.search(r"^revision: (\S+)", env.read_text(encoding="utf-8"), re.M)
+            revs.append((env.name, m.group(1) if m else None))
+        if man.exists():
+            try:
+                revs.append((man.name, (json.loads(man.read_text(encoding="utf-8"))
+                                        or {}).get("revision")))
+            except json.JSONDecodeError:
+                pass
+        cited = re.findall(r"`([0-9a-f]{7})`", row)
+        if not cited:
+            # 必须明确写"钉不住"，且文件里确实没有可用修订号
+            if "n/a" not in row and "未留存" not in row:
+                bad.append(f"{art.name}: 行里既没写修订号、也没说明为什么")
+            continue
+        for name, rev in revs:
+            if rev and not any(rev.startswith(c) for c in cited):
+                bad.append(f"{art.name}: {name} 里的 {rev[:7]} 不在行里 {cited}")
+    assert not bad, "登记表的修订号与产物文件对不上：\n  - " + "\n  - ".join(bad)
+
+
+def test_registry_packet_bytes_are_truthful():
+    """S2/P6：行里引用的包字节数必须等于 `cost.packet_bytes`，或**同时**给出磁盘大小并解释。
+
+    真事：现行产物那行写 4088/3842 B，而磁盘是 4089/3843 —— 那个产物由 `80825e9` 之前
+    的写入器产生（多写一个换行），而"落盘 == packet_bytes"正是本轮刚立的不变量。
+    """
+    rows = _registry_rows()
+    bad: list[str] = []
+    for art in _artifact_dirs():
+        row = rows.get(art.name, "")
+        # 只校验**被点名**的包文件（登记表通常只引一个代表包，不该逼它列全）
+        for m in re.finditer(r"`(rep-[A-Za-z0-9_.-]+\.packet\.json)`", row):
+            pk = art / m.group(1)
+            if not pk.exists():
+                bad.append(f"{art.name}: 行里点名了 {m.group(1)}，但产物里没有这个文件")
+                continue
+            try:
+                pb = json.loads(pk.read_text(encoding="utf-8"))["cost"]["packet_bytes"]
+            except (KeyError, json.JSONDecodeError):
+                continue
+            disk = pk.stat().st_size
+            cited = [int(x) for x in re.findall(r"(\d{3,5})\s*B", row)]
+            if pb in cited:
+                continue
+            if disk in cited and "磁盘" in row and str(pb) in row:
+                continue
+            bad.append(f"{art.name}/{pk.name}: 行里引用的字节数 {cited} 既没有 {pb}"
+                       f"（packet_bytes）也没有 {disk}（磁盘）")
+    assert not bad, "登记表里的包字节数与产物对不上：\n  - " + "\n  - ".join(bad)
+
+
+def test_registry_current_section_numbers_come_from_the_current_artifact():
+    """A-N1：`### 现行产物…` 小节里的数字必须来自**现行**产物。
+
+    真事：`e087d35` 把新产物提为现行，却把那一节留成上一轮的数（MDD 14.0%、漂移 4.7%、
+    delta −3.6%/−3.6%），而现行产物是 MDD 5.0%、SD 0.31%、delta −0.025%/−0.202%。
+    """
+    reg = (ROOT / "bench" / "artifacts" / "README.md").read_text(encoding="utf-8")
+    m = re.search(r"###\s*`?现行产物[^\n]*\n(.*?)(?=\n###|\n##|\Z)", reg, re.S)
+    if not m:
+        pytest.skip("登记表里没有「现行产物」小节")
+    section = m.group(1)
+    art = _newest()
+    allowed: set[str] = set()
+    sc = art / "machine-selfcheck.json"
+    if sc.exists():
+        mdd = (json.loads(sc.read_text(encoding="utf-8")).get("mdd") or {})
+        for k in ("dram_bytes_pct", "kernel_time_pct", "run_to_run_sd_pct",
+                  "resolution_floor_pct", "band_half_width_pct"):
+            if mdd.get(k) is not None:
+                allowed.add(str(mdd[k]))
+                allowed.add(f"{mdd[k]}%")
+    dpath = art / "diff-same-protocol.json"
+    if dpath.exists():
+        doc = json.loads(dpath.read_text(encoding="utf-8"))
+        for c in doc.get("comparisons", []):
+            allowed.add(str(c.get("delta_pct")))
+        allowed.add(str((doc.get("summary") or {}).get("indistinguishable")))
+    cited = {c.replace("\u2212", "-") for c in re.findall(r"[-\u2212]?\d+(?:\.\d+)?%?", section)}
+    allowed = {a.replace("\u2212", "-") for a in allowed}
+    # 允许结构性数字（引用包字节数、步骤数、百分比里的 100% 等）与"元"数字（1 B、2 次）
+    allowed |= {str(n) for n in range(0, 6)}
+    unknown = sorted(c for c in cited if c not in allowed and c.rstrip("%") not in allowed)
+    assert not unknown, (f"`现行产物`小节里的 {unknown} 不在 {art.name} 的 selfcheck/diff 里"
+                         f"（那一节抄了别的产物？）允许集合：{sorted(allowed)[:12]}…")
+
+
+_CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8}
+
+
+def test_union_label_matches_the_number_of_registered_artifacts():
+    """R-64：「N 次运行的并集」里的 **N** 必须等于已登记且能算出带的产物数。
+
+    真事（A-N2）：README 一处写"四次运行的并集 −4.3% ~ +12.8%"（对），另一处写
+    "三次并集 −4.3% ~ +12.7%"（既错数又错值）。值有并集校验守着，**标签**没有 ——
+    所以这里补上：标签错了也要红。
+    """
+    n = len(_bands_by_artifact())
+    if n < 2:
+        pytest.skip("可比对的产物不足")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    bad: list[str] = []
+    for m in re.finditer(r"([一两二三四五六七八\d]+)\s*次(?:运行的)?并集", readme):
+        raw = m.group(1)
+        got = int(raw) if raw.isdigit() else _CN_NUM.get(raw)
+        if got != n:
+            bad.append(f"「{m.group(0)}」说 {got} 次，实际已登记 {n} 份能算带的产物")
+    assert not bad, "\n  - ".join(bad)
+
+
+def test_every_sweep_row_is_documented():
+    """P6：时长扫描**每一行**的覆盖率与误差都要在 README 里出现（不只是两端）。
+
+    真事：README `:290` 写"覆盖率从 88.2% 涨到 **98.0%**"，而表格与产物都是 98.1%。
+    """
+    art = _newest()
+    rows = _sweep_rows(art)
+    if len(rows) < 3:
+        pytest.skip(f"{art.name} 里没有时长扫描")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    bad: list[str] = []
+    for r in rows:
+        for key, fmt in (("coverage_pct", "{}%"), ("err_pct", "{:+}%")):
+            v = r.get(key)
+            if not v:
+                continue
+            try:
+                num = float(v)
+            except ValueError:
+                continue
+            for s in (fmt.format(num), fmt.format(num).replace("-", "\u2212"),
+                      fmt.format(round(num, 1))):
+                if s in readme:
+                    break
+            else:
+                bad.append(f"{r.get('target_s')}s 的 {key}={num}（README 里没有）")
+    assert not bad, "时长扫描的行没被文档覆盖：\n  - " + "\n  - ".join(bad)

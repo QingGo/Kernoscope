@@ -78,6 +78,16 @@
 - 判词带前提（`premises[].observed/threshold/ok`）；前提不成立时该判词**必须**是
   `refused` 且带结构化 `refusal.code`，不允许以 `soft` 出现。
 
+### 子命令开关一览（0.2.0 起就有，本轮补进文档 —— P5）
+
+只列**接口层面**的：这些开关会出现在读者的命令与 CI 里，缺席就等于"消费者必须去读源码"。
+
+| 命令 | 开关 | 作用 |
+|---|---|---|
+| `capabilities` | `--json` / `--brief` / `--probe` / `--out <f>` / `--quiet` | 参考层 JSON / 入口层（<1.2 KB，带下一层字节价格）/ 实测探测 / 写文件 / 静音 |
+| `selftest` | `-o, --out <f>` / `--json` / `--size-mb` / `--duration` / `--runs` / `--dtype` / `--only` / `--cross-process` / `--quick` / `--strict` / `--quiet` | 纯 torch 的已知答案自检：写 `--ks-selfcheck` 用的文件（**不是** `--ks-calibration`，见 `PEAK_CAVEAT`）；`--cross-process` 把跨进程复测算进 MDD |
+| `diff` | `--selfcheck <f>` / `--json` / `--fail-on {none,regressed,change}` / `--strict` / `--quiet` | 误差带对拍；**`--fail-on` 是唯一能拿去卡 CI 退出码的开关**（`regressed`/`change` 命中即非零退出） |
+
 ### 命令行
 
 - 新增子命令：`capabilities`（`--json` / `--brief` / `--probe`）、`selftest`、`diff`。

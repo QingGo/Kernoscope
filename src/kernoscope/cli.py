@@ -354,6 +354,28 @@ SUBCOMMANDS: tuple[str, ...] = (
     "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff")
 
 
+def subcommand_parser(name: str) -> Any:
+    """某个子命令的 argparse 解析器（**唯一真源**）。
+
+    `--help`、文档命令门禁、以及测试里的"这条文档命令真能跑吗"都从这里取。
+    以前门禁是从子命令 `--help` 的**散文**里正则刮开关名，于是它对子命令**从不真的
+    parse**：`diff` 上挂主命令的 `--packet`、`selftest` 上挂标定路径、`capabilities`
+    上一个不存在的短开关，三条都被放行（验收报告第四轮 P1）。
+    """
+    from .capabilities_cmd import build_parser as capabilities_parser
+    from .diff_cmd import build_parser as diff_parser
+    from .doctor import build_parser as doctor_parser
+    from .issue_cmd import build_parser as issue_parser
+    from .memtrace_cmd import build_parser as memtrace_parser
+    from .occupancy_cmd import build_parser as occupancy_parser
+    from .selftest import build_parser as selftest_parser
+
+    return {"doctor": doctor_parser, "occupancy": occupancy_parser,
+            "memtrace": memtrace_parser, "issue": issue_parser,
+            "capabilities": capabilities_parser, "selftest": selftest_parser,
+            "diff": diff_parser}[name]()
+
+
 def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     """子命令名 → 入口函数（延迟导入：`kernoscope --help` 不该拉起 torch/nsys 那套）。"""
     from .capabilities_cmd import capabilities_main
