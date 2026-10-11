@@ -939,8 +939,13 @@ def enforce_budget(packet: dict[str, Any],
     下面 `steps` 里的顺序**就是**实际顺序（这条注释与实现逐字一致，改一处就改两处）：
 
         未测到的例子 > 判词的指标名 > 下一步指针 > 未测到归组数 > 成立的前提 >
-        remedy 命令 > 处置文本 > 判词条数 > **次要判词的 facts** > 全部 facts > 拒绝条目数 >
-        判词硬上限 > 环境降级诊断的 message > 环境降级诊断条目数
+        remedy 命令 > 处置文本 > 判词条数 > **次要判词的 facts** > 拒绝条目数 >
+        拒绝处置散文 > 判词硬上限 > 环境降级诊断的 message > 环境降级诊断条目数 >
+        **结论四条的 facts（最后一级）**
+
+    最后一级的顺序是真机教出来的：8 个拒绝码的机器上，facts 早于拒绝条目被裁掉，
+    于是一屏出现「最耗时的是 ?（None ms）」—— 把"什么最贵/多少钱/先改哪里"裁没了，
+    却留着 8 条拒绝的处置散文。结论比处置散文重要，所以结论的 facts 放到最后。
 
     每一步都只删"能从完整报告里再取回来"的东西，并把步骤名写进 `cost.trimmed` ——
     读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。最后一级丢掉的
@@ -1062,13 +1067,15 @@ def enforce_budget(packet: dict[str, Any],
         # 到下一个更狠的级别才动这四条。
         ("facts_secondary", lambda: [v.pop("facts", None) for v in packet["verdicts"]
                                      if v.get("id") not in PRIMARY_FACT_IDS]),
-        ("facts", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),
         ("refusal_entries", _cap_refusal_entries),
         ("refusal_action_text", _drop_refusal_action_text),
         ("verdicts_hard_cap", _cap_verdicts_hard),
         # 环境降级诊断：message 先丢，再限条目数（R-70）
         ("environment_messages", _trim_environment_messages),
         ("environment_entries", _cap_environment_entries),
+        # **最后一级**：到这一步才允许把"什么最贵/多少钱/先改哪里/真值偏差"的 facts 丢掉。
+        # 读者仍然能拿到判词 id/status/value/unit 与全部拒绝码，只是细节要回完整报告看。
+        ("facts_primary", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),
     ]
     for name, fn in steps:
         fn()
