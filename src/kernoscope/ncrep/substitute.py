@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..provenance import COUNTER_NAMESPACES, OUR_PREFIXES, Provenance
+from .ncu_rows import convert, row_for, section_of
 from .profile import RepMetric, RepSource, build_report
 from .writer import FILE_VERSION
 
@@ -34,21 +35,6 @@ ATTRIBUTION_MARK = "kernoscope-substitute-v1"
 # 超过上限时按"与决策最相关"的顺序截断（exact/measured 优先，然后 derived，最后 estimated），
 # 并把被截断的条数写进 comment —— 静默丢值就是另一种撒谎。
 MAX_SUBSTITUTE_METRICS = 32
-
-
-# 允许写进 `.ncu-rep` 的 ncu 名字（**白名单，不是黑名单**）。
-#
-# 为什么必须白名单：读 `.ncu-rep` 的人（包括 ncu-ui 与我们自己的导入路径）会**按 ncu 的
-# 单位约定**理解这些名字。我们的 `gpu__time_duration.sum` 是 **ms**，而 ncu 同名的真值是
-# **ns** —— 把它写进 `.ncu-rep`，读的人会差 10⁶ 倍。本仓库为同一类错误付过一次代价
-# （R-51：MB 被当字节，7.27 TB 写成 7.3 MB），所以这次在源头挡住：
-# 只有"两边单位语义完全相同"的**计数量**（个/字节）才进白名单。
-SUBSTITUTE_SAFE_NCU_NAMES: frozenset[str] = frozenset({
-    "launch__registers_per_thread",          # 个/线程
-    "launch__shared_mem_per_block_static",    # 字节
-    "launch__grid_size",                      # 个
-    "launch__block_size",                     # 个
-})
 
 
 class SubstituteRefused(RuntimeError):
@@ -62,6 +48,10 @@ class SubstitutePlan:
     source: RepSource
     metrics: list[RepMetric]
     provenance_by_name: dict[str, str] = field(default_factory=dict)
+    unit_by_name: dict[str, str] = field(default_factory=dict)   # 写进文件的单位（ncu 行已换算）
+    disclosure: str = ""                                        # 进 RuleResult 的署名/结论文本
+    device_name: str = ""
+    compute_capability: str = ""
     dropped_by_refusal: list[str] = field(default_factory=list)
     dropped_by_namespace: list[str] = field(default_factory=list)
     dropped_over_cap: int = 0
@@ -98,6 +88,19 @@ def assert_writable(metrics: Sequence[RepMetric]) -> None:
             "把替代值挂在这些名字下面就是在伪造 ncu 读数".format(", ".join(sorted(bad)[:6])))
 
 
+def _for_ncu(m: RepMetric) -> tuple[RepMetric, str]:
+    """同源行按 ncu 单位换算后再进文件；返回 (metric, 单位)。
+
+    为什么必须在**写文件时**换算而不是在别处：`ncu --import`/ncu-ui/Python API 都会按 ncu 的
+    单位约定理解这个名字。我们的内部值是 ms、ncu 要 ns —— 少乘 1e6 就是 R-51 那类错误的翻版。
+    """
+    row = row_for(m.name)
+    if row is None:
+        return RepMetric(m.name, m.value, m.unit), m.unit
+    value, unit = convert(m.name, m.value)
+    return RepMetric(m.name, value, unit), unit
+
+
 def _provenance_rank(p: Provenance) -> int:
     """截断顺序：与 ncu 同源的 exact 最该保留（可对拍），estimated 最后。"""
     return {Provenance.EXACT: 0, Provenance.MEASURED: 1, Provenance.DERIVED: 2,
@@ -106,18 +109,20 @@ def _provenance_rank(p: Provenance) -> int:
 
 def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
                    limit: int = MAX_SUBSTITUTE_METRICS
-                   ) -> tuple[list[RepMetric], dict[str, str], list[str], list[str], int]:
+                   ) -> tuple[list[RepMetric], dict[str, str], dict[str, str], list[str],
+                              list[str], int]:
     """从 kernel 报告里挑出**可以写进 `.ncu-rep`** 的指标。
 
     过滤规则（每条都有对应测试）：
       * `unavailable` 不写（没有值就是没有值）；
       * 名字落在 ncu 计数器命名空间里的不写（我们给不出计数器）；
-      * 名字在 ncu 命名空间里但**不**在 `SUBSTITUTE_SAFE_NCU_NAMES` 白名单里的不写
-        （单位语义可能不同：`gpu__time_duration.sum` 我们是 ms、ncu 是 ns）；
+      * ncu 命名空间里的名字只允许 `ncu_rows.NCU_ROWS` 里的**同源行**，且值按 ncu 单位换算
+        （`gpu__time_duration.sum`：我们的 ms × 1e6 = ncu 的 ns）。它们是 ncu 自己也会给出的
+        同源量，写在 ncu 名下才是它该在的地方；代理/模型/成本类的量仍然只留在自有命名空间；
       * 被拒判词引用过的不写（前提不成立）；
       * 值不是数字的不写（字符串型判词无法进 `.ncu-rep` 的 double 通道）。
-    返回 (metrics, 名字→出处, 因前提不成立被丢弃的名字, 因命名空间规则被丢弃的名字,
-    因超上限被丢弃的条数)。
+    返回 (metrics, 名字→出处, 名字→写进文件的单位, 因前提不成立被丢弃的名字,
+    因命名空间规则被丢弃的名字, 因超上限被丢弃的条数)。
     """
     refused = _refused_metric_names(packet)
     picked: list[tuple[Provenance, str, float, str, str]] = []
@@ -129,7 +134,7 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
                 continue
             if _is_counter_name(m.name):
                 continue
-            if not m.name.startswith(OUR_PREFIXES) and m.name not in SUBSTITUTE_SAFE_NCU_NAMES:
+            if not m.name.startswith(OUR_PREFIXES) and row_for(m.name) is None:
                 by_namespace.append(m.name)
                 continue
             if m.name in refused:
@@ -150,13 +155,20 @@ def select_metrics(kr: Any, packet: dict[str, Any] | None = None, *,
     uniq.sort(key=lambda r: (_provenance_rank(r[0]), r[1]))
     over = max(0, len(uniq) - limit)
     uniq = uniq[:limit]
-    metrics = [RepMetric(name, value, "") for _, name, value, _, _ in uniq]
+    metrics: list[RepMetric] = []
+    units: dict[str, str] = {}
+    for _, name, value, _, _ in uniq:
+        m, unit = _for_ncu(RepMetric(name, value, ""))
+        metrics.append(m)
+        units[name] = unit
     prov = {row[1]: row[0].value for row in uniq}
-    return metrics, prov, dropped, by_namespace, over
+    return metrics, prov, units, dropped, by_namespace, over
 
 
 def build_plan(kr: Any, *, packet: dict[str, Any] | None = None,
-               tool_version: str = "", limit: int = MAX_SUBSTITUTE_METRICS) -> SubstitutePlan:
+               tool_version: str = "", limit: int = MAX_SUBSTITUTE_METRICS,
+               disclosure: str = "", device_name: str = "",
+               compute_capability: str | int | None = None) -> SubstitutePlan:
     """把"这份 kernel 报告能怎么进 `.ncu-rep`"算出来（纯函数：不写文件）。"""
     launches = list(getattr(kr, "launches", []) or [])
     if not launches:
@@ -166,8 +178,11 @@ def build_plan(kr: Any, *, packet: dict[str, Any] | None = None,
     launch = launches[0]
     source = RepSource(kernel_name=str(getattr(kr, "name", "") or ""),
                        grid=tuple(launch.grid), block=tuple(launch.block))
-    metrics, prov_by_name, dropped, by_namespace, over = select_metrics(kr, packet, limit=limit)
+    metrics, prov_by_name, unit_by_name, dropped, by_namespace, over = select_metrics(
+        kr, packet, limit=limit)
     plan = SubstitutePlan(source=source, metrics=metrics, provenance_by_name=prov_by_name,
+                          unit_by_name=unit_by_name, disclosure=disclosure,
+                          device_name=device_name, compute_capability=str(compute_capability or ""),
                           dropped_by_refusal=dropped, dropped_by_namespace=by_namespace,
                           dropped_over_cap=over)
     if not plan.ok:
@@ -208,16 +223,20 @@ def render_comment(plan: SubstitutePlan, *, tool_version: str = "") -> str:
     for p in plan.provenance_by_name.values():
         counts[p] = counts.get(p, 0) + 1
     prov = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+    same_source = [m.name for m in plan.metrics if section_of(m.name)]
     lines = [
         f"{ATTRIBUTION_MARK} -- produced by kernoscope"
         + (f" {tool_version}" if tool_version else ""),
-        "NOT HARDWARE PERFORMANCE COUNTERS. These values are substitute calibers "
-        "(NVML device sampling, CUPTI kernel activity, address-arithmetic traces, "
-        "models) computed on a machine where NVIDIA performance counters are not "
-        "accessible. Do not cite them as ncu counter readings.",
+        "NOT HARDWARE PERFORMANCE COUNTERS. This report was produced on a machine where "
+        "NVIDIA performance counters are inaccessible (ERR_NVGPUCTRPERM). Rows in the "
+        "LaunchStats / SpeedOfLight tables are same-source quantities (CUPTI kernel "
+        "activity, cubin) with the same semantics and units as Nsight Compute. Values "
+        "under ks__/est__/meas__ are substitute calibers (NVML sampling, traces, models) "
+        "and must not be cited as counter readings.",
         f"values: {len(plan.metrics)} ({prov})",
-        "namespaces: ks__=derived, est__=estimated(model/proxy), meas__=our measured probe, "
-        "gpu__time_duration/launch__=same source as ncu (exact)",
+        "namespaces: ks__=derived, est__=estimated(model/proxy), meas__=our measured probe; "
+        "launch__*/gpu__time_duration.sum=same source as ncu, written in ncu units"
+        + (f" ({', '.join(same_source[:6])})" if same_source else ""),
     ]
     if plan.dropped_by_refusal:
         lines.append("omitted (their own premises failed, so we refuse to publish them): "
@@ -250,10 +269,18 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
     lines.append("")
     lines.append("## 写进报告的值")
     lines.append("")
-    lines.append("| metric | value | provenance |")
-    lines.append("|---|---|---|")
+    lines.append("| metric | value | unit | provenance | 表格 |")
+    lines.append("|---|---|---|---|---|")
     for m in plan.metrics:
-        lines.append(f"| `{m.name}` | {m.value:.6g} | {plan.provenance_by_name.get(m.name, '')} |")
+        where = "ncu（同源）" if section_of(m.name) else "raw/本工具"
+        lines.append(f"| `{m.name}` | {m.value:.6g} | {plan.unit_by_name.get(m.name, '') or '—'} "
+                     f"| {plan.provenance_by_name.get(m.name, '')} | {where} |")
+    lines.append("")
+    lines.append("同源行（`launch__*` / `gpu__time_duration.sum`）会出现在 `ncu --import "
+                 "--page details` 的 LaunchStats / SpeedOfLight 表里，单位已按 ncu 换算"
+                 "（例如 Duration：我们的 ms × 1e6 = ncu 的 ns）。替代口径（`ks__`/`est__`/"
+                 "`meas__`）不会出现在那些表里 —— ncu 的节表只认它自己的指标；它们在这里、"
+                 "在 `--page raw`、在 Python API 与文件内的 RuleResult 文本里可见。")
     if plan.dropped_by_namespace:
         lines.append("")
         lines.append("## 因命名空间规则而未写入的值")
@@ -291,6 +318,8 @@ class SubstituteResult:
 
 def write_substitute(kr: Any, out_path: str, *, packet: dict[str, Any] | None = None,
                      tool_version: str = "", provider: str = "kernoscope",
+                     disclosure: str = "", device_name: str = "",
+                     compute_capability: str | int | None = None,
                      dry_run: bool = False) -> SubstituteResult:
     """写 `.ncu-rep` + 旁路署名。任何一条前提不成立就抛 `SubstituteRefused`。
 
@@ -301,7 +330,8 @@ def write_substitute(kr: Any, out_path: str, *, packet: dict[str, Any] | None = 
         raise SubstituteRefused(
             f"拒绝写出：本工具只会写 v7 报告（当前 FILE_VERSION={FILE_VERSION}）；"
             "格式版本变化必须重新验证 reader 能不能读")
-    plan = build_plan(kr, packet=packet, tool_version=tool_version)
+    plan = build_plan(kr, packet=packet, tool_version=tool_version, disclosure=disclosure,
+                      device_name=device_name, compute_capability=compute_capability)
     assert_writable(plan.metrics)
     committer = f"{provider}"
     if not plan.comment.strip() or not committer.strip():
@@ -309,7 +339,10 @@ def write_substitute(kr: Any, out_path: str, *, packet: dict[str, Any] | None = 
     sidecar_path = out_path + ".ATTRIBUTION.txt"
     if dry_run:
         return SubstituteResult(out_path, sidecar_path, len(plan.metrics), 0, plan)
-    data = build_report(plan.source, plan.metrics, provider=committer, comment=plan.comment)
+    data = build_report(plan.source, plan.metrics, provider=committer, comment=plan.comment,
+                        disclosure=plan.disclosure or plan.comment,
+                        device_name=plan.device_name,
+                        compute_capability=plan.compute_capability or None)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_bytes(data)
     Path(sidecar_path).write_text(

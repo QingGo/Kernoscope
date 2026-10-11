@@ -1275,6 +1275,45 @@ def _attach_truth(rep: Report, path: str, log) -> None:
         log("warn: 一条对拍都没成功（不是没数，是两边口径对不上）—— 用 --json 看 pairs[].reason")
 
 
+def _ncu_rep_disclosure(rep: Report, packet: dict[str, Any] | None, *,
+                        tool_version: str) -> str:
+    """写给 `.ncu-rep` 读者（在 ncu-ui/details 里会看到）的署名与结论。
+
+    为什么需要它：details 页的表格只认 ncu 自己的指标标签，我们的替代口径进不了那些表 ——
+    唯一能渲染的是 RuleResult 的 Message。所以把"这是替代口径、哪些是同源、钱是多少"
+    写在这里，读者在 ncu 的界面里也能看到出处而不是以为全是它自己测的。
+    """
+    lines = [
+        f"kernoscope {tool_version} wrote this report on a machine where NVIDIA performance "
+        f"counters are not accessible (ERR_NVGPUCTRPERM).",
+        "Launch Statistics / GPU Speed Of Light rows marked same-source are CUPTI kernel "
+        "activity and cubin facts: identical semantics and units to Nsight Compute. "
+        "Substitute calibers (NVML sampling, address-arithmetic traces, models, cost) are NOT "
+        "counters and live under ks__/est__/meas__ names -- see them with "
+        "`ncu --import <file> --page raw` and in <file>.ATTRIBUTION.txt.",
+    ]
+    facts: list[str] = []
+    if packet:
+        for v in packet.get("verdicts", []) or []:
+            if v.get("id") == "cost_per_token" and v.get("status") != "refused":
+                f = v.get("facts") or {}
+                if f.get("per_mtok") is not None:
+                    facts.append(f"unit cost {f['per_mtok']} (per Mtoken)")
+                if f.get("tokens_s"):
+                    facts.append(f"{float(f['tokens_s']):,.0f} token/s")
+                if f.get("j_per_token") is not None:
+                    facts.append(f"{float(f['j_per_token']):.3g} J/token")
+            if v.get("id") == "saving_estimate" and v.get("status") != "refused":
+                f = v.get("facts") or {}
+                if f.get("top_pct_lo") is not None:
+                    facts.append(f"top headroom {f.get('top_kernel', '')}: "
+                                 f"{f['top_pct_lo']}%-{f.get('top_pct_hi')}% "
+                                 f"(conservative..upper bound)")
+    if facts:
+        lines.append("Substitute conclusions: " + "; ".join(facts) + ".")
+    return "\n".join(lines)
+
+
 def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, Any] | None,
                        log) -> int:
     """把替代口径写成 `.ncu-rep`（I2/M4）+ 旁路署名。"""
@@ -1293,9 +1332,16 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
         from .packet import build
 
         packet = build(rep, basis=str(rep.meta.get("ledger_basis") or ""))
+    # 文内署名/结论（进 RuleResult 的 Message）：这是 details 页**会渲染**散文的唯一通道。
+    # 里面必须写清"哪些表是同源真值、哪些数是替代口径、不要当计数器引用"。
+    disclosure = _ncu_rep_disclosure(rep, packet, tool_version=__version__)
+    dev = getattr(rep, "device", None)
     try:
         res = write_substitute(kr, str(args.export_ncu_rep), packet=packet,
-                               tool_version=__version__)
+                               tool_version=__version__, disclosure=disclosure,
+                               device_name=str(getattr(dev, "name", "") or ""),
+                               compute_capability=str(getattr(dev, "compute_capability", "")
+                                                      or ""))
     except SubstituteRefused as e:
         log(f"error: 拒绝生成 .ncu-rep：{e}")
         return 2 if args.strict else 1

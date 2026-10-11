@@ -517,7 +517,7 @@ def test_profile_result_field_numbers_match_the_proto():
         ("KernelMangledName", 5), ("KernelFunctionName", 6),
         ("KernelDemangledName", 7), ("WorkDimensions", 8),
         ("GlobalWorkOffset", 9), ("GridSize", 10), ("BlockSize", 11),
-        ("MetricResults", 13), ("Source", 15), ("Sections", 17),
+        ("MetricResults", 13), ("Source", 15), ("Sections", 17), ("RuleResults", 19),
     ]
 
 
@@ -525,12 +525,116 @@ def test_supporting_message_field_numbers_match_the_proto():
     assert [(f.name, f.number, f.kind) for f in UINT64X3.fields] == [
         ("X", 1, "uint64"), ("Y", 2, "uint64"), ("Z", 3, "uint64"),
     ]
-    assert [(f.name, f.number) for f in SOURCE_DATA.fields] == [("Code", 2)]
+    # M6：CudaSmVersion(6) 是 details 页 CC 的来源（真报告里它就在 SourceData 块里）。
+    assert [(f.name, f.number) for f in SOURCE_DATA.fields] == [("Code", 2), ("CudaSmVersion", 6)]
     assert [(f.name, f.number) for f in STRING_TABLE.fields] == [("Strings", 1)]
     assert [(f.name, f.number) for f in PROFILE_SECTION.fields] == [
         ("Identifier", 1), ("DisplayName", 2), ("Order", 3), ("Header", 4),
+        ("Description", 7), ("Sets", 8),
     ]
 
 
 def test_session_details_declaration_is_reused_not_redeclared():
     assert SESSION_DETAILS is BLOCK_HEADER.fields[2].message
+
+
+# --------------------------------------------------------------------------- #
+# M6：details 页渲染（真机实验结果固化成测试）
+# --------------------------------------------------------------------------- #
+def test_ncu_rows_table_is_self_consistent():
+    """节表/行表必须自洽：一个名字只属于一个节、每个节引用的名字都有行定义。"""
+    from kernoscope.ncrep.ncu_rows import NCU_ROWS, NCU_SECTIONS, consensus_check, row_for
+
+    assert consensus_check() == []
+    for row in NCU_ROWS:
+        assert row_for(row.name) is row
+        assert row.label and row.scale > 0
+    assert {s.identifier for s in NCU_SECTIONS} == {"LaunchStats", "SpeedOfLight"}
+
+
+def test_report_carries_ncu_sections_with_ncu_labels_and_units():
+    """details 页的表靠 Header.Metrics 的 **Label** 认行；Label 必须是 ncu 的标签。
+
+    真机二分实验（改真报告的 Label → 行消失；改回 → 行回来）是这条测试的来源。
+    """
+    from kernoscope.ncrep.profile import PROFILE_RESULT
+
+    data = build_report(
+        RepSource("k(float *)", (1024, 1, 1), (256, 1, 1)),
+        [RepMetric("gpu__time_duration.sum", 95.1), RepMetric("launch__grid_size", 1024.0),
+         RepMetric("launch__registers_per_thread", 96.0), RepMetric("ks__cost_per_mtok", 12.5)],
+        provider="kernoscope", comment="not counters", disclosure="substitute calibers",
+        device_name="RTX 4090", compute_capability="8.9")
+    blocks = _split_blocks(data)
+    # 署名块、SourceData 块（CC）、结果块
+    assert len(blocks) == 3, [len(b) for b in blocks]
+    assert blocks[0][1] == 0 and blocks[1][1] > 0
+    session = blocks[0][0]["SessionDetails"]      # decode 已递归解出嵌套 message
+    attrs = session["DeviceAttributes"][0]
+    assert attrs["ID"] == 0 and attrs["Name"] == "RTX 4090"
+    assert attrs["Attributes"][0]["Value"]["Uint64Value"] == (8 << 16) | 9
+    result = PROFILE_RESULT.decode(_payload_message(data, num_results=1))
+    sections = {s["Identifier"]: s for s in result["Sections"]}
+    assert set(sections) == {"SpeedOfLight", "LaunchStats", "KernoscopeMetrics"}
+    soff = sections["SpeedOfLight"]["Header"]["Metrics"][0]
+    assert (soff["Name"], soff["Label"], soff["Unit"]) == ("gpu__time_duration.sum", "Duration", "ns")
+    launch = {m["Name"]: m for m in sections["LaunchStats"]["Header"]["Metrics"]}
+    assert launch["launch__grid_size"]["Label"] == "Grid Size"
+    assert launch["launch__registers_per_thread"]["Unit"] == "register/thread"
+    # 每个节的 Rows 必须等于它声明的行数（不一致时 details 页不渲染）
+    for s in result["Sections"]:
+        assert s["Header"]["Rows"] == len(s["Header"]["Metrics"])
+    # 同源值按 ncu 单位换算：95.1 ms → 95100000 ns
+    values = {m["NameId"]: m["MetricValue"]["DoubleValue"] for m in result["MetricResults"]}
+    strings = _strings_of(data)
+    by_name = {strings[i]: v for i, v in values.items()}
+    assert by_name["gpu__time_duration.sum"] == pytest.approx(95.1 * 1e6)
+    # 替代口径留在自有命名空间的节里（details 表认不出它，但 raw/Python API 能读）
+    own = sections["KernoscopeMetrics"]["Header"]["Metrics"]
+    assert [m["Name"] for m in own] == ["ks__cost_per_mtok"]
+    # RuleResult 是 details 页唯一会渲染散文的通道
+    rule = result["RuleResults"][0]
+    assert rule["Identifier"] == "KernoscopeSubstituteCalibers"
+    assert rule["Body"]["Items"][0]["Message"]["Type"] == 2      # Warning
+    assert "substitute calibers" in rule["Body"]["Items"][0]["Message"]["Message"]
+
+
+def test_cuda_sm_version_parsing_is_conservative():
+    from kernoscope.ncrep.profile import cuda_sm_version
+
+    assert cuda_sm_version("8.9") == (8 << 16) | 9
+    assert cuda_sm_version("10.0") == (10 << 16)
+    assert cuda_sm_version("") is None and cuda_sm_version(None) is None
+    assert cuda_sm_version("sm_89") is None and cuda_sm_version("bogus") is None
+
+
+def _split_blocks(data: bytes):
+    """→ [[session_blockheader_dict, payload_len], ...]（只解析 BlockHeader）。"""
+    from kernoscope.ncrep.profile import BLOCK_HEADER
+
+    flen = int.from_bytes(data[4:8], "little")
+    off = 8 + flen
+    out = []
+    while off < len(data):
+        blen = int.from_bytes(data[off:off + 4], "little")
+        bh = BLOCK_HEADER.decode(data[off + 4:off + 4 + blen])
+        payload = data[off + 4 + blen: off + 4 + blen + bh["PayloadSize"]]
+        out.append((bh, len(payload), payload))
+        off += 4 + blen + bh["PayloadSize"]
+    return out
+
+
+def _strings_of(data: bytes) -> list[str]:
+    for bh, _n, _payload in _split_blocks(data):
+        table = bh.get("StringTable")
+        if table:
+            return table.get("Strings", [])
+    return []
+
+
+def _payload_message(data: bytes, *, num_results: int = 1) -> bytes:
+    for bh, _n, payload in _split_blocks(data):
+        if bh.get("NumResults") == num_results:
+            size = int.from_bytes(payload[0:4], "little")
+            return payload[4:4 + size]
+    raise AssertionError("没找到结果块")

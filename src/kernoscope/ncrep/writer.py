@@ -74,10 +74,32 @@ VERSION_INFO = Message("VersionInfo", [
     Field("Version", 2, "string"),
 ])
 
+#: ``ProfilerResultsCommon.proto`` -- 设备属性（details 页首页设备行的来源）。
+#: ``Value`` 复用 ``ProfileMetricValue`` 的形状；这里只声明数值那一支。
+DEVICE_ATTRIBUTE_VALUE = Message("ProfileMetricValue", [
+    Field("StringValue", 1, "string"),
+    Field("DoubleValue", 3, "double"),
+    Field("Uint64Value", 5, "uint64"),
+])
+
+DEVICE_ATTRIBUTE = Message("DeviceAttribute", [
+    Field("Name", 1, "string"),
+    Field("Value", 2, "message", message=DEVICE_ATTRIBUTE_VALUE),
+])
+
+DEVICE_ATTRIBUTES = Message("DeviceAttributes", [
+    Field("ID", 1, "uint32"),
+    Field("Name", 2, "string"),
+    Field("Attributes", 3, "message", repeated=True, message=DEVICE_ATTRIBUTE),
+])
+
 #: A subset of ``ReportSessionDetails``. Fields omitted here include
-#: ``ProcessID`` (1), ``CreationTime`` (2), the system/device info blocks (3-6,
-#: 9, 10) and ``ProfilerCmdline`` (11).
+#: ``ProcessID`` (1), ``CreationTime`` (2), the system info blocks (3-5, 9, 10)
+#: and ``ProfilerCmdline`` (11). ``DeviceAttributes`` (6) is repeated in the real
+#: schema and is what makes ``ncu --import`` print a real device instead of
+#: ``Device 255, CC 0.0``.
 SESSION_DETAILS = Message("ReportSessionDetails", [
+    Field("DeviceAttributes", 6, "message", repeated=True, message=DEVICE_ATTRIBUTES),
     Field("Comments", 7, "string"),
     Field("VersionInfo", 8, "message", repeated=True, message=VERSION_INFO),
 ])

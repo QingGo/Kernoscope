@@ -66,8 +66,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .ncu_rows import NCU_SECTIONS, convert, section_of
 from .schema import Field, Message
-from .writer import SESSION_DETAILS, block_bytes, file_header_bytes
+from .writer import (DEVICE_ATTRIBUTES, SESSION_DETAILS, block_bytes, file_header_bytes)
 
 # --------------------------------------------------------------------------- #
 # errors and input contract
@@ -162,6 +163,7 @@ UINT64X3 = Message("Uint64x3", [
 #: one would not be.
 SOURCE_DATA = Message("SourceData", [
     Field("Code", 2, "string"),
+    Field("CudaSmVersion", 6, "uint32"),
 ])
 
 #: ``ProfilerResultsCommon.proto`` -- the ``MetricValue`` oneof. Exactly one
@@ -189,6 +191,8 @@ STRING_TABLE = Message("ProfilerStringTable", [
 ])
 
 #: ``ProfilerSection.proto`` -- only enough to carry per-metric units.
+#: ``Label`` 必须是 ncu 自己的显示标签（见 :mod:`ncu_rows`）：details 页按 Label 查它自带的
+#: 节定义，认不出来整行就消失。
 PROFILE_SECTION_METRIC = Message("ProfilerSectionMetric", [
     Field("Name", 1, "string"),
     Field("Label", 2, "string"),
@@ -200,11 +204,40 @@ PROFILE_SECTION_HEADER = Message("ProfilerSectionHeader", [
     Field("Metrics", 2, "message", repeated=True, message=PROFILE_SECTION_METRIC),
 ])
 
+#: ``ProfilerSection.proto`` -- 节属于哪些 set（basic/detailed/full…）。
+PROFILE_SET = Message("ProfilerSet", [
+    Field("Identifier", 1, "string"),
+])
+
 PROFILE_SECTION = Message("ProfilerSection", [
     Field("Identifier", 1, "string"),
     Field("DisplayName", 2, "string"),
     Field("Order", 3, "uint32"),
     Field("Header", 4, "message", message=PROFILE_SECTION_HEADER),
+    Field("Description", 7, "string"),
+    Field("Sets", 8, "message", repeated=True, message=PROFILE_SET),
+])
+
+#: ``RuleResults.proto`` -- 我们能把自己的署名/结论放进 details 页的**唯一**通道：
+#: 已实测 `RuleResultBody.Items[].Message` 会渲染成 `INF/WRN/OPT` 文本块。
+RULE_RESULT_MESSAGE = Message("RuleResultMessage", [
+    Field("Message", 1, "string"),
+    Field("Type", 2, "enum"),      # 0 None / 1 Ok / 2 Warning / 3 Error / 4 Optimization
+])
+
+RULE_RESULT_BODY_ITEM = Message("RuleResultBodyItem", [
+    Field("Message", 1, "message", message=RULE_RESULT_MESSAGE),
+])
+
+RULE_RESULT_BODY = Message("RuleResultBody", [
+    Field("Items", 1, "message", repeated=True, message=RULE_RESULT_BODY_ITEM),
+])
+
+RULE_RESULT = Message("RuleResult", [
+    Field("Identifier", 1, "string"),
+    Field("DisplayName", 2, "string"),
+    Field("Body", 3, "message", message=RULE_RESULT_BODY),
+    Field("SectionIdentifier", 4, "string"),
 ])
 
 #: ``ProfilerReport.proto`` -- one kernel launch. All twelve required fields are
@@ -224,6 +257,7 @@ PROFILE_RESULT = Message("ProfileResult", [
     Field("MetricResults", 13, "message", repeated=True, message=PROFILE_METRIC_RESULT),
     Field("Source", 15, "message", message=SOURCE_DATA),
     Field("Sections", 17, "message", repeated=True, message=PROFILE_SECTION),
+    Field("RuleResults", 19, "message", repeated=True, message=RULE_RESULT),
 ])
 
 #: ``ProfilerReport.proto`` ``BlockHeader``, plus the string table (4) that
@@ -287,29 +321,117 @@ def _string_table(metrics: Sequence[RepMetric]) -> tuple[list[str], list[int]]:
 # builder
 # --------------------------------------------------------------------------- #
 
-def _session_block(comment: str, provider: str) -> bytes:
+def cuda_sm_version(compute_capability: str | int | None) -> int | None:
+    """``"8.9"`` -> ``524297``（= 8<<16 | 9）；给不出就返回 None。
+
+    ncu 的 ``SourceData.CudaSmVersion`` 就是这个编码，details 页首页的 ``CC x.y`` 由它渲染。
+    解析不出来**不猜**（宁可不写这一块，也不写一个假的 CC）。
+    """
+    if compute_capability is None:
+        return None
+    text = str(compute_capability).strip()
+    if not text:
+        return None
+    try:
+        if "." in text:
+            major, minor = text.split(".", 1)
+            return (int(major) << 16) | int(minor)
+        value = int(text)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _session_block(comment: str, provider: str, *, device_name: str = "",
+                   compute_capability: str | int | None = None) -> bytes:
+    """署名块：comment + provider（强制）+ 设备信息（有就给，没有不编）。"""
+    details: dict = {
+        "Comments": comment,
+        "VersionInfo": [{"Provider": provider, "Version": PROVIDER_VERSION}],
+    }
+    sm = cuda_sm_version(compute_capability)
+    if device_name or sm is not None:
+        attrs = []
+        if sm is not None:
+            attrs.append({"Name": "device__attribute_architecture",
+                          "Value": {"Uint64Value": sm}})
+        details["DeviceAttributes"] = [{
+            "ID": 0,
+            "Name": device_name or "unknown device",
+            "Attributes": attrs or None,
+        }]
     header = BLOCK_HEADER.encode({
         "NumSources": 0,
         "NumResults": 0,
-        "SessionDetails": {
-            "Comments": comment,
-            "VersionInfo": [{"Provider": provider, "Version": PROVIDER_VERSION}],
-        },
+        "SessionDetails": details,
         "PayloadSize": 0,
     })
     return block_bytes(header)
 
 
+def _source_block(compute_capability: str | int | None) -> bytes | None:
+    """``NumSources=1`` 的 SourceData 块：只放 ``CudaSmVersion``（CC 的来源）。
+
+    真报告里这个块还嵌 cubin/源码；我们没有那些东西，也就**不写空壳**（除了 CC 这一个
+    我们确实知道的事实）。CC 未知时整块不写。
+    """
+    sm = cuda_sm_version(compute_capability)
+    if sm is None:
+        return None
+    payload = SOURCE_DATA.encode({"CudaSmVersion": sm})
+    frame = len(payload).to_bytes(4, "little") + payload
+    header = BLOCK_HEADER.encode({"NumSources": 1, "NumResults": 0,
+                                  "PayloadSize": len(frame)})
+    return block_bytes(header, frame)
+
+
+def _section_metrics(names: Sequence[str]) -> list[dict]:
+    """按 ncu 的行定义（名字/标签/单位）构造 ``Header.Metrics``。
+
+    **Label 必须来自 ncu 自己的节定义**：details 页按 Label 查它内置的表，认不出来的行
+    整行不渲染（真机二分实验：把 Label 换成我们的指标名 → 表格里那一行立刻消失）。
+    """
+    from .ncu_rows import row_for
+
+    cells = []
+    for name in names:
+        row = row_for(name)
+        if row is None:
+            continue                      # 不是同源行：不许进 ncu 的节
+        cells.append({"Name": row.name, "Label": row.label, "Unit": row.unit or None})
+    return cells
+
+
 def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
-                    name_ids: Sequence[int]) -> bytes:
-    cells = [
-        {
-            "Name": metric.name,
-            "Label": metric.name,
-            "Unit": metric.unit or None,
-        }
-        for metric in metrics
-    ]
+                    name_ids: Sequence[int], *, disclosure: str = "") -> bytes:
+    ncu_names = {m.name for m in metrics if section_of(m.name)}
+    sections: list[dict] = []
+    for spec in NCU_SECTIONS:
+        names = [n for n in spec.rows if n in ncu_names]
+        cells = _section_metrics(names)
+        if not cells:
+            continue
+        sections.append({
+            "Identifier": spec.identifier,
+            "DisplayName": spec.display_name,
+            "Order": spec.order,
+            "Description": ("Same-source metrics written by kernoscope: CUPTI activity / cubin, "
+                            "identical semantics to Nsight Compute (not counters)."),
+            "Sets": [{"Identifier": s} for s in ("basic", "detailed", "full")],
+            "Header": {"Rows": len(cells), "Metrics": cells},
+        })
+    own = [m for m in metrics if not section_of(m.name)]
+    if own:
+        cells = [{"Name": m.name, "Label": m.name, "Unit": m.unit or None} for m in own]
+        sections.append({
+            "Identifier": SECTION_ID,
+            "DisplayName": SECTION_DISPLAY_NAME,
+            "Order": 1000,
+            "Description": ("Substitute calibers (NVML / traces / models). These names are NOT "
+                            "Nsight Compute metrics; they appear in `ncu --import --page raw`, in "
+                            "the Python API and in the sidecar attribution file."),
+            "Header": {"Rows": len(cells), "Metrics": cells},
+        })
     values = {
         "ThreadID": 0,
         "APICallID": 0,
@@ -323,20 +445,24 @@ def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
         "GridSize": dict(zip("XYZ", source.grid)),
         "BlockSize": dict(zip("XYZ", source.block)),
         "MetricResults": [
-            {"NameId": name_id, "MetricValue": {"DoubleValue": float(metric.value)}}
+            {"NameId": name_id,
+             "MetricValue": {"DoubleValue": float(convert(metric.name, metric.value)[0])
+                             if section_of(metric.name) else float(metric.value)}}
             for name_id, metric in zip(name_ids, metrics)
         ],
         "Source": (
             {"Code": source.source_text} if source.source_text is not None else {}
         ),
-        # Per-metric units have no slot in ProfileMetricResult; a section is the
-        # only schema-sanctioned carrier. Emitted only when there are metrics.
-        "Sections": [{
-            "Identifier": SECTION_ID,
-            "DisplayName": SECTION_DISPLAY_NAME,
-            "Order": 0,
-            "Header": {"Rows": len(cells), "Metrics": cells},
-        }] if cells else None,
+        "Sections": sections or None,
+        # 署名/结论走 RuleResult 的 Message：这是 details 页**会渲染**散文的唯一通道
+        # （实测 `--page details` 把没有标签的表行丢掉，但会把 rule 的 Message 打成
+        #  INF/WRN/OPT 块）。
+        "RuleResults": [{
+            "Identifier": "KernoscopeSubstituteCalibers",
+            "DisplayName": "Kernoscope: substitute calibers (NOT hardware counters)",
+            "SectionIdentifier": SECTION_ID,
+            "Body": {"Items": [{"Message": {"Message": disclosure, "Type": 2}}]},
+        }] if disclosure else None,
     }
     return PROFILE_RESULT.encode(values)
 
@@ -347,6 +473,9 @@ def build_report(
     *,
     provider: str,
     comment: str,
+    disclosure: str = "",
+    device_name: str = "",
+    compute_capability: str | int | None = None,
 ) -> bytes:
     """Build a non-empty, reader-verifiable report and return it as bytes.
 
@@ -397,7 +526,7 @@ def build_report(
     # checked (and so a caller's subclass/alias cannot smuggle anything else in).
     source = RepSource(source.kernel_name, grid, block, source.source_text)
     strings, name_ids = _string_table(metrics)
-    result = _profile_result(source, metrics, name_ids)
+    result = _profile_result(source, metrics, name_ids, disclosure=disclosure)
     payload = len(result).to_bytes(4, "little") + result
 
     header = BLOCK_HEADER.encode({
@@ -406,11 +535,12 @@ def build_report(
         "StringTable": {"Strings": strings} if strings else None,
         "PayloadSize": len(payload),
     })
-    return (
-        file_header_bytes()
-        + _session_block(comment, provider)
-        + block_bytes(header, payload)
-    )
+    blocks = _session_block(comment, provider, device_name=device_name,
+                            compute_capability=compute_capability)
+    src_block = _source_block(compute_capability)
+    if src_block is not None:
+        blocks += src_block
+    return file_header_bytes() + blocks + block_bytes(header, payload)
 
 
 def write_report(
@@ -420,8 +550,13 @@ def write_report(
     *,
     provider: str,
     comment: str,
+    disclosure: str = "",
+    device_name: str = "",
+    compute_capability: str | int | None = None,
 ) -> int:
     """Write :func:`build_report`'s bytes to ``path``; return the byte count."""
-    data = build_report(source, metrics, provider=provider, comment=comment)
+    data = build_report(source, metrics, provider=provider, comment=comment,
+                        disclosure=disclosure, device_name=device_name,
+                        compute_capability=compute_capability)
     Path(path).write_bytes(data)
     return len(data)

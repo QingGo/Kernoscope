@@ -178,7 +178,7 @@ def test_selection_refuses_counter_namespace_and_unavailable_values():
         _m("est__dram_bytes_per_launch", 2.5e7, Provenance.ESTIMATED),
         _RawRow("sm__throughput.avg.pct_of_peak_sustained_elapsed", None, Provenance.UNAVAILABLE),
     ])
-    metrics, prov, dropped, by_ns, over = select_metrics(kr)
+    metrics, prov, units, dropped, by_ns, over = select_metrics(kr)
     names = [m.name for m in metrics]
     assert "dram__bytes.sum" not in names
     assert "sm__throughput.avg.pct_of_peak_sustained_elapsed" not in names
@@ -194,7 +194,7 @@ def test_selection_drops_metrics_whose_premise_failed_and_refuses_if_nothing_is_
     kr = _kr_with([_m("est__dram_bytes_per_launch", 2.5e7, Provenance.ESTIMATED)])
     packet = {"verdicts": [{"id": "dram_bytes", "status": "refused",
                             "metrics": ["est__dram_bytes_per_launch"]}]}
-    metrics, _, dropped, _, _ = select_metrics(kr, packet)
+    metrics, _, _, dropped, _, _ = select_metrics(kr, packet)
     assert metrics == [] and dropped == ["est__dram_bytes_per_launch"]
     with pytest.raises(SubstituteRefused) as e:
         build_plan(kr, packet=packet, tool_version="0.2.0")
@@ -211,22 +211,32 @@ def test_kernel_without_launches_is_refused_instead_of_inventing_an_identity():
     assert "身份" in str(e.value)
 
 
-def test_ncu_named_metrics_whose_unit_differs_are_not_written():
-    """`gpu__time_duration.sum`：我们是 ms、ncu 是 ns —— 写进去会让读的人差 10⁶ 倍。
+def test_same_source_ncu_rows_are_written_with_ncu_units_and_labels():
+    """同源行要写进 ncu 名下，**并且按 ncu 单位换算 + 用 ncu 的显示标签**。
 
-    这条是本仓库付过一次代价的错误类型（R-51：MB 被当字节），所以在源头挡住并**说明理由**。
+    两条都由真机实验逼出来：
+      * 单位：我们是 ms、ncu 是 ns —— 少乘 1e6 就是 R-51（MB 被当字节）那类错误的翻版；
+      * 标签：`ncu --import --page details` 的表按 **Label** 查 ncu 自带的节定义，
+        Label 认不出来整行就消失（把真报告的 "Grid Size" 换成我们的指标名 → 行没了）。
     """
+    from kernoscope.ncrep.ncu_rows import NCU_ROWS, consensus_check
+
+    assert consensus_check() == [], "行表与节表必须自洽"
+    labels = {r.name: r.label for r in NCU_ROWS}
+    assert labels["gpu__time_duration.sum"] == "Duration"
+    assert labels["launch__registers_per_thread"] == "Registers Per Thread"
+
     kr = _kr_with([_m("gpu__time_duration.sum", 0.089728, Provenance.EXACT),
                    _m("launch__registers_per_thread", 16.0, Provenance.EXACT),
                    _m("ks__launch_time_mean", 0.089728)])
-    metrics, _, dropped, by_ns, _ = select_metrics(kr)
-    names = [m.name for m in metrics]
-    assert "gpu__time_duration.sum" in by_ns and "gpu__time_duration.sum" not in names
-    assert "launch__registers_per_thread" in names       # 计数量：两边语义一致，白名单允许
+    metrics, _, units, dropped, by_ns, _ = select_metrics(kr)
+    by_name = {m.name: m for m in metrics}
+    assert "gpu__time_duration.sum" in by_name and "gpu__time_duration.sum" not in by_ns
+    assert by_name["gpu__time_duration.sum"].value == pytest.approx(0.089728 * 1e6)  # ms → ns
+    assert units["gpu__time_duration.sum"] == "ns"
+    assert units["launch__registers_per_thread"] == "register/thread"
     plan = build_plan(kr, packet={"verdicts": []}, tool_version="0.2.0")
-    assert "ns vs our ms" in plan.comment and "gpu__time_duration.sum" in plan.comment
-    side = render_comment(plan)
-    assert "omitted (not our own metric namespace" in side
+    assert "written in ncu units" in plan.comment
 
 
 def test_comment_is_self_describing_for_someone_who_never_heard_of_kernoscope():

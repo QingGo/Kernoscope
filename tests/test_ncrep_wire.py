@@ -281,7 +281,10 @@ def test_write_minimal_report_writes_the_bytes(tmp_path):
 def test_session_details_field_numbers_match_the_proto():
     """Field numbers are the contract; a silent renumber breaks real readers."""
     assert [(f.name, f.number, f.kind) for f in FILE_HEADER.fields] == [("Version", 1, "uint32")]
-    assert [(f.name, f.number) for f in SESSION_DETAILS.fields] == [("Comments", 7), ("VersionInfo", 8)]
+    # M6：多了 DeviceAttributes(6) —— details 页首页的设备行（`Device 0, CC 8.6`）由它渲染，
+    # 缺了 ncu 会把设备读成未知（实测 `Device 255, CC 0.0`）。字段号按随包 proto。
+    assert [(f.name, f.number) for f in SESSION_DETAILS.fields] == [
+        ("DeviceAttributes", 6), ("Comments", 7), ("VersionInfo", 8)]
     assert [(f.name, f.number) for f in BLOCK_HEADER.fields] == [
         ("NumSources", 1), ("NumResults", 2), ("SessionDetails", 3), ("PayloadSize", 5),
     ]
