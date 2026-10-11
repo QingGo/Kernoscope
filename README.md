@@ -797,6 +797,12 @@ DRAM 字节代理 = 显存忙碌时间 × 本机实测峰值带宽。`utilizatio
   在替代口径报告上不可能满足，**也没打算靠编造计数器行去满足**。所以详情页给的是
   "节标题 + 同源值文本 + 署名/WRN"，完整的逐指标数值在 `--page raw`、Python API 与旁路署名里。
   这三条路径都有真机输出钉住（README §12 的运行记录）。
+- `ncu` 首页的设备行会显示 `Device 255, CC 0.0`：那个值来自 `ProfileResult.PartitionDeviceInfo*`
+  —— proto 里只是一个**不透明的 `bytes`**（PerfWorks 私有编码，随包 proto 里没有它的定义），
+  我们**不编造**它。真实设备与计算能力写在文件内的 `SessionDetails.DeviceAttributes`、
+  RuleResult 文本与旁路署名里（"device: NVIDIA GeForce RTX 4090, compute capability 8.9"）。
+  结果块与源码块之间的 `SourceData.Reference` 我们按 proto 语义写一致（真报告也这么做），
+  但仅此不足以让设备行有值。
 - 官方 `IMetric.unit()` 对我们写的指标返回空串：**单位在文件里，但不参与回读** ——
   所以"可回读的那一对"是名字 + 值，单位要看旁路署名。
 - 文件内的 `Comment`/`Provider` 是我们**唯一**的署名载体之一（Python API 读不到 comment），

@@ -265,6 +265,11 @@ def render_sidecar(plan: SubstitutePlan, *, tool_version: str = "", ncu_rep_path
         lines.append(f"| `{m.name}` | {value:.6g}{note} | "
                      f"{plan.unit_by_name.get(m.name, '') or '—'} "
                      f"| {plan.provenance_by_name.get(m.name, '')} | {where} |")
+    if plan.device_name or plan.compute_capability:
+        lines.append("")
+        lines.append("设备：`{0}` CC `{1}`（ncu 的首页设备行来自它自己的 PerfWorks 不透明块，"
+                     "我们写不出，所以那一行会显示 `Device 255, CC 0.0`；真实设备信息以这里为准）"
+                     .format(plan.device_name or "unknown", plan.compute_capability or "unknown"))
     lines.append("")
     lines.append("同源行（`launch__*` / `gpu__time_duration.sum`）会出现在 `ncu --import "
                  "--page details` 的 LaunchStats / SpeedOfLight 表里，单位已按 ncu 换算"

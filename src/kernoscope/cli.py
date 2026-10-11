@@ -565,6 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             log(f"warn: 标定口径不可用 —— {peaks.caliber_note}")
         else:
             log(f"calibration: {peaks.source_label()}")
+
     if args.ks_peak_tflops or args.ks_peak_gbps:
         peaks = MachinePeaks.from_spec(
             args.ks_peak_tflops or (peaks.compute_tflops if peaks else 0.0),
@@ -830,6 +831,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rep = Report(device=device)
     rep.meta.update(meta)
+    # 设备名/CC 在容器里常常取不到（NVML 不可用），但标定文件是 nvidia-smi 跑出来的，
+    # 里面记了 `gpu`/`cc`。用它补齐：导出的 `.ncu-rep` 靠这两个事实渲染设备行
+    # （缺了 ncu 会读成 `Device 255, CC 0.0`），JSON 报告里也不再是空串。
+    if args.ks_calibration:
+        try:
+            _prof = json.loads(Path(args.ks_calibration).read_text())
+        except Exception:
+            _prof = {}
+        if not rep.device.name and _prof.get("gpu"):
+            rep.device.name = str(_prof["gpu"])
+        if not rep.device.compute_capability and _prof.get("cc"):
+            rep.device.compute_capability = str(_prof["cc"])
     rep.sources = {
         "kernel activity": "nsys sqlite CUPTI_ACTIVITY_KIND_KERNEL (no counters needed)",
         "device counters": f"{sampler.result.source} (energy/PCIe/mem-busy are management counters, "
@@ -1283,9 +1296,21 @@ def _ncu_rep_disclosure(rep: Report, packet: dict[str, Any] | None, *,
     唯一能渲染的是 RuleResult 的 Message。所以把"这是替代口径、哪些是同源、钱是多少"
     写在这里，读者在 ncu 的界面里也能看到出处而不是以为全是它自己测的。
     """
+    dev = getattr(rep, "device", None)
+    dev_bits = []
+    if dev is not None:
+        if getattr(dev, "name", ""):
+            dev_bits.append(str(dev.name))
+        if getattr(dev, "compute_capability", ""):
+            dev_bits.append(f"compute capability {dev.compute_capability}")
     lines = [
         f"kernoscope {tool_version} wrote this report on a machine where NVIDIA performance "
         f"counters are not accessible (ERR_NVGPUCTRPERM).",
+        ("device: " + ", ".join(dev_bits) + ". ncu reads the header device line from an opaque "
+         "PerfWorks blob we do not have; the kernel row therefore shows "
+         "`Device 255, CC 0.0`." ) if dev_bits else
+        "device: unknown on this machine (NVML unavailable); the header device line stays unknown.",
+
         "Launch Statistics / GPU Speed Of Light rows marked same-source are CUPTI kernel "
         "activity and cubin facts: identical semantics and units to Nsight Compute. "
         "Substitute calibers (NVML sampling, address-arithmetic traces, models, cost) are NOT "

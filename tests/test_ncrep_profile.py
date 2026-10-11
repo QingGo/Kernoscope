@@ -28,6 +28,7 @@ from kernoscope.ncrep import (
     write_report,
 )
 from kernoscope.ncrep.profile import (
+    SOURCE_REFERENCE,
     BLOCK_HEADER,
     PROFILE_METRIC_RESULT,
     PROFILE_METRIC_VALUE,
@@ -144,8 +145,9 @@ def _walk_container(data: bytes) -> tuple[bytes, list[tuple[bytes, bytes]]]:
 def _profile_result(data: bytes) -> tuple[bytes, dict, list[str]]:
     """Return ``(block_header, profile_result, string_table)`` for the report."""
     _file_header, blocks = _walk_container(data)
-    assert len(blocks) == 2, "one session block + one result block"
-    block_header, payload = blocks[1]
+    # M6 起的固定布局：署名块 + SourceData 块（Reference/CC）+ 结果块。
+    assert len(blocks) == 3, "session block + source block + result block"
+    block_header, payload = _result_block(data)
     (frame_len,) = struct.unpack_from("<I", payload, 0)
     assert frame_len == len(payload) - 4, "PayloadSize counts the uint32 prefix"
     decoded_header = BLOCK_HEADER.decode(block_header)
@@ -154,6 +156,15 @@ def _profile_result(data: bytes) -> tuple[bytes, dict, list[str]]:
         PROFILE_RESULT.decode(payload[4:]),
         decoded_header["StringTable"]["Strings"],
     )
+
+
+def _result_block(data: bytes) -> tuple[bytes, bytes]:
+    """按 ``NumResults == 1`` 找结果块（不要按序号：布局会随 M6 的 SourceData 块变化）。"""
+    _file_header, blocks = _walk_container(data)
+    for header, payload in blocks:
+        if BLOCK_HEADER.decode(header).get("NumResults") == 1:
+            return header, payload
+    raise AssertionError("没有 NumResults=1 的结果块")
 
 
 def _build(**overrides):
@@ -232,11 +243,11 @@ def test_report_is_non_empty_and_starts_with_the_m1_prologue():
     assert data[:10] == MAGIC + b"\x02\x00\x00\x00\x08\x07"
     file_header, blocks = _walk_container(data)
     assert FILE_HEADER.decode(file_header) == {"Version": FILE_VERSION}
-    assert len(blocks) == 2
+    assert len(blocks) == 3
 
 
 def test_session_block_carries_attribution():
-    _file_header, blocks = _walk_container(_build())
+    _file_header, blocks = _walk_container(_build())   # 署名块永远是第 0 块
     header, payload = blocks[0]
     decoded = BLOCK_HEADER.decode(header)
     assert payload == b"", "the session block carries no payload"
@@ -250,7 +261,7 @@ def test_session_block_carries_attribution():
 
 
 def test_result_block_declares_one_result_and_counts_the_length_prefix():
-    header, payload = _walk_container(_build())[1][1]
+    header, payload = _result_block(_build())
     decoded = BLOCK_HEADER.decode(header)
     (frame_len,) = struct.unpack_from("<I", payload, 0)
     assert decoded["NumSources"] == 0
@@ -335,15 +346,17 @@ def test_handles_are_zero_rather_than_invented():
 
 
 def test_source_is_present_but_empty_without_source_text():
+    """没有源码时 ``Source`` 仍要出现：它是 proto2 必填，且 ``Reference`` 用来关联源码块。"""
     _header, result, _strings = _profile_result(_build())
-    assert result["Source"] == {}
+    assert result["Source"] == {"Reference": SOURCE_REFERENCE}
 
 
 def test_source_text_lands_in_source_code():
     _header, result, _strings = _profile_result(
         _build(source=RepSource(SOURCE.kernel_name, SOURCE.grid, SOURCE.block,
                                 source_text="__global__ void synthetic_gemm(){}")))
-    assert result["Source"] == {"Code": "__global__ void synthetic_gemm(){}"}
+    assert result["Source"] == {"Reference": SOURCE_REFERENCE,
+                                "Code": "__global__ void synthetic_gemm(){}"}
 
 
 # --------------------------------------------------------------------------- #
@@ -396,7 +409,7 @@ def test_empty_unit_is_omitted_not_written_as_empty_string():
 
 def test_reports_without_metrics_still_carry_the_kernel_identity():
     data = _build(metrics=())
-    header, payload = _walk_container(data)[1][1]
+    header, payload = _result_block(data)
     decoded = BLOCK_HEADER.decode(header)
     result = PROFILE_RESULT.decode(payload[4:])
     assert decoded["NumResults"] == 1
@@ -525,8 +538,10 @@ def test_supporting_message_field_numbers_match_the_proto():
     assert [(f.name, f.number, f.kind) for f in UINT64X3.fields] == [
         ("X", 1, "uint64"), ("Y", 2, "uint64"), ("Z", 3, "uint64"),
     ]
-    # M6：CudaSmVersion(6) 是 details 页 CC 的来源（真报告里它就在 SourceData 块里）。
-    assert [(f.name, f.number) for f in SOURCE_DATA.fields] == [("Code", 2), ("CudaSmVersion", 6)]
+    # M6：Reference(1) 是结果块与源码块的关联句柄（缺了 ncu 把设备读成 `Device 255, CC 0.0`）；
+    # CudaSmVersion(6) 是 CC 的来源。字段号按随包 proto。
+    assert [(f.name, f.number) for f in SOURCE_DATA.fields] == [
+        ("Reference", 1), ("Code", 2), ("CudaSmVersion", 6)]
     assert [(f.name, f.number) for f in STRING_TABLE.fields] == [("Strings", 1)]
     assert [(f.name, f.number) for f in PROFILE_SECTION.fields] == [
         ("Identifier", 1), ("DisplayName", 2), ("Order", 3), ("Header", 4),
@@ -650,3 +665,33 @@ def _payload_message(data: bytes, *, num_results: int = 1) -> bytes:
             size = int.from_bytes(payload[0:4], "little")
             return payload[4:4 + size]
     raise AssertionError("没找到结果块")
+
+
+def test_source_block_links_to_the_result_by_reference():
+    """结果块的 `Source.Reference` 必须与 SourceData 块的 `Reference` 一致。
+
+    真报告里两边是同一个 64 位随机值，ncu 靠它把源码/设备信息配到这次 launch 上；
+    配不上时设备行读成 `Device 255, CC 0.0`（真机实测），所以这条是兼容性门禁。
+    """
+    data = _build(compute_capability="8.9")
+    _file_header, blocks = _walk_container(data)
+    source_blocks = [b for b in blocks if BLOCK_HEADER.decode(b[0]).get("NumSources") == 1]
+    assert len(source_blocks) == 1
+    header, payload = source_blocks[0]
+    (frame_len,) = struct.unpack_from("<I", payload, 0)
+    assert frame_len == len(payload) - 4
+    decoded = SOURCE_DATA.decode(payload[4:])
+    assert decoded["Reference"] == SOURCE_REFERENCE
+    assert decoded["CudaSmVersion"] == (8 << 16) | 9
+
+    _h, result, _strings = _profile_result(data)
+    assert result["Source"]["Reference"] == decoded["Reference"]
+
+
+def test_cc_unknown_still_writes_the_reference_link():
+    """CC 取不到时也要写源码块：只写句柄，不编 CC。"""
+    data = _build()
+    _file_header, blocks = _walk_container(data)
+    source_blocks = [b for b in blocks if BLOCK_HEADER.decode(b[0]).get("NumSources") == 1]
+    assert len(source_blocks) == 1
+    assert "CudaSmVersion" not in SOURCE_DATA.decode(source_blocks[0][1][4:])

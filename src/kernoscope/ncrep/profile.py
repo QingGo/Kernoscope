@@ -162,9 +162,15 @@ UINT64X3 = Message("Uint64x3", [
 #: never has a cubin to embed, and an absent field is honest where a fabricated
 #: one would not be.
 SOURCE_DATA = Message("SourceData", [
+    Field("Reference", 1, "uint64"),
     Field("Code", 2, "string"),
     Field("CudaSmVersion", 6, "uint32"),
 ])
+
+#: 结果块与源码块之间的**关联句柄**。真报告里两边是同一个 64 位随机值；ncu 靠它把
+#: `ProfileResult.Source` 与 SourceData 块配起来（配不上时设备行读成 `Device 255, CC 0.0`）。
+#: 我们用固定常量：对读的人没有信息量，但它必须是"同一个值出现在两处"。
+SOURCE_REFERENCE = 1
 
 #: ``ProfilerResultsCommon.proto`` -- the ``MetricValue`` oneof. Exactly one
 #: member is written per metric; ``StringValue``/``Uint32Value`` are declared so
@@ -369,16 +375,16 @@ def _session_block(comment: str, provider: str, *, device_name: str = "",
     return block_bytes(header)
 
 
-def _source_block(compute_capability: str | int | None) -> bytes | None:
-    """``NumSources=1`` 的 SourceData 块：只放 ``CudaSmVersion``（CC 的来源）。
+def _source_block(compute_capability: str | int | None) -> bytes:
+    """``NumSources=1`` 的 SourceData 块：``Reference``（关联句柄）+ ``CudaSmVersion``。
 
-    真报告里这个块还嵌 cubin/源码；我们没有那些东西，也就**不写空壳**（除了 CC 这一个
-    我们确实知道的事实）。CC 未知时整块不写。
+    真报告里这个块还嵌 cubin/源码；我们没有那些东西，就不写。``Reference`` 必须写：
+    结果块的 ``Source.Reference`` 要指向它，否则 ncu 把设备读成未知
+    （实测 `Device 255, CC 0.0`）。CC 未知时只写句柄。
     """
     sm = cuda_sm_version(compute_capability)
-    if sm is None:
-        return None
-    payload = SOURCE_DATA.encode({"CudaSmVersion": sm})
+    payload = SOURCE_DATA.encode(
+        {"Reference": SOURCE_REFERENCE, "CudaSmVersion": sm})
     frame = len(payload).to_bytes(4, "little") + payload
     header = BLOCK_HEADER.encode({"NumSources": 1, "NumResults": 0,
                                   "PayloadSize": len(frame)})
@@ -480,9 +486,9 @@ def _profile_result(source: RepSource, metrics: Sequence[RepMetric],
                              if section_of(metric.name) else float(metric.value)}}
             for name_id, metric in zip(name_ids, metrics)
         ],
-        "Source": (
-            {"Code": source.source_text} if source.source_text is not None else {}
-        ),
+        # Source 是 proto2 必填；Reference 把它和 SourceData 块关联起来（设备行/CC 靠它）。
+        "Source": {"Reference": SOURCE_REFERENCE,
+                   **({"Code": source.source_text} if source.source_text is not None else {})},
         "Sections": sections or None,
         # 署名/结论走 RuleResult 的 Message：这是 details 页**会渲染**散文的唯一通道
         # （实测 `--page details` 把没有标签的表行丢掉，但会把 rule 的 Message 打成
@@ -568,9 +574,7 @@ def build_report(
     })
     blocks = _session_block(comment, provider, device_name=device_name,
                             compute_capability=compute_capability)
-    src_block = _source_block(compute_capability)
-    if src_block is not None:
-        blocks += src_block
+    blocks += _source_block(compute_capability)
     return file_header_bytes() + blocks + block_bytes(header, payload)
 
 
