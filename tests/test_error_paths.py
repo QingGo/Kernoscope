@@ -260,3 +260,22 @@ def test_quiet_never_swallows_an_error_line(tmp_path, capsys):
     assert rc == 1
     assert "error:" in err, f"--quiet 把错误吞了：{err!r}"
     assert "Traceback (most recent call last)" not in err
+
+
+def test_plan_with_a_subcommand_name_is_rejected_with_guidance(capsys):
+    """`kernoscope --plan skill --apply`：`skill` 是位置参数（要运行的程序）而不是子命令。
+
+    计划会说"运行目标 = skill --apply"，而把 `--plan` 去掉之后它真的会 exec 它 ——
+    语义差这么多必须当场拒绝（V-18 报告第 1 点），而不是给一份指错东西的计划。
+    """
+    from kernoscope.cli import main
+
+    rc = main(["--plan", "skill", "--apply"])
+    err = capsys.readouterr().err
+    assert rc == 2, rc
+    assert "位置参数" in err and "skill --help" in err
+    assert "Traceback (most recent call last)" not in err
+
+    # 正常的 `--plan -- <程序>` 不受影响
+    rc2 = main(["--plan", "--ks-synthetic", "--", "true"])
+    assert rc2 == 0

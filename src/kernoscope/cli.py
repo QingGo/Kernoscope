@@ -586,6 +586,21 @@ def _main(argv: Sequence[str] | None = None) -> int:
     # 放在**所有采集之前**：`--plan` 的承诺是"没有任何副作用"，所以它必须在第一行采集
     # 之前就返回 —— 写在这里而不是 main 的开头，是因为要等 parse_args 完成（计划由参数决定）。
     if args.plan or args.plan_json:
+        # 形状陷阱（V-18 报告里的第 1 点）：`kernoscope --plan skill --apply` 里的 `skill`
+        # 是**位置参数**（要被运行的程序），不是子命令 —— 计划会说"运行目标 = skill --apply"，
+        # 而把 `--plan` 去掉之后它真的会去 exec 它。语义差这么多，必须当场拒绝并给出写法，
+        # 而不是给一份看起来正常、其实指错东西的计划。
+        prog = list(getattr(args, "program", []) or [])
+        if prog and prog[0] in SUBCOMMANDS and args.plan:
+            hint = (f"`--plan` 是主命令的开关；子命令的计划要写成 "
+                    f"`kernoscope {prog[0]} --help`（子命令自己声明它会写什么），"
+                    f"或者直接用 `kernoscope {prog[0]} ...` 跑一次看输出。"
+                    f"`kernoscope --plan {prog[0]} ...` 会被当成『计划运行程序 "
+                    f"{prog[0]}{" " + " ".join(prog[1:]) if len(prog) > 1 else ""}』——"
+                    f"那不是你想要的。")
+            raise CliInputError(
+                f"--plan 后面跟了子命令名 `{prog[0]}`：这是位置参数（要被运行的命令），"
+                f"不是子命令。", hint=hint, rc=2)
         from .effects import plan_for, render_plan
 
         plan = plan_for(args, argv)

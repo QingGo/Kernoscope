@@ -425,10 +425,14 @@ def _parse_problem(argv: list[str], sub_flags: dict[str, set[str]],
     if bad:
         return f"不存在的开关：{bad}"
     if PLACEHOLDER in argv:
-        # 带占位符的行是**示意**（读者要替换成真值）：类型校验没意义
-        # （`--ks-ledger-mb <每次 launch 的 MB>` 里那个值本来就不是数字）。
-        # 但开关与子命令的存在性**已经查过了** —— 那才是这一层的职责。
-        return None
+        # 带占位符的行是**示意**（读者要替换成真值）：先把占位符换成"形状合法"的夹具值，
+        # 再交给真解析器 —— R-60 的第三个旁路就是在这里 `return None`，于是
+        # `diff --packet <a.json> --packet <b.json>` 这种**值级**错误一律不查。
+        # （`--ks-ledger-mb <每次 launch 的 MB>` 里那个值本来不是数字，换掉才谈得上校验。）
+        parser0 = cli.subcommand_parser(sub) if sub else cli.build_parser()
+        argv = _placeholder_values(argv, _choices_map(parser0))
+        if any(PLACEHOLDER in a for a in argv):      # 还有换不掉的：位置未知，只能按示意放过
+            return None
     # 4) **真的解析一遍** —— 子命令走子命令自己的解析器（旧实现在这里 `return None`，
     #    于是 `diff … --packet foo` / `capabilities -Z` 这类命令门禁永远放行）。
     parser = cli.subcommand_parser(sub) if sub else cli.build_parser()
@@ -439,6 +443,54 @@ def _parse_problem(argv: list[str], sub_flags: dict[str, set[str]],
         return None if e.code in (0, None) else \
             f"{'子命令' if sub else '主'}解析器拒绝（exit {e.code}）"
     return None
+
+
+def _choices_map(parser) -> dict[str, list[str]]:
+    """`--flag -> [合法取值]`（从真解析器的 action 里读，测试专用的小反射）。"""
+    out: dict[str, list[str]] = {}
+    for act in getattr(parser, "_actions", []):
+        choices = getattr(act, "choices", None)
+        if choices:
+            for opt in getattr(act, "option_strings", []):
+                out[opt] = list(choices)
+    return out
+
+
+def _placeholder_values(argv: list[str], choices: dict[str, list[str]] | None = None) -> list[str]:
+    """把 `<占位符>` 换成形状合法的夹具值（只为让真解析器能走到**值级**校验）。
+
+    取值规则按**上一个开关**判断：路径类开关给一个存在的临时风格路径、数值类开关给数字、
+    `-k` 给 `regex:gemm`、其余给 `x`。换不掉的（例如 `--` 之后是读者自己的负载名）保持原样，
+    由调用方按示意处理。
+    """
+    path_flags = {"--packet", "-o", "--report-md", "--export-ncu-rep", "--export-name-map",
+                  "--ks-calibration", "--ks-sqlite", "--ks-ncu-rep", "--ks-memtrace",
+                  "--ks-instr-hist", "--ks-cubin", "--ks-achieved-occupancy", "--log-file",
+                  "--from", "--write-json"}
+    numeric_flags = {"--ks-ledger-mb", "--ks-ledger-total-mb", "--ks-window-s", "--ks-warmup",
+                     "--ks-tokens", "--ks-price-per-kwh", "--ks-price-per-hour",
+                     "--ks-peak-gbps", "--ks-peak-tflops", "--ks-l2-bytes", "--ks-clock-mhz",
+                     "--ks-max-accesses", "--ks-sm-count", "--max-records"}
+    def repl(prev: str) -> str:
+        if choices and prev in choices and choices[prev]:
+            return str(choices[prev][0])          # 枚举开关：取真解析器的第一个合法值
+        if prev in path_flags:
+            return "/tmp/ks-fixture-placeholder.json"
+        if prev in numeric_flags:
+            return "1"
+        if prev == "-k":
+            return "regex:gemm"
+        return "x"
+
+    out: list[str] = []
+    prev = ""
+    for a in argv:
+        if PLACEHOLDER in a:
+            # `kernoscope_argv()` 已经把 `<...>` 归一成 PLACEHOLDER，所以这里只需处理它
+            a = a.replace(PLACEHOLDER, repl(prev))
+        out.append(a)
+        prev = a
+    return out
 
 
 @needs_doc_scan_inputs
@@ -1052,3 +1104,20 @@ def test_documented_metrics_command_is_not_silently_empty(capsys):
     rc2, _out2, err2 = _run(["--ks-synthetic", "--metrics", "totally_made_up__metric",
                              "-k", "regex:gemm"])
     assert rc2 == 0 and "一个都不存在" in err2
+
+
+def test_placeholder_lines_are_still_parsed_for_value_level_errors():
+    """R-60 的第三个旁路：带 `<占位符>` 的命令此前在真解析**之前**就 `return None`，
+    于是同一行里的**值级**错误一律放行。现在先把占位符换成形状合法的夹具值（枚举取真解析器
+    的第一个合法值），再交给真解析器。
+    """
+    sub_flags = _subcommand_flags()
+    main_flags = _main_flags()
+    # 占位符换成夹具值之后是合法的（示意行不该变红）
+    assert _parse_problem(["--ks-synthetic", "--set", PLACEHOLDER], sub_flags, main_flags) is None
+    assert _parse_problem(["--ks-synthetic", "--ks-ledger-mb", PLACEHOLDER],
+                          sub_flags, main_flags) is None
+    # 但同一行的结构性/值级错误必须被抓到（旧实现整行放行）
+    assert _parse_problem(["diff", "--packet", PLACEHOLDER], sub_flags, main_flags) is not None
+    assert _parse_problem(["--ks-synthetic", "--plan", "--bogus-flag", "1"],
+                          sub_flags, main_flags) is not None
