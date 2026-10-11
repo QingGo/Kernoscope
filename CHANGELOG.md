@@ -759,6 +759,23 @@ kernoscope mcp --stdio
 - RELEASING §1 改成 OIDC 流程（§1.1 说明为什么不用 token，以及**应急**路径：CI 挂了才用
   project-scoped token，且首次发布只能先用账号级、随后必须换掉）。
 
+### 发布流程自动化：GitHub Release 由 CI 用自带 token 建（补丁级）
+
+- `publish.yml` 新增 `release` job（`needs: publish`，`contents: write` **只在这里**开）：
+  正文取 `bench/release_notes.py <版本>`（= CHANGELOG 那一节，唯一真源，不手抄）+
+  `bench/pypi_digests.py` 的 PyPI 产物 sha256；`gh release create --verify-tag` ⇒ **tag 不移动**。
+  **不需要任何 PAT**：用的是 workflow 自带的 `GITHUB_TOKEN`。
+- 新增 `.github/workflows/release.yml`：给**已经发布**的 tag 补建/更新 Release（手动触发、
+  幂等 create-or-edit）。单独一个 workflow 是因为 `publish.yml` 有一条被测试钉住的不变量 ——
+  "只有 tag 能触发发布"，把 `workflow_dispatch` 塞进去等于开了手动发版的口子。
+- `publish` 步骤加 `skip-existing: true`：重推 tag/重跑工作流时跳过 PyPI 上已有的文件，
+  不再以一条与真实原因无关的红结束。
+- 新增 `bench/release_notes.py`（找不到那一节 ⇒ rc=1 报错，不许静默给空）与
+  `bench/pypi_digests.py`（离线可测、读不到就如实说明且不阻塞建 Release）。
+- **版本策略（用户要求）**：默认**只升末位**（`0.2.0 → 0.2.1 → 0.2.2`）；只有
+  `schema_version`/`schema_revision` 变了、或有破坏性接口变更，才动中位。据此本文档与代码里
+  原先写的"0.2.1 起"统一（那只是补丁级改动）。
+
 ## 0.2.0
 
 **已发布（PyPI）**：`2026-10-11` 由 tag `v0.2.0` 触发 CI 以 **Trusted Publisher（OIDC，零密钥）**

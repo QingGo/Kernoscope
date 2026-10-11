@@ -86,22 +86,10 @@ jobs:
       - name: Release 正文（来自 CHANGELOG，不手抄）
         run: python3 bench/release_notes.py "${GITHUB_REF_NAME#v}" --tag > /tmp/notes.md
       - name: 附上 PyPI 产物的 sha256（读不到就如实说明，不让发布失败）
-        run: |
-          python3 - >> /tmp/notes.md <<'PY'
-          import json, os, urllib.request
-          v = os.environ["GITHUB_REF_NAME"].lstrip("v")
-          try:
-              with urllib.request.urlopen(f"https://pypi.org/pypi/kernoscope/{v}/json", timeout=20) as r:
-                  d = json.load(r)
-          except Exception as exc:                     # noqa: BLE001
-              print(f"\n### 产物\n\n（读不到 PyPI 元数据：{type(exc).__name__}；"
-                    f"请到 https://pypi.org/project/kernoscope/{v}/ 核对）")
-              raise SystemExit(0)
-          print("\n### 产物（PyPI）\n")
-          for u in d["urls"]:
-              print(f"- `{u['filename']}`（{u['size']} B）—— sha256 `{u['digests']['sha256']}`")
-          print("\n安装：`uv tool install kernoscope`（PyPI 那份才带 attestation）")
-          PY
+        # 与 `release.yml`（补建已有 tag 的 Release）调用**同一个脚本**：两处内联一定会漂，
+        # 而漂的正好是给人对拍用的数字。
+        run: python3 bench/pypi_digests.py "${GITHUB_REF_NAME#v}" >> /tmp/notes.md
+
       - name: 创建 Release（tag 不移动：`--verify-tag`）
         env:
           GH_TOKEN: ${{ github.token }}

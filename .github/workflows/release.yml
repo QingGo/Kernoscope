@@ -1,0 +1,66 @@
+name: release
+
+# 给**已经发布**的 tag 补建 / 更新 GitHub Release —— **不需要任何 PAT**：用 workflow 自带的
+# `GITHUB_TOKEN`（见下面的 `contents: write`）。
+#
+# 为什么单独一个 workflow，而不是给 `publish.yml` 加 `workflow_dispatch`：`publish.yml` 有一条
+# **被测试钉住**的不变量 —— "只有 tag 能触发发布"。给已有 tag 补一个 Release 页是另一件事，
+# 塞进发布路径会让那条不变量变假（也给了"手动发版"的口子）。
+#
+# 为什么需要它：tag 与 Release 是**两类对象** —— 推 tag 只会出现在 Tags 列表；`/releases` 页
+# 不会因为 push 一个 tag 就出现条目（因此"只订阅 Releases"的人也收不到通知）。而 v0.2.0 的 tag
+# **不能重打**（tag 对象指向构建出那份产物的提交，动了就抹掉对应关系，还会再触发一次发布）。
+# 所以已经发出去的版本用这个入口补。
+#
+# 用法：Actions → release → Run workflow → 填 tag（例如 `v0.2.0`）。
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（例如 v0.2.0）"
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write               # 建/改 Release 需要它；只在这一个 job 上开
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: tag 必须存在，且它的版本与 pyproject 一致
+        run: |
+          tag="${{ inputs.tag }}"
+          git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "tag $tag 不存在"; exit 1; }
+          # 版本号从 **tag 指向的那个提交**里读（补建老版本的 Release 时这才正确）
+          ver="$(git show "$tag:pyproject.toml" | sed -n 's/^version *= *"\(.*\)"/\1/p' | head -1)"
+          [ "${tag#v}" = "$ver" ] || { echo "tag $tag ≠ 该提交里的 pyproject version $ver"; exit 1; }
+      - name: Release 正文（CHANGELOG 那一节）
+        # 用**当前** CHANGELOG 而不是 tag 里的那份：补建老版本时，后来的更正（例如
+        # "该版本无 attestation"）应当出现在 Release 页上。
+        # 注意用 bash 的参数展开 `${tag#v}` 去掉 `v` 前缀（不是 Python 的切片语法）。
+        run: |
+          tag="${{ inputs.tag }}"
+          python3 bench/release_notes.py "${tag#v}" --tag > /tmp/notes.md
+      - name: 附上 PyPI 产物的 sha256（读不到就如实说明）
+        run: |
+          tag="${{ inputs.tag }}"
+          python3 bench/pypi_digests.py "${tag#v}" >> /tmp/notes.md
+      - name: 建 Release / 已存在则更新正文（幂等）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag }}"
+          title="$(python3 bench/release_notes.py "${tag#v}" --title)"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file /tmp/notes.md
+            echo "已更新既有 Release：$tag"
+          else
+            gh release create "$tag" --title "$title" --notes-file /tmp/notes.md --verify-tag
+            echo "已创建 Release：$tag"
+          fi

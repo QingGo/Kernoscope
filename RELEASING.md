@@ -150,6 +150,22 @@ bash bench/release-dry-run.sh --metadata-only # 最快：只构建 + 检查元�
 发布后如果它报"隔离安装失败"，最可能的原因是 **PyPI 上还没有这个版本**或 tag 与 `pyproject`
 的 version 不一致；脚本会直接把这两条提示打出来。
 
+## 3.6 GitHub Release：谁建、怎么建（**不需要任何 PAT**）
+
+| 情况 | 谁 | 怎么做 |
+|---|---|---|
+| **0.2.1 及以后**（tag 已按 §2 的流程推上去） | CI 自动 | `publish.yml` 的 `release` job：正文取 `bench/release_notes.py`（= CHANGELOG 那一节，**唯一真源**）+ `bench/pypi_digests.py` 的 sha256；用 workflow 自带的 `GITHUB_TOKEN` 建 Release，`--verify-tag` 保证**不移动 tag**。不留资产：分发渠道是 PyPI（那里才有 attestation），源码归档 GitHub 自动附 |
+| **v0.2.0**（已经发出去的版本，tag **不能重打**） | 任何人，3 次点击 | Actions → **release** → Run workflow → 填 `v0.2.0`。它读 **tag 指向的提交**里的 `pyproject` 校验版本、用当前 CHANGELOG 生成正文，然后 create-or-edit（幂等） |
+| 临时手工 | 维护者 | GitHub → Releases → Draft a new release → 选**已存在的** tag → 粘贴 `python3 bench/release_notes.py <版本> --tag` 的输出（例如 `0.2.1`） |
+
+**为什么 v0.2.0 不能重打 tag**：tag 对象指向 `e0bcac0` —— 就是构建出 PyPI 上那份 wheel 的提交。
+重打会把它指向别处，抹掉"这个 tag = 这份产物"的对应关系，而且会**再触发一次发布**（PyPI 已有同名
+文件）。所以已发布的版本只能**针对现有 tag** 建 Release（`--verify-tag` / UI 里选已有 tag 都是这样）。
+
+**为什么 tag ≠ Release**：推 tag 只出现在 Tags 列表；`/releases` 是另一类对象，不会因为 push 一个
+tag 就出现条目（"只订阅 Releases"的人因此收不到通知）。tag message 可以装发布说明（`git show` 能读，
+§2 的命令就是这么打的），但要让 Release 页也有，就得建 Release 对象 —— 而这件事**不需要你的 token**。
+
 ## 4 发布之后要看什么
 
 | 信号 | 为什么 | 在哪看 |

@@ -326,3 +326,58 @@ def test_version_policy_defaults_to_a_patch_bump():
     rel = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
     assert "默认只升末位" in rel and "patch" in rel
     assert re.search(r"0\.2\.0\s*→\s*0\.2\.1", rel), "给一个看得懂的递增例子"
+
+
+# --------------------------------------------------------------------------
+# 给**已有** tag 补 Release 的入口（v0.2.0 就是这种情况：tag 不能重打）
+# --------------------------------------------------------------------------
+BACKFILL = ROOT / ".github" / "workflows" / "release.yml"
+
+
+def test_backfill_workflow_is_dispatch_only_and_does_not_touch_publish_invariants():
+    """补 Release 的入口必须是**手动触发**的独立 workflow。
+
+    为什么不并进 `publish.yml`：那里有一条被测试钉住的不变量 —— "只有 tag 能触发发布"。
+    把 `workflow_dispatch` 加进去就相当于开了一个"手动发版"的口子。
+    """
+    wf = BACKFILL.read_text(encoding="utf-8")
+    assert re.search(r"^on:\s*$", wf, re.M) and "workflow_dispatch:" in wf
+    assert "push:" not in wf, "补 Release 不该被 push 触发"
+    pub = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch" not in pub, "publish.yml 不许有手动触发（发布只由 tag 决定）"
+
+
+def test_backfill_workflow_uses_builtin_token_and_reads_the_version_from_the_tag():
+    wf = BACKFILL.read_text(encoding="utf-8")
+    assert "GH_TOKEN: ${{ github.token }}" in wf
+    assert "secrets." not in wf, "不许要求任何自定义 secret"
+    assert re.search(r"contents:\s*write", wf), "建 Release 需要 contents: write"
+    assert "git show" in wf and ":pyproject.toml" in wf, \
+        "版本号要从**tag 指向的提交**里读（补建老版本时才正确）"
+    assert "--verify-tag" in wf and "gh release edit" in wf, "创建/更新都要幂等"
+
+
+def test_release_notes_script_is_used_by_both_workflows():
+    for name in ("publish.yml", "release.yml"):
+        wf = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        assert "bench/release_notes.py" in wf, name
+        assert "bench/pypi_digests.py" in wf, f"{name} 必须复用同一份 sha256 脚本"
+
+
+def test_pypi_digests_renders_from_a_fixture_offline(tmp_path):
+    """离线路径：喂一份 PyPI 形状的 JSON，应当给出文件名 + 大小 + sha256。"""
+    import json as _json
+
+    fixture = tmp_path / "pypi.json"
+    fixture.write_text(_json.dumps({"urls": [
+        {"filename": "kernoscope-0.2.0-py3-none-any.whl", "size": 518784,
+         "digests": {"sha256": "a" * 64}},
+        {"filename": "kernoscope-0.2.0.tar.gz", "size": 1800015,
+         "digests": {"sha256": "b" * 64}},
+    ]}), encoding="utf-8")
+    r = subprocess.run([sys.executable, str(ROOT / "bench" / "pypi_digests.py"), "0.2.0",
+                        "--from-json", str(fixture)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "kernoscope-0.2.0-py3-none-any.whl" in r.stdout
+    assert "518784 B" in r.stdout and "a" * 64 in r.stdout
+    assert "uv tool install kernoscope" in r.stdout
