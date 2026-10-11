@@ -151,7 +151,10 @@ def test_missing_nsys_degrades_to_device_only(capsys, monkeypatch):
     monkeypatch.setattr(nsys_backend, "find_nsys", lambda: None)
     monkeypatch.setattr(nsys_backend, "device_info_from_smi", lambda: __import__(
         "kernoscope.report", fromlist=["DeviceInfo"]).DeviceInfo())
-    rc, out, err = run(capsys, "--ks-no-nvml", "--", "python", "-c", "pass")
+    # 被测目标用 `sh -c true`：**不许**再用裸 `python` —— 真机（AutoDL 容器）PATH 里没有
+    # `python`（只有 /root/miniconda3/bin/python3），于是这条会撞上"目标命令无法执行"而失败
+    # （真机门禁实测 3 条红，这是其中两条的根因）。
+    rc, out, err = run(capsys, "--ks-no-nvml", "--", "sh", "-c", "true")
     assert rc == 0
     assert "Traceback" not in err
     assert "nsys" in err                     # 说清缺什么
@@ -167,7 +170,7 @@ def test_nsys_found_but_profile_fails_is_still_an_error(capsys, monkeypatch):
 
     monkeypatch.setattr(nsys_backend, "find_nsys", lambda: "/usr/local/bin/nsys")
     monkeypatch.setattr(nsys_backend, "run_profile", boom)
-    rc, out, err = run(capsys, "--", "python", "-c", "pass")
+    rc, out, err = run(capsys, "--", "sh", "-c", "true")   # 同上：目标不依赖 `python` 在 PATH
     assert rc == 1
     assert "Traceback" not in err
     assert "nsys" in err and "hint:" in err

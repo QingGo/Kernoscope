@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 import pathlib
+import shutil
 import re
 import subprocess
+
+import pytest
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -29,6 +32,9 @@ def test_release_dry_run_script_is_executable_and_syntactically_valid():
     assert r.returncode == 0, r.stderr
 
 
+@pytest.mark.skipif(shutil.which("uv") is None,
+                    reason="这条要走 `uv build`：本机没有 uv（真机 GPU 容器常见）时跳过，"
+                           "不是失败 —— 脚本自己会 exit 3 并说明原因")
 def test_release_dry_run_metadata_mode_passes_on_the_current_tree():
     """`--metadata-only`：现场构建 + 检查元数据。
 
