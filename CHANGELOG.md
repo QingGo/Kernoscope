@@ -545,6 +545,24 @@ kernoscope mcp --stdio
   + `protocol_mismatch`，**不给差值也不给百分比**；单位与 basis 都相同时照常给差值
   （有测试钉住这条防线不是"一律不给"）。
 
+### 门禁与脚本在真机上可用（第七轮 X-2 / X-4）
+
+- **`tools/dev_index.py --gates` 不再依赖 `uv`**（X-2）：9 条门禁原本全部硬编码 `uv run …`，
+  而**租来的 GPU 机器**（NVbit 冒烟、真 nsys/ncu 用例唯一有分辨力的环境）通常没有 `uv` ——
+  那时 `--gates` 是 0/9，"提交前跑一遍门禁"这条工作流在目标机器上等于不存在。
+  现在：有 `uv` 走 `uv run`（CI 一字不变）；没有 `uv`（或显式 `--python <exe>`）时把
+  `uv run pytest` 翻成 `<py> -m pytest`、`uv run python X` 翻成 `<py> X`、`uv build` 翻成
+  `<py> -m build`，并**打印用了哪个解释器**。实测本机无 uv 路径 **8/9**（唯一失败是
+  venv 里没装 `build` 模块，报文直接说"`pip install build` 或装 uv"）。
+- **`_ks.sh` 的解释器解析修对了两件事**（X-4 真机 127）：
+  ① 先找仓库/相邻 `.venv`，再找 conda 与系统绝对路径（`$HOME/miniconda3/bin/python3`、
+  `/root/miniconda3/bin/python3`、`/opt/conda/bin/python3`、`/usr/bin/python3`…），最后才是 PATH；
+  ② **每个候选都要过版本关**（`>=` `requires-python` 声明的 3.10）—— 不加这一关时 macOS 的
+  `/usr/bin/python3`（3.9）会排在仓库 `.venv` 前面，把本来能用的解释器挡住（这就是真机上
+  `setup-check.sh` 报"kernoscope 装好了吗？"的原因）。新增测试把版本关与 `requires-python` 对拍。
+- **`bench/preflight-first-run.sh` 自带 `UV_CACHE_DIR`**：陌生机器/沙箱里 uv 的默认缓存位置
+  不一定可写，而"缓存不可写"会让 `uv build` 失败、看起来像产品坏了。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。

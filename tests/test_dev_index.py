@@ -119,3 +119,55 @@ def test_skill_md_carries_the_consumer_entry():
                                  "skills/kernoscope/SKILL.md"])
 def test_docs_reachable_from_the_entry_layer_exist(doc):
     assert (ROOT / doc).exists()
+
+
+# --------------------------------------------------------------------------
+# 第七轮 X-2：`--gates` 在**没有 uv** 的机器上也要能跑（租来的 GPU 机就是这样）
+# --------------------------------------------------------------------------
+def test_gate_commands_fall_back_to_a_given_interpreter(monkeypatch):
+    mod = dev_index
+
+    assert mod._gate_cmd("uv run pytest", python="/usr/bin/python3") == \
+        "/usr/bin/python3 -m pytest"
+    assert mod._gate_cmd("uv run python tools/gen_coverage.py --check",
+                         python="/opt/py") == "/opt/py tools/gen_coverage.py --check"
+    # uv build 没有解释器等价物：回退成 `python -m build`（缺 build 就如实失败）
+    assert mod._gate_cmd("uv build", python="/opt/py") == "/opt/py -m build"
+    # 不给解释器就原样（CI 走 `uv run`，一个字都不变）
+    assert mod._gate_cmd("uv run pytest", python=None) == "uv run pytest"
+
+
+def test_runner_python_prefers_uv_and_falls_back_when_missing(monkeypatch):
+    import shutil
+    import sys
+
+    mod = dev_index
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/uv")
+    assert mod._runner_python(None) is None, "有 uv 时必须走 uv，不改变 CI 行为"
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert mod._runner_python(None) == sys.executable
+    assert mod._runner_python("/custom/python") == "/custom/python", "显式 --python 优先"
+
+
+def test_run_gates_without_uv_never_invokes_uv(monkeypatch):
+    """行为级断言：没有 uv 时，9 条门禁命令里**一条**都不该再提 uv。"""
+    import shutil
+    import sys
+
+    mod = dev_index
+    seen: list[str] = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(mod.subprocess, "run",
+                        lambda cmd, **kw: (seen.append(cmd), _R())[1])
+    assert mod.run_gates() == 0
+    assert len(seen) == len(mod.GATES)
+    offenders = [c for c in seen if c.startswith("uv ")]
+    assert not offenders, f"没有 uv 时仍去调 uv：{offenders}"
+    import shlex as _shlex
+    assert all(c.startswith(_shlex.quote(sys.executable)) for c in seen), seen

@@ -263,13 +263,60 @@ def write_block() -> None:
     print(f"已写入 {CONTRIBUTING.relative_to(ROOT)} 的索引块（{len(render_block().encode())} B）")
 
 
-def run_gates() -> int:
+def _gate_cmd(cmd: str, *, python: str | None = None) -> str:
+    """把门禁命令里的 `uv run` 换成给定解释器（**只在没有 uv 时**用）。
+
+    为什么（第七轮 X-2）：9 条门禁全部硬编码 `uv run …`，而**租来的 GPU 机器**（正是 NVBit 冒烟、
+    真 nsys/ncu 用例唯一有分辨力的环境）通常没有 `uv` —— 那时 `--gates` 是 0/9，等于"提交前跑一遍
+    门禁"这条工作流在目标机器上不可用。CI 仍然用 `uv run`（不变），这里的回退只影响本机调用。
+    `uv build` 没有解释器等价物，回退时改成 `python -m build`（缺 build 就如实失败）。
+    """
+    if python is None or not cmd.startswith("uv "):
+        return cmd
+    rest = cmd[len("uv "):]
+    if rest.startswith("run "):
+        rest = rest[len("run "):]
+        if rest.startswith("python "):
+            # `uv run python tools/x.py --check` → `<py> tools/x.py --check`
+            return f"{shlex_quote(python)} {rest[len('python '):]}"
+        # `uv run pytest` → `<py> -m pytest`（pytest 是个模块，不是解释器参数）
+        return f"{shlex_quote(python)} -m {rest}"
+    if rest.startswith("build"):
+        return f"{shlex_quote(python)} -m build" + rest[len("build"):]
+    return cmd
+
+
+def _runner_python(explicit: str | None) -> str | None:
+    """显式 `--python` > 有 `uv` 时用 uv 原样 > 回退当前解释器。"""
+    if explicit:
+        return explicit
+    from shutil import which
+
+    return None if which("uv") else sys.executable
+
+
+def shlex_quote(text: str) -> str:
+    import shlex
+
+    return shlex.quote(text)
+
+
+def run_gates(python: str | None = None) -> int:
     failed: list[str] = []
     total = 0.0
+    interp = _runner_python(python)
+    if interp is not None:
+        print(f"note: 没有 uv（或用 --python 指定）⇒ 门禁改用 {interp}"
+              f"（CI 仍用 `uv run`；8 条纯 Python 门禁等价，`build` 走 `python -m build`"
+              f"—— 缺该模块时先 `pip install build` 或装 uv）")
     for g in GATES:
         import time
         t0 = time.monotonic()
-        r = subprocess.run(g.cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
+        cmd = _gate_cmd(g.cmd, python=interp)
+        # **不注入 PYTHONPATH**：各生成脚本自己会 `sys.path.insert(0, ROOT/src)`，
+        # pytest 走 pyproject 的 `pythonpath=["src"]`；而外面多一层 PYTHONPATH=<repo>/src
+        # 会让 `uv build`（preflight 里那一步）与 setup-check 的行为变样 —— 实测这两条会红。
+        r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
         dt = time.monotonic() - t0
         total += dt
         mark = "ok  " if r.returncode == 0 else "FAIL"
@@ -288,6 +335,9 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="只校验索引与仓库现状是否一致")
     ap.add_argument("--brief", action="store_true", help="打印给 agent 的入口层（≤1.5 KB）")
     ap.add_argument("--gates", action="store_true", help="提交前：全部门禁一把跑完")
+    ap.add_argument("--python", default=None, metavar="EXE",
+                    help="跑门禁用的解释器（默认：有 uv 用 `uv run`；没有 uv 时回退到当前解释器。"
+                         "租来的 GPU 机器通常没有 uv，用这个或直接不给）")
     args = ap.parse_args()
 
     if args.brief:
@@ -299,7 +349,7 @@ def main() -> int:
             return 1
         return 0
     if args.gates:
-        return run_gates()
+        return run_gates(args.python)
     if args.check:
         problems = check()
         for p in problems:

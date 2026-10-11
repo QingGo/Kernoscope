@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
@@ -548,3 +549,46 @@ def test_generated_verdicts_reference_lists_the_premises_from_code():
     for p in VERDICT_PREMISES["cost_per_token"]:
         assert PREMISE_LABELS[p] in row, f"{p} 的标签没出现在 cost_per_token 行里：{row}"
     assert "env_shared_gpu" in row and "env_throttled" in row, row
+
+
+def test_ks_python_finds_a_conda_interpreter_when_path_has_none(tmp_path):
+    """第七轮 X-4：真机上 python 只在 `/root/miniconda3/bin/python3`（PATH 里没有 `python3`），
+    而旧 `ks_python()` 的顺序是 KS_PY → shebang → PATH → `.venv` → 兜底 `python3` ⇒ 调用方 127。
+    这里造一个"PATH 里没有 python、但有 conda 布局"的环境，断言它被找到。
+    """
+    home = tmp_path / "home"
+    (home / "miniconda3" / "bin").mkdir(parents=True)
+    fake_py = home / "miniconda3" / "bin" / "python3"
+    fake_py.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+    fake_py.chmod(0o755)
+    # PATH 里要有 `bash` 自己（否则 subprocess 都起不来），但**不能**有 python
+    bash_dir = str(pathlib.Path(shutil.which("bash")).parent)
+    ks = SCRIPTS / "_ks.sh"
+    r = subprocess.run(
+        ["bash", "-c", f'source "{ks}" && ks_python'],
+        capture_output=True, text=True,
+        env={**os.environ, "HOME": str(home), "PATH": bash_dir,
+             "KS_PY": "", "KS_SKILL_ROOT": ""})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str(fake_py), (r.stdout, r.stderr)
+
+
+def test_ks_python_version_guard_matches_the_declared_minimum():
+    """`_ks.sh` 的解释器版本关必须与 `pyproject` 的 `requires-python` 同源。
+
+    为什么：真机教训是"找到了 python 但太旧"（macOS 的 `/usr/bin/python3` 是 3.9，
+    排在前面会把仓库 `.venv` 挡住）—— 那个版本关如果与 `requires-python` 漂移，
+    就会出现"装是装上了，脚本却报语法错误"的假失败。
+    """
+    import re
+
+    ks = (SCRIPTS / "_ks.sh").read_text(encoding="utf-8")
+    m = re.search(r"sys\.version_info\s*>=\s*\((\d+),\s*(\d+)\)", ks)
+    assert m, "`_ks.sh` 里找不到版本关（有人把它删了？）"
+    guard = (int(m.group(1)), int(m.group(2)))
+
+    py = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m2 = re.search(r'requires-python\s*=\s*">=\s*(\d+)\.(\d+)"', py)
+    assert m2, "pyproject 里找不到 requires-python"
+    declared = (int(m2.group(1)), int(m2.group(2)))
+    assert guard == declared, f"_ks.sh 的版本关 {guard} != requires-python {declared}"

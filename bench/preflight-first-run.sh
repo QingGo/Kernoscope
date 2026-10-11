@@ -25,6 +25,9 @@ die() { printf 'PREFLIGHT FAIL: %s\n' "$*" >&2; exit 1; }
 command -v uv >/dev/null 2>&1 || { say "PREFLIGHT SKIP: 没有 uv（首跑路径依赖 uv；装上再跑）"; exit 3; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ks-preflight.XXXXXX")"
+# 自带一个可写的 uv 缓存目录：陌生机器/沙箱里 uv 的**默认**缓存位置不一定可写，
+# 而"缓存目录不可写"会让 `uv build` 失败，看起来像产品坏了（实测过一次）。
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$WORK/uv-cache}"
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 
