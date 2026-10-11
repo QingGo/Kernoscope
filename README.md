@@ -1,12 +1,12 @@
 # Kernoscope 内核镜
 
-**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化头寸 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
+[![PyPI](https://img.shields.io/pypi/v/kernoscope)](https://pypi.org/project/kernoscope/) [![Python](https://img.shields.io/pypi/pyversions/kernoscope)](https://pypi.org/project/kernoscope/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-它回答：**先改哪里能省多少**（按实测占比排序的头寸，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。
+**已发布到 PyPI**（`0.2.0`，alpha）：`uv tool install kernoscope`。**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化头寸 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
+
+它回答：**先改哪里能省多少**（按实测占比排序的头寸，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。与 `ncu` **CLI 兼容但数据源不同**（绝不占用它的指标名）；`nsys` 与 `torch.profiler` 是互补关系（见 §4）。
 
 30 秒上手（没有 GPU 也能跑通，三条命令都返回 0）：`kernoscope capabilities --brief` 看这台机器能答什么（约 1 KB）→ `kernoscope doctor` 看拿不到什么、为什么（`--no-probe` 只做静态推断、不做计数器实测探测；`--json` 给机器读）→ `kernoscope --packet - -- <你的命令>` 拿一份 <4 KB 决策包。
-
-与 `ncu` 的关系：CLI 兼容但数据源不同（它读硬件计数器，我们读物理观测量，**绝不占用它的指标名**）；与 `nsys` 的关系：复用它的 CUPTI activity，是消费者不是替代品；与 `torch.profiler` 的关系：它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信、改它值多少钱"。
 
 ---
 
@@ -221,6 +221,8 @@ kernoscope --strict --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed -
 ---
 
 ## 4. 与 ncu / nsys / torch.profiler 的关系
+
+一句话定位：与 `ncu` 的关系是 **CLI 兼容但数据源不同**（它读硬件计数器，我们读物理观测量，**绝不占用它的指标名**）；与 `nsys` 的关系是**消费者**（复用它的 CUPTI activity，不是替代品）；与 `torch.profiler` 的关系是**分工**——它答"哪一步慢"，我们追"这个 kernel 为什么慢、这个数字有多可信、改它值多少钱"。
 
 ### 4.1 当 `ncu` 的替代品用（CLI 兼容）
 

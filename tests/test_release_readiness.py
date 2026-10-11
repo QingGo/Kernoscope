@@ -69,14 +69,39 @@ def _shell_files() -> list[pathlib.Path]:
     return [p for p in ROOT.rglob("*.sh") if not (skip & set(p.parts))]
 
 
+def _shell_code_lines(path: pathlib.Path) -> list[tuple[int, str]]:
+    """`(行号, 行)`：跳过注释行与 **heredoc 正文**。
+
+    heredoc（`<<'PY'` / `<<EOF`）里的内容 bash 一个字都不展开，所以里面的反引号、
+    `$VAR（` 都是普通文本 —— 我的第一版门禁把 `setup-check.sh` 里嵌的 Python 当成 bash 判了，
+    那正是"门禁自己的假阳性"。这里按起止标记跳过正文。
+    """
+    import re as _re
+
+    out: list[tuple[int, str]] = []
+    heredoc: str | None = None
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if heredoc is not None:
+            if line.strip() == heredoc:
+                heredoc = None
+            continue
+        m = _re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if m:
+            heredoc = m.group(1)
+        if not line.lstrip().startswith("#"):
+            out.append((n, line))
+    return out
+
+
 def test_no_shell_variable_is_followed_immediately_by_a_multibyte_char():
     import re
 
-    pat = re.compile(rb"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])")
+    pat = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\u0080-\uffff])")
     offenders: list[str] = []
     for p in _shell_files():
-        for m in pat.finditer(p.read_bytes()):
-            offenders.append(f"{p.relative_to(ROOT)}: ${m.group(1).decode()} 后面紧跟非 ASCII 字符")
+        for n, line in _shell_code_lines(p):
+            for m in pat.finditer(line):
+                offenders.append(f"{p.relative_to(ROOT)}:{n}: ${m.group(1)} 后面紧跟非 ASCII 字符")
     assert not offenders, (
         "这些 shell 变量没加大括号，紧接着就是中文字符 —— 在 `LC_ALL=C` 之类非 UTF-8 locale 下\n"
         "bash 会把多字节字符的首字节吞进变量名（`unbound variable`，脚本当场死）：\n  - "
@@ -142,11 +167,19 @@ def test_publish_workflow_environment_matches_what_pypi_registered():
         "RELEASING 必须把登记用的 environment 名写出来（照抄才不会错）"
 
 
-def test_publish_workflow_never_silently_falls_back_to_a_token():
-    """`--trusted-publishing always`：拿不到 OIDC 就红，不许静默用某个 token 顶替。"""
+def test_publish_workflow_uses_the_attesting_action_without_any_token():
+    """上传必须用会**附 attestation** 的那条路，且不给任何 token。
+
+    为什么不能用 `uv publish`（第七轮发布实测）：它的 `--help` 里没有任何 attestation 开关，
+    0.2.0 就是这样发出去的 —— PyPI Integrity API 对它返回 404「No provenance available」。
+    改用 `pypa/gh-action-pypi-publish` 并在 0.3.0 验证 provenance 是否真的出现。
+    """
     wf = _workflow()
-    assert "--trusted-publishing always" in wf, wf
+    assert "pypa/gh-action-pypi-publish" in wf, "上传步骤必须用官方动作（它才会附 attestation）"
+    assert re.search(r"attestations:\s*true", wf), "要显式打开 attestation"
     assert "UV_PUBLISH_TOKEN" not in wf, "工作流里不该出现任何 token 兜底"
+    assert not re.search(r"^\s*run:\s*uv publish", wf, re.M), \
+        "别再用 uv publish 上传（它不生成 attestation）"
 
 
 def test_publish_workflow_guards_tag_version_and_reuses_the_metadata_checker():
@@ -209,3 +242,23 @@ def test_metadata_checker_passes_on_a_minimal_correct_wheel(tmp_path):
                         str(wheel), "--expect-version", "0.2.0"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_no_unescaped_backticks_in_shell_code():
+    """`.sh` 里**非注释行**不许出现没转义的反引号。
+
+    为什么值得一条门禁：反引号在双引号里是**命令替换** —— 于是"打印一句带命令名的说明"会变成
+    "真的执行那个命令"。本轮实测踩到两次：`say "…由 `uv publish` 发出…"` 让 `uv publish` 真的跑了一次
+    （无凭据、安全失败，但那纯属运气）。要打印反引号就转义成 `\``（仓库里 5 处都这么写），
+    要命令替换就用 `$( )`。
+    """
+    offenders: list[str] = []
+    for path in _shell_files():
+        for n, line in _shell_code_lines(path):
+            for i, ch in enumerate(line):
+                if ch == "`" and (i == 0 or line[i - 1] != "\\"):
+                    offenders.append(f"{path.relative_to(ROOT)}:{n}")
+                    break
+    assert not offenders, (
+        "这些行里有没转义的反引号（双引号里会被 bash 当命令替换执行）：\n  - "
+        + "\n  - ".join(offenders) + "\n修法：打印用 \\`，命令替换用 $( )")

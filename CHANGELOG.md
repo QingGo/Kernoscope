@@ -741,7 +741,9 @@ kernoscope mcp --stdio
 ### 发布走 Trusted Publisher（OIDC）：`.github/workflows/publish.yml`
 
 - **无长期密钥**：推 tag（`git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0`）触发 CI，
-  由 GitHub 换一个短时 token 上传，PyPI 自动附 **attestation（PEP 740）**。PyPI 侧登记的是
+  由 GitHub 换一个短时 token，上传用 `pypa/gh-action-pypi-publish`（它会附 **attestation**）。
+  ⚠️ **0.2.0 例外**：它由 `uv publish` 发出，而该工具没有 attestation 能力 ——
+  PyPI Integrity API 对 0.2.0 返回 404（实测），从 0.3.0 起才有。PyPI 侧登记的是
   pending publisher（项目还不存在时也能配），四个字段必须与仓库逐字一致：
   `owner=QingGo`、`repo=Kernoscope`、`workflow=publish.yml`、`environment=pypi`。
 - 工作流的形状本身有测试：只允许 `v*` tag 触发、**没有** `pull_request_target`/`workflow_dispatch`、
@@ -758,6 +760,11 @@ kernoscope mcp --stdio
   project-scoped token，且首次发布只能先用账号级、随后必须换掉）。
 
 ## 0.2.0
+
+**已发布（PyPI）**：`2026-10-11` 由 tag `v0.2.0` 触发 CI 以 **Trusted Publisher（OIDC，零密钥）**
+上传；wheel 518 784 B / sdist 1 800 015 B；发布后验证 `bash bench/release-dry-run.sh --from-pypi`
+通过（隔离安装 + 首用三连 + 预算）。**该版本无 attestation**（用 `uv publish` 发的；0.3.0 起改
+`pypa/gh-action-pypi-publish`）。
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。
 

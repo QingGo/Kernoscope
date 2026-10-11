@@ -1,8 +1,10 @@
 name: publish
 
-# 发布走 **Trusted Publisher（OIDC）**：没有长期密钥 —— 每次运行由 GitHub 换一个短时 token，
-# 并且 PyPI 会自动附带 attestation（PEP 740），用户可验证"这个 wheel 确实由这个仓库的这次
-# 构建产出"。这比把项目级 token 放进 CI secret 更契合本仓库"每个数字/动作都能追到产物"的气质。
+# 发布走 **Trusted Publisher（OIDC）**：没有长期密钥 —— 每次运行由 GitHub 换一个短时 token。
+# 上传用 PyPA 官方动作 `pypa/gh-action-pypi-publish`（**不是 `uv publish`**）：只有它会为产物生成
+# 并上传 **attestation（PEP 740）**，用户可验证"这个 wheel 确实由这个仓库的这次构建产出"。
+# 实测依据：`uv publish`（0.8.17）的 `--help` 里没有任何 attestation 开关，而 0.2.0 就是这样发出去的
+# —— PyPI Integrity API 对它返回 404「No provenance available」。从 0.3.0 起这条路才有 provenance。
 #
 # ⚠️ PyPI 侧登记的 pending publisher 必须与这里的**四样东西**逐字一致，否则 OIDC 交换会失败：
 #      owner = QingGo ／ repo = Kernoscope ／ **本文件名 publish.yml** ／ **environment 名 pypi**
@@ -57,7 +59,10 @@ jobs:
         with:
           name: dist
           path: dist
-      - uses: astral-sh/setup-uv@v5
-      - name: Publish（trusted publishing）
-        # `always` = 拿不到 OIDC 就**失败**，绝不静默退化成某个 token（那会让"没有密钥"这句话变假）
-        run: uv publish --trusted-publishing always
+      - name: Publish（trusted publishing + attestation）
+        # 用官方动作而不是 `uv publish`：后者**不会**生成 PEP 740 attestation（见文件头的实测依据）。
+        # 这里不给任何 token：动作在 `id-token: write` 拿到 OIDC 后自己换取上传凭据，
+        # 拿不到就失败 —— 绝不静默退化成某个 token（那会让"没有密钥"这句话变假）。
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true

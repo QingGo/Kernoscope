@@ -21,12 +21,17 @@ set -uo pipefail
 
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
 MODE="local"
-case "${1:-}" in
-  --from-pypi) MODE="pypi" ;;
-  --metadata-only) MODE="meta" ;;
-  "") ;;
-  *) echo "用法：bash bench/release-dry-run.sh [--from-pypi|--metadata-only]"; exit 2 ;;
-esac
+REQUIRE_ATTESTATION=0
+for arg in "$@"; do
+  case "$arg" in
+    --from-pypi) MODE="pypi" ;;
+    --metadata-only) MODE="meta" ;;
+    --require-attestation) REQUIRE_ATTESTATION=1 ;;
+    "") ;;
+    *) echo "用法：bash bench/release-dry-run.sh [--from-pypi] [--metadata-only] [--require-attestation]"
+       exit 2 ;;
+  esac
+done
 
 command -v uv >/dev/null 2>&1 || { echo "RELEASE SKIP: 没有 uv（发布要用 uv；装上再跑）"; exit 3; }
 
@@ -120,6 +125,20 @@ else
 fi
 
 if [ "$MODE" = "pypi" ]; then
+  # ---- 来源证明（PEP 740）：只有 PyPA 官方动作会上传它，`uv publish` 不会 ----
+  PROV_URL="https://pypi.org/integrity/kernoscope/$VERSION/kernoscope-$VERSION-py3-none-any.whl/provenance"
+  prov_code="$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$PROV_URL" 2>/dev/null || echo 000)"
+  if [ "$prov_code" = "200" ]; then
+    ok "attestation：Integrity API 200（这份 wheel 有可验证的构建来源）"
+  elif [ "$REQUIRE_ATTESTATION" = "1" ]; then
+    bad "attestation 缺失（Integrity API HTTP ${prov_code}）—— 这一版应当有却查不到"
+  else
+    # 注意：这里**不许**用反引号写命令名 —— 双引号里的反引号会被 bash 当命令替换，
+    # 于是"打印一句说明"会变成"真的执行那个命令"（本轮实测踩到：uv publish 被跑了一次）。
+    say "  · attestation：Integrity API HTTP ${prov_code}（0.2.0 实测无：它由 uv publish 发出，"
+    say "    那个版本没有这个能力；0.3.0 起改用 pypa/gh-action-pypi-publish，应当 200。"
+    say "    从 0.3.0 起请用 --require-attestation 把它变成硬断言）"
+  fi
   say "==> 发布后验证通过：PyPI 上的 kernoscope==$VERSION 能装、能跑、首屏在预算内"
 else
   say "==> 预演通过：本地 wheel 能装、能跑、首屏在预算内"

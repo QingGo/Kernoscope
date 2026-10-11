@@ -27,11 +27,45 @@ bash bench/preflight-first-run.sh          # 期望：PREFLIGHT OK 6/6
 | 5 | 任何人 | 发布后验证**发布物**而不是工作树：`bash bench/release-dry-run.sh --from-pypi`（从 PyPI 隔离安装 + 首用三连 + 预算），或手工 `uv tool install kernoscope`（新环境）→ `kernoscope doctor; echo $?` |
 | 6 | 维护者 | GitHub Release：贴 §0 的 preflight 结果 + CHANGELOG 的 Unreleased 段 + 「接口会变」声明 |
 
+### 1.0 0.2.0 的发布事实（第一次真的发出去了）
+
+| 事实 | 值 |
+|---|---|
+| 版本 / 文件 | `kernoscope 0.2.0`：`kernoscope-0.2.0-py3-none-any.whl`（518 784 B）+ `.tar.gz`（1 800 015 B） |
+| 触发 | tag `v0.2.0` → GitHub Actions `publish.yml` → OIDC（**没有任何 token**） |
+| 那次运行 | `38152627009` = success；之前的 `38152306470` 失败在 OIDC 一步（见下表） |
+| 发布后验证 | `bash bench/release-dry-run.sh --from-pypi` → `RELEASE OK`（隔离装出 `kernoscope`+`ksc`、首用三连 rc=0、一屏 4854 B/42 行） |
+| attestation | **无**（0.2.0 用 `uv publish` 发的；0.3.0 起改官方动作带 attestation） |
+
+**第一次失败的原因（值得记下来）**：pending publisher 是**在仓库转公开之前**填的，没有生效；
+重新登记后一次通过。另外四个字段必须逐字一致 —— 最常见的两个坑是
+**Workflow name 填成了 `publish`（要填文件名 `publish.yml`）** 与 **Environment name 留空**
+（工作流写了 `environment: pypi`，PyPI 那边空着就会在 OIDC 交换时被拒）。
+
+失败后的重试**不需要新提交**（没能上传时也没有"版本已存在"的问题）：删 tag 重推即可 ——
+
+```bash
+git push --delete origin v0.2.0 && git push origin v0.2.0
+```
+
 ### 1.1 为什么不用 API token（以及什么时候仍然用）
 
 **日常发布走 Trusted Publisher**：没有长期密钥可泄露，每次运行由 GitHub 换一个 ~15 分钟的
-短时 token，绑定 `owner/repo/workflow/environment`；而且 PyPI 会自动为这类上传附
-**attestation（PEP 740）**，用户可验证"这个 wheel 确实由这个仓库的这次构建产出"。
+短时 token，绑定 `owner/repo/workflow/environment`；上传用 PyPA 官方动作
+`pypa/gh-action-pypi-publish`，它会为产物生成 **attestation（PEP 740）**，用户可验证
+"这个 wheel 确实由这个仓库的这次构建产出"。
+
+⚠️ **0.2.0 是这条规则的例外，别被它误导**：0.2.0 是用 `uv publish` 发出去的，而那个工具当时
+（0.8.17）根本没有 attestation 能力 —— PyPI Integrity API 对它返回
+`404 No provenance available for kernoscope-0.2.0-py3-none-any.whl`（我实测过）。
+从 **0.3.0** 起走官方动作，**发布后请用 `--require-attestation` 验一次**：
+
+```bash
+bash bench/release-dry-run.sh --from-pypi --require-attestation
+curl -s -o /dev/null -w '%{http_code}\n' \
+  https://pypi.org/integrity/kernoscope/0.3.0/kernoscope-0.3.0-py3-none-any.whl/provenance
+# 期望 200；404 = attestation 没上去（先查是不是又用 uv publish 发的）
+```
 
 顺带一个**首次发布的现实理由**：项目还不存在时，PyPI **建不了** project-scoped token，
 只能先用**账号级** token（权限大得多：能往你任意项目发包、能建新项目）——而 pending publisher
