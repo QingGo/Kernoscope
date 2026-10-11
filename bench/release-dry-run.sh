@@ -136,8 +136,8 @@ if [ "$MODE" = "pypi" ]; then
     # 注意：这里**不许**用反引号写命令名 —— 双引号里的反引号会被 bash 当命令替换，
     # 于是"打印一句说明"会变成"真的执行那个命令"（本轮实测踩到：uv publish 被跑了一次）。
     say "  · attestation：Integrity API HTTP ${prov_code}（0.2.0 实测无：它由 uv publish 发出，"
-    say "    那个版本没有这个能力；0.3.0 起改用 pypa/gh-action-pypi-publish，应当 200。"
-    say "    从 0.3.0 起请用 --require-attestation 把它变成硬断言）"
+    say "    那个版本没有这个能力；0.2.1 起改用 pypa/gh-action-pypi-publish，应当 200。"
+    say "    从 0.2.1 起请用 --require-attestation 把它变成硬断言）"
   fi
   say "==> 发布后验证通过：PyPI 上的 kernoscope==$VERSION 能装、能跑、首屏在预算内"
 else

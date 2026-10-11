@@ -245,7 +245,7 @@ def test_metadata_checker_passes_on_a_minimal_correct_wheel(tmp_path):
 
 
 def test_no_unescaped_backticks_in_shell_code():
-    """`.sh` 里**非注释行**不许出现没转义的反引号。
+    r"""`.sh` 里**非注释行**不许出现没转义的反引号。
 
     为什么值得一条门禁：反引号在双引号里是**命令替换** —— 于是"打印一句带命令名的说明"会变成
     "真的执行那个命令"。本轮实测踩到两次：`say "…由 `uv publish` 发出…"` 让 `uv publish` 真的跑了一次
@@ -262,3 +262,67 @@ def test_no_unescaped_backticks_in_shell_code():
     assert not offenders, (
         "这些行里有没转义的反引号（双引号里会被 bash 当命令替换执行）：\n  - "
         + "\n  - ".join(offenders) + "\n修法：打印用 \\`，命令替换用 $( )")
+
+
+# --------------------------------------------------------------------------
+# GitHub Release：CI 用自带的 GITHUB_TOKEN 建，正文与 CHANGELOG 同源
+# --------------------------------------------------------------------------
+def test_release_job_uses_the_builtin_token_and_never_moves_the_tag():
+    """建 Release 不需要任何 PAT（workflow 自带的 `GITHUB_TOKEN` 就够），且 tag 不许被移动。
+
+    为什么强调"tag 不移动"：tag 对象指向**构建出那份产物的提交** —— 重打 tag 会抹掉
+    "这个 tag = 这份 wheel"的对应关系，还会再触发一次发布（PyPI 已有同名文件 ⇒ 那次运行会红）。
+    """
+    wf = _workflow()
+    rel = wf.split("  release:")[-1]
+    assert re.search(r"contents:\s*write", rel), "创建 Release 需要 contents: write（只在这一处开）"
+    assert "GH_TOKEN: ${{ github.token }}" in rel, "应当用 workflow 自带的 token，不要求任何 PAT"
+    assert "--verify-tag" in rel, "--verify-tag 保证针对**已存在的** tag 建 Release（不新建/不移动）"
+    # build/publish 两个 job 不该有 contents: write
+    assert "contents: write" not in wf.split("  release:")[0], "写权限只给 release 这一个 job"
+    assert "secrets." not in rel, "不引入任何自定义 secret（零密钥是这条路线的卖点）"
+
+
+def test_release_body_comes_from_the_changelog_extractor():
+    wf = _workflow()
+    rel = wf.split("  release:")[-1]
+    assert "bench/release_notes.py" in rel, "Release 正文必须由 CHANGELOG 提取，不许手抄"
+    assert "--notes-file" in rel
+    assert "sha256" in rel, "把 PyPI 上产物的 sha256 附在 Release 页，读者才能对拍"
+
+
+def test_publish_step_skips_files_that_already_exist():
+    """重推 tag / 重跑工作流时不要以一条与真实原因无关的红结束。"""
+    assert re.search(r"skip-existing:\s*true", _workflow()), _workflow()
+
+
+# --------------------------------------------------------------------------
+# 发布说明提取器（Release 正文的唯一真源）
+# --------------------------------------------------------------------------
+def test_release_notes_extractor_finds_the_published_version():
+    r = subprocess.run([sys.executable, str(ROOT / "bench" / "release_notes.py"), "0.2.0",
+                        "--tag"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("v0.2.0")
+    assert "已发布" in r.stdout, "0.2.0 那一节应当写着「已发布」的事实"
+
+
+def test_release_notes_extractor_refuses_a_version_without_a_changelog_section():
+    """tag 了却没有 CHANGELOG 那一节 ⇒ 必须响亮失败（不许静默给空正文）。"""
+    r = subprocess.run([sys.executable, str(ROOT / "bench" / "release_notes.py"), "9.9.9"],
+                       capture_output=True, text=True)
+    assert r.returncode == 1
+    assert "找不到" in r.stderr
+
+
+def test_release_notes_title_mode_matches_the_tag_name():
+    r = subprocess.run([sys.executable, str(ROOT / "bench" / "release_notes.py"), "0.2.0",
+                        "--title"], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "v0.2.0", repr(r.stdout)
+
+
+def test_version_policy_defaults_to_a_patch_bump():
+    """文档必须写清"小改动只升末位"，否则版本号会为了显得有进展而跳号（用户明确要求）。"""
+    rel = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+    assert "默认只升末位" in rel and "patch" in rel
+    assert re.search(r"0\.2\.0\s*→\s*0\.2\.1", rel), "给一个看得懂的递增例子"

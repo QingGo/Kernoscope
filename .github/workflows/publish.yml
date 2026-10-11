@@ -4,7 +4,7 @@ name: publish
 # 上传用 PyPA 官方动作 `pypa/gh-action-pypi-publish`（**不是 `uv publish`**）：只有它会为产物生成
 # 并上传 **attestation（PEP 740）**，用户可验证"这个 wheel 确实由这个仓库的这次构建产出"。
 # 实测依据：`uv publish`（0.8.17）的 `--help` 里没有任何 attestation 开关，而 0.2.0 就是这样发出去的
-# —— PyPI Integrity API 对它返回 404「No provenance available」。从 0.3.0 起这条路才有 provenance。
+# —— PyPI Integrity API 对它返回 404「No provenance available」。从 0.2.1 起这条路才有 provenance（小改动只升末位）。
 #
 # ⚠️ PyPI 侧登记的 pending publisher 必须与这里的**四样东西**逐字一致，否则 OIDC 交换会失败：
 #      owner = QingGo ／ repo = Kernoscope ／ **本文件名 publish.yml** ／ **environment 名 pypi**
@@ -66,3 +66,49 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           attestations: true
+          # 同一个 tag 被重推/重跑时（例如修完 CI 配置再发一次），PyPI 上已有的文件跳过而不是报错：
+          # 否则"重试"会以一条与真实原因无关的红结束（我们第一次发布失败后就是这么重试的）。
+          skip-existing: true
+
+  release:
+    # GitHub Release：**不需要任何 PAT** —— 用 workflow 自带的 GITHUB_TOKEN（见下面的 contents: write）。
+    # 正文取 `bench/release_notes.py <版本>`（= CHANGELOG 里那一节），所以 Release 页与 CHANGELOG
+    # 只有一个真源；再附上 PyPI 上产物的 sha256，读者可以在 Release 页直接对拍。
+    # 不挂资产：分发渠道是 PyPI（那里才有 attestation）；GitHub 会自动附源码归档。
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write               # 只在这一个 job 上开
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release 正文（来自 CHANGELOG，不手抄）
+        run: python3 bench/release_notes.py "${GITHUB_REF_NAME#v}" --tag > /tmp/notes.md
+      - name: 附上 PyPI 产物的 sha256（读不到就如实说明，不让发布失败）
+        run: |
+          python3 - >> /tmp/notes.md <<'PY'
+          import json, os, urllib.request
+          v = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          try:
+              with urllib.request.urlopen(f"https://pypi.org/pypi/kernoscope/{v}/json", timeout=20) as r:
+                  d = json.load(r)
+          except Exception as exc:                     # noqa: BLE001
+              print(f"\n### 产物\n\n（读不到 PyPI 元数据：{type(exc).__name__}；"
+                    f"请到 https://pypi.org/project/kernoscope/{v}/ 核对）")
+              raise SystemExit(0)
+          print("\n### 产物（PyPI）\n")
+          for u in d["urls"]:
+              print(f"- `{u['filename']}`（{u['size']} B）—— sha256 `{u['digests']['sha256']}`")
+          print("\n安装：`uv tool install kernoscope`（PyPI 那份才带 attestation）")
+          PY
+      - name: 创建 Release（tag 不移动：`--verify-tag`）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME"             --title "$(python3 bench/release_notes.py "${GITHUB_REF_NAME#v}" --title)"             --notes-file /tmp/notes.md             --verify-tag
+      - name: 已有 Release 时改为更新正文（重试幂等）
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --notes-file /tmp/notes.md

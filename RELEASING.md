@@ -35,7 +35,7 @@ bash bench/preflight-first-run.sh          # 期望：PREFLIGHT OK 6/6
 | 触发 | tag `v0.2.0` → GitHub Actions `publish.yml` → OIDC（**没有任何 token**） |
 | 那次运行 | `38152627009` = success；之前的 `38152306470` 失败在 OIDC 一步（见下表） |
 | 发布后验证 | `bash bench/release-dry-run.sh --from-pypi` → `RELEASE OK`（隔离装出 `kernoscope`+`ksc`、首用三连 rc=0、一屏 4854 B/42 行） |
-| attestation | **无**（0.2.0 用 `uv publish` 发的；0.3.0 起改官方动作带 attestation） |
+| attestation | **无**（0.2.0 用 `uv publish` 发的；0.2.1 起改官方动作带 attestation） |
 
 **第一次失败的原因（值得记下来）**：pending publisher 是**在仓库转公开之前**填的，没有生效；
 重新登记后一次通过。另外四个字段必须逐字一致 —— 最常见的两个坑是
@@ -58,12 +58,12 @@ git push --delete origin v0.2.0 && git push origin v0.2.0
 ⚠️ **0.2.0 是这条规则的例外，别被它误导**：0.2.0 是用 `uv publish` 发出去的，而那个工具当时
 （0.8.17）根本没有 attestation 能力 —— PyPI Integrity API 对它返回
 `404 No provenance available for kernoscope-0.2.0-py3-none-any.whl`（我实测过）。
-从 **0.3.0** 起走官方动作，**发布后请用 `--require-attestation` 验一次**：
+从 **0.2.1** 起走官方动作，**发布后请用 `--require-attestation` 验一次**：
 
 ```bash
 bash bench/release-dry-run.sh --from-pypi --require-attestation
 curl -s -o /dev/null -w '%{http_code}\n' \
-  https://pypi.org/integrity/kernoscope/0.3.0/kernoscope-0.3.0-py3-none-any.whl/provenance
+  https://pypi.org/integrity/kernoscope/0.2.1/kernoscope-0.2.1-py3-none-any.whl/provenance
 # 期望 200；404 = attestation 没上去（先查是不是又用 uv publish 发的）
 ```
 
@@ -82,7 +82,18 @@ uv build && UV_PUBLISH_TOKEN=pypi-XXXXXXXX uv publish
 
 ## 2 版本与兼容策略
 
-- **版本号跟 schema 走**：`packet.schema_version` / `schema_revision` 变了就要动次版本号。
+- **默认只升末位（patch）**：小改动 —— 修 bug、补门禁、加文档、换发布机制、加一个不改语义的
+  开关 —— 一律 `0.2.0 → 0.2.1 → 0.2.2`。**不要为了"看起来有进展"跳号**。
+- **只有下面两类才动中位（minor）**：① `packet.schema_version` / `schema_revision` 变了；
+  ② 有**破坏性**接口变更（删/改命令行开关、改退出码语义、改决策包字段含义）。
+  这两类都必须按下面 §2 的规矩写清"按旧行为写的脚本要改哪一行"。
+- 建议一条命令同时改版本与生成 tag 正文（版本号只有 `pyproject.toml` 一个真源）：
+
+  ```bash
+  python3 bench/release_notes.py 0.2.1 --tag > /tmp/notes.md   # 正文来自 CHANGELOG 那一节
+  git tag -a v0.2.1 -F /tmp/notes.md                            # tag message = Release 正文（同源）
+  git push origin v0.2.1                                        # CI 发布 + 自动建 Release
+  ```
 - **接口变化必须进 `CHANGELOG.md`**（命令行、决策包字段、输出字段、退出码语义）。
   例子：`doctor` 的退出码语义与 `--json` 的 `diagnosed` 字段就记在 Unreleased 里。
 - **alpha 期间允许破坏性变更**，但必须：① 写清"按旧行为写的脚本要改哪一行"；
