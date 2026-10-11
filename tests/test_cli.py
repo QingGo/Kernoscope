@@ -328,6 +328,30 @@ def test_help_output_does_not_crash(argv, capsys):
     assert (out.out + out.err).strip(), f"{argv} 没有输出"
 
 
+def test_top_level_help_lists_every_subcommand(capsys):
+    """顶层 `--help` 必须列出全部子命令 —— 一次易用性实测发现 12,993 B 的帮助里
+    `route`/`capabilities`/`gate`/`skill` 各出现 **0 次**：四个核心入口在帮助里不存在，
+    陌生人（和 agent）只能先读 README 才知道它们。
+
+    这条同时钉住"加子命令必须写一句说明"：`SUBCOMMAND_HELP` 的键集合 == `SUBCOMMANDS`。
+    """
+    from kernoscope.cli import SUBCOMMAND_HELP, SUBCOMMANDS
+
+    assert set(SUBCOMMAND_HELP) == set(SUBCOMMANDS), (
+        f"子命令说明与子命令表不一致：只在表里 {sorted(set(SUBCOMMANDS) - set(SUBCOMMAND_HELP))}，"
+        f"只在说明里 {sorted(set(SUBCOMMAND_HELP) - set(SUBCOMMANDS))}")
+
+    try:
+        main(["--help"])
+    except SystemExit as e:          # argparse 正常退出
+        assert (e.code or 0) == 0
+    text = capsys.readouterr().out
+    missing = [s for s in SUBCOMMANDS if f"kernoscope {s} " not in text]
+    assert not missing, f"顶层 --help 里找不到这些子命令：{missing}"
+    for name, desc in SUBCOMMAND_HELP.items():
+        assert desc in text, f"--help 里 {name} 的一句说明丢了：{desc!r}"
+
+
 HIST_FOR_STRICT = """kernel 0 - synthetic_gemm - #thread-blocks 1048576,  \
 kernel instructions 2000000, total instructions 2000000
   LDG.E.128 = 500000

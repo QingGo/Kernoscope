@@ -279,3 +279,81 @@ def test_plan_with_a_subcommand_name_is_rejected_with_guidance(capsys):
     # 正常的 `--plan -- <程序>` 不受影响
     rc2 = main(["--plan", "--ks-synthetic", "--", "true"])
     assert rc2 == 0
+
+
+# --------------------------------------------------------------------------
+# W-2（第六轮）＋ 一次易用性实测：**模块级**函数拿不到 `_main` 的 `log_error` 闭包
+# --------------------------------------------------------------------------
+# `collect()` / `_attach_truth()` / `_export_substitute()` 都是模块级函数。它们历史上直接调
+# `log_error(...)`，于是「没给目标命令 / 忘记写 `--` / 拼错子命令」这三条**最高频**路径抛
+# `NameError` —— 源码里已经写好的那句提示永远打不出来。这里把每条路径钉住：
+# rc 固定 + 有自家 `error:` 行 + **没有** traceback（有 traceback 就说明又有人直接调闭包了）。
+@pytest.mark.parametrize("tag,argv", [
+    ("没有参数", ()),
+    ("给了 -o 但没给目标命令", ("-o", "rep.json")),
+    ("忘了写 --", ("--set", "basic")),
+    ("拼错子命令（`doctr` 被当成要运行的程序）", ("doctr",)),
+])
+def test_module_level_paths_never_raise_nameerror(capsys, tag, argv):
+    rc, out, err = run(capsys, *argv)
+    assert_own_error(rc, out, err)
+    assert "no target command" in err or "无法执行" in err, \
+        f"{tag}: 打出来的不是准备好的文案：{err!r}"
+
+
+def test_no_target_command_error_survives_quiet(capsys):
+    """同一路径加 `--quiet`：错误行必须照样出现（靠 `_main` 把 log_error 挂在 log 上）。"""
+    rc, out, err = run(capsys, "--quiet")
+    assert_own_error(rc, out, err)
+    assert "no target command" in err, err
+
+
+def test_export_substitute_empty_launch_table_has_its_own_error(capsys, tmp_path: Path):
+    """W-2 的复现值：空 launch 表 + `--export-ncu-rep`（受限机主推路径）。
+
+    **不带** `--ks-synthetic`：带了就永远有 kernel，那个分支就全仓零覆盖（第六轮报告原话）。
+    """
+    rc, out, err = run(capsys, "--export-ncu-rep", str(tmp_path / "x.ncu-rep"), "--", "true")
+    assert_own_error(rc, out, err)
+    assert "没有可导出的 kernel" in err, err
+
+
+def test_attach_truth_says_its_own_error_instead_of_nameerror(tmp_path, capsys):
+    """`_attach_truth()` 的失败分支：读不了 `.ncu-rep` ⇒ 自家 error 行 + 结构化拒绝。
+
+    直接调模块级函数（不走 CLI），因为这里要钉的是"**这个函数**不再依赖闭包"。
+    """
+    import json
+
+    from kernoscope import cli
+
+    class _Rep:
+        meta: dict = {}
+        kernels: list = []
+
+    rep = _Rep()
+    logged: list[str] = []
+    cli._attach_truth(rep, str(tmp_path / "nope.ncu-rep"), logged.append)
+
+    assert logged and "读不了" in logged[-1], logged
+    assert "error:" in logged[-1], logged
+    dumped = json.dumps(rep.meta, ensure_ascii=False)
+    assert "ncu_report_unreadable" in dumped, dumped
+
+
+def test_log_error_helper_prefers_the_real_error_sink():
+    """`_log_error` 在 `log` 上挂了 `log_error` 时用它（否则 `--quiet` 会吞掉错误）。"""
+    from kernoscope.cli import _log_error
+
+    seen: list[tuple[str, str]] = []
+
+    def log(msg):
+        seen.append(("log", msg))
+
+    log.log_error = lambda msg: seen.append(("error", msg))   # type: ignore[attr-defined]
+    _log_error(log, "error: x")
+    assert seen == [("error", "error: x")], seen
+
+    plain: list[tuple[str, str]] = []
+    _log_error(lambda m: plain.append(("log", m)), "error: y")   # 没挂上也不许抛
+    assert plain == [("log", "error: y")], plain

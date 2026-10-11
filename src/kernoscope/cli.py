@@ -58,6 +58,35 @@ NOOP_FLAGS = [
     "--warp-sampling-max-passes", "--mps", "--mps-num-clients", "--mps-timeout",
     "--pipeline-boost-state", "--preload-library", "--import-sass", "--import-source",
 ]
+
+# 子命令的一句话说明 —— **顶层 `--help` 从这里生成**。
+#
+# 为什么需要它：一次易用性实测发现顶层 `--help` 有 12,993 B，而 `route`/`capabilities`/
+# `gate`/`skill` 各出现 **0 次** —— 四个核心入口在帮助里根本不存在，陌生人（和 agent）
+# 只能靠读 README 才知道它们。argparse 的 subparsers 是更彻底的修法，但那会改动
+# `--` 之后的目标命令语义；在帮助里列出来是零风险的等价修复。
+# `tests/test_cli.py` 断言这里的键集合 == `SUBCOMMANDS`（加子命令不写说明就红）。
+SUBCOMMAND_HELP: dict[str, str] = {
+    "doctor": "这台机器能拿到什么、拿不到什么、为什么、备选是什么",
+    "capabilities": "三态能力矩阵 + 补救动作与代价（`--brief` 给 agent，约 1 KB）",
+    "route": "先路由：这个问题该用哪个口径、要付什么代价（只出计划，不测量）",
+    "occupancy": "从探针记录重建「实际达到的 occupancy」",
+    "memtrace": "把 NVBit 访存轨迹折成字节口径（含截断/口径不成立的拒绝）",
+    "selftest": "用已知答案负载算本机误差带与最小可分辨差异（MDD）",
+    "diff": "两次运行对比：improved / regressed / indistinguishable / incomparable",
+    "gate": "CI 门禁：对决策包下断言，不达标就红（拿不到数据也算不达标）",
+    "skill": "把 skill 装进 agent 的上下文（默认只打印计划，`--apply` 才写盘）",
+    "issue": "把一次采集打包成可提交的 issue 材料",
+}
+
+
+def _subcommand_help_block() -> str:
+    """按可读顺序（本字典的插入顺序）列出子命令；集合与 `SUBCOMMANDS` 由测试对拍。"""
+    parts = ["子命令（每个都有 --help；`--json` 给机器读）:"]
+    parts += [f"  kernoscope {name:<13} # {SUBCOMMAND_HELP[name]}" for name in SUBCOMMAND_HELP]
+    return "\n".join(parts)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=PROG,
@@ -68,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
                "  kernoscope doctor                                   # 先看这台机器能拿到什么\n"
                "  kernoscope --set basic -k regex:gemm -c 3 -o rep -- python train.py\n"
                "  kernoscope -i rep.ksreport.json --csv\n"
-               "  kernoscope --ks-synthetic --set detailed | head -50\n",
+               "  kernoscope --ks-synthetic --set detailed | head -50\n"
+               "\n" + _subcommand_help_block() + "\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     g = p.add_argument_group("ncu-compatible: selection")
@@ -327,8 +357,14 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
 
     cmd = _target_command(args.program)
     if not cmd:
-        log_error("error: no target command. Put it after '--', or use --ks-sqlite/--ks-synthetic.")
-        raise SystemExit(1)
+        # 走 `CliInputError` 而不是 `log_error(...) + raise SystemExit(1)`：
+        # 后者是**在进程内调用 `main()` 时抛异常**、只有 console-script 才变成 rc=1，
+        # 与其余输入错误（同一条 `error:` + 退出码通路）不一致。这条路径正是
+        # 「无参数 / 忘记 `--` / 拼错子命令」的落点，也是最该稳的一条。
+        raise CliInputError(
+            "no target command：把它放在 `--` 之后"
+            "（例如 `kernoscope --set basic -- python train.py`）；"
+            "或用 --ks-sqlite/--ks-nsys-rep 读已有采集；没有 GPU 时用 --ks-synthetic")
     meta["target"] = " ".join(cmd)
 
     if not nsys_backend.find_nsys():
@@ -354,8 +390,9 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
             if rc != 0:
                 log(f"warn: 目标命令退出码 {rc}；报告仍然是这台机器在运行期间的设备级读数")
         except OSError as e:
-            log_error(f"error: 目标命令无法执行：{e}")
-            raise SystemExit(1)
+            # 与「没有目标命令」同一条通路：`CliInputError` ⇒ 一行 `error:` + rc=1，
+            # 而不是只在 console-script 里才成立的 `raise SystemExit`。
+            raise CliInputError(f"目标命令无法执行：{e}", hint=_io_remedy(e)) from e
         return [], meta, rc
 
     keep = bool(getattr(args, "ks_keep_intermediate", False))
@@ -581,6 +618,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
         """
         logged.append(msg)
         print(msg, file=sys.stderr)
+
+    # 模块级函数（`collect()`/`_attach_truth()`/`_export_substitute()`）拿不到这个闭包，
+    # 它们走 `_log_error(log, …)`；挂上去才能保证"错误不受 --quiet 影响"这条纪律。
+    log.log_error = log_error          # type: ignore[attr-defined]
 
     # ---------- 执行计划（A2）：只打印，不执行 ----------
     # 放在**所有采集之前**：`--plan` 的承诺是"没有任何副作用"，所以它必须在第一行采集
@@ -1188,6 +1229,25 @@ def _main(argv: Sequence[str] | None = None) -> int:
     return rc
 
 
+def _log_error(log, msg: str) -> None:
+    """打一条 `error:` 行 —— **不受 `--quiet` 影响**。
+
+    为什么要有这个模块级小函数：`collect()` / `_attach_truth()` / `_export_substitute()`
+    都是**模块级**函数，拿不到 `_main` 里的 `log_error` 闭包。历史上它们直接调用 `log_error`，
+    于是「没给目标命令 / 忘记写 `--` / 拼错子命令」这三条**最高频**路径抛 `NameError` ——
+    源码里已经写好的那句 `error: no target command. Put it after '--'…` 永远打不出来
+    （第六轮 W-2 与一次易用性审计各命中一处，共 6 个调用点）。
+
+    `_main()`/`_stderr_log()` 都会把 `log_error` 挂在 `log` 上；万一没挂上，
+    退回普通 `log`（至少不会再 NameError，代价是 `--quiet` 会吞掉它）。
+    """
+    err = getattr(log, "log_error", None)
+    if callable(err):
+        err(msg)
+    else:
+        log(msg)
+
+
 def _stderr_log(args: argparse.Namespace, logged: list[str]):
     """把"记进 logged + 按 --quiet 打到 stderr"包成一个函数（`_emit` 内部用）。"""
     def log(msg: str) -> None:
@@ -1373,13 +1433,13 @@ def _attach_truth(rep: Report, path: str, log) -> None:
                f"（把它放进 PYTHONPATH），不需要 GPU 与计数器权限")
         rep.meta.setdefault("environment_refusals", []).append(
             Refusal(RefusalCode.NCU_REPORT_UNREADABLE, msg).to_dict())
-        log_error(f"error: {msg}")
+        _log_error(log, f"error: {msg}")
         return
     except ncu_rep_backend.NcuRepError as e:
         msg = f"读不了 {path}：{e}"
         rep.meta.setdefault("environment_refusals", []).append(
             Refusal(RefusalCode.NCU_REPORT_UNREADABLE, msg).to_dict())
-        log_error(f"error: {msg}")
+        _log_error(log, f"error: {msg}")
         return
 
     ours = {m.name: m.value for k in rep.kernels for s in k.sections for m in s.metrics
@@ -1508,8 +1568,8 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
     kernels = [k for k in rep.kernels
                if k.name != "(device)" and list(getattr(k, "launches", []) or [])]
     if not kernels:
-        log_error("error: 没有可导出的 kernel（没有 launch 记录就写不出 kernel 身份，"
-            "编一组 grid/block 就是在造身份）")
+        _log_error(log, "error: 没有可导出的 kernel（没有 launch 记录就写不出 kernel 身份，"
+                  "编一组 grid/block 就是在造身份）")
         return 2 if args.strict else 1
     kernels.sort(key=lambda k: k.total_ns, reverse=True)
     kr = kernels[0]
@@ -1528,13 +1588,13 @@ def _export_substitute(rep: Report, args: argparse.Namespace, packet: dict[str, 
                                compute_capability=str(getattr(dev, "compute_capability", "")
                                                       or ""))
     except SubstituteRefused as e:
-        log_error(f"error: 拒绝生成 .ncu-rep：{e}")
+        _log_error(log, f"error: 拒绝生成 .ncu-rep：{e}")
         return 2 if args.strict else 1
     except OSError as e:
         # V-25：只读目录写 .ncu-rep（或旁路 `.ATTRIBUTION.txt`）曾经是裸 PermissionError。
         # 错误不受 --quiet 影响（写不出产物时静默的 rc=1 更难排查）。
-        print(f"error: 写不了ncu-rep 导出（含 .ATTRIBUTION.txt 署名）：{args.export_ncu_rep}"
-              f"（{e.strerror or e}）", file=sys.stderr)
+        _log_error(log, f"error: 写不了 ncu-rep 导出（含 .ATTRIBUTION.txt 署名）："
+                       f"{args.export_ncu_rep}（{e.strerror or e}）")
         print(f"hint: {_io_remedy(e)}", file=sys.stderr)
         return 1
     log(f"ncu-rep: 写出 {res.ncu_rep_path}（{res.bytes_written} B，"
