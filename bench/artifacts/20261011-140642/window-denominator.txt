@@ -1,0 +1,8 @@
+窗口            per-launch            相对解析真值      状态
+  window-auto.packet.json      1058.94 MB            -1.4%      soft
+  window-warmup1.packet.json      1059.05 MB            -1.4%      soft
+  window-warmup2.packet.json      1059.19 MB            -1.4%      soft
+
+相对离散 0.02%（判据 ≤ 5%）
+与解析真值的最大偏差 1.38%
+OK: per-launch 与窗口无关（分母落在同一个窗口里）

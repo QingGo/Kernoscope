@@ -1,0 +1,93 @@
+{
+  "kernel": "copy_k(float const*, float*, long)",
+  "records": 49152,
+  "accesses": 196608,
+  "sampling_ratio": 1.0,
+  "truncated": false,
+  "sectors_per_request": 4.0,
+  "coalescing_pct": 100.0,
+  "working_set_mb": 2.097152,
+  "l2_bytes": 75497472,
+  "l2_hit_rate_l2only_pct": 66.66666666666667,
+  "l2_hit_rate_with_l1_pct": 66.66666666666667,
+  "dram_bytes_per_launch": 699050.6666666666,
+  "dram_bytes_unavailable_reason": "",
+  "op_counts": {
+    "LDG.E.CONSTANT": 24576,
+    "STG.E": 24576
+  },
+  "metrics": [
+    {
+      "name": "meas__sectors_per_request",
+      "value": 4.0,
+      "unit": "",
+      "source": "NVBit 地址插桩后直接计数（对应 ncu l1tex__average_t_sectors_per_request）",
+      "note": "全量（49152 条 warp 指令记录）；每个 sector 32B",
+      "provenance": "measured"
+    },
+    {
+      "name": "meas__coalescing_efficiency_pct",
+      "value": 100.0,
+      "unit": "%",
+      "source": "每 warp 指令：真正所需字节 / 搬运的 sector 字节",
+      "note": "100% 表示无浪费；<50% 通常是跨步/未对齐访问",
+      "provenance": "measured"
+    },
+    {
+      "name": "meas__trace_working_set_mb",
+      "value": 2.097,
+      "unit": "MB",
+      "source": "去重后的 32B sector 数 × 32B",
+      "note": "全量（49152 条 warp 指令记录）；用于判断工作集是否超过 L2",
+      "provenance": "measured"
+    },
+    {
+      "name": "meas__trace_records",
+      "value": 49152.0,
+      "unit": "",
+      "source": "轨迹里的 warp 级访存指令执行记录数（**全部**访存类型）",
+      "note": "全量（49152 条 warp 指令记录）",
+      "provenance": "measured"
+    },
+    {
+      "name": "meas__trace_records_global",
+      "value": 49152.0,
+      "unit": "",
+      "source": "其中属于全局口径（LDG/STG）的记录数 —— DRAM/L2 统计的分母",
+      "note": "轨迹指纹 04acb8c17eeb6f01（轨迹带结束标记（完整））；全局口径只用 LDG/STG（49152/49152 条）；没有被排除的记录。共享/本地访存与 L2↔DRAM 无关，混进来会把合并效率算成 >100%",
+      "provenance": "measured"
+    },
+    {
+      "name": "est__l2_hit_rate_l2only_pct",
+      "value": 66.7,
+      "unit": "%",
+      "source": "集合相联 LRU 模型（L2=72 MiB, line=32B, 16way）",
+      "note": "**上界口径**：所有访问都当到达 L2，会把 L1 命中误记为 L2 命中（高估）",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__l2_hit_rate_with_l1_pct",
+      "value": 66.7,
+      "unit": "%",
+      "source": "先过 per-SM L1（128 KiB, 4way, line=32B）再过 L2（72 MiB, 16way）",
+      "note": "比上界口径更接近真实；两种口径之差就是 L1 吸收了多少；SM id 由 CTA 近似分配（官方 mem_trace 不输出 SM id），故『先过 L1』口径仅供参考",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dram_bytes_per_launch_trace",
+      "value": 0.699,
+      "unit": "MB",
+      "source": "模型算出的 L2 miss sector × 32B × (grid/blocks_traced) / launches",
+      "note": "**地址部分是 measured 级算术**（sector 由地址现算，可逐条复核）；只有「哪些访问命中 L2」是模型（LRU + 相联度），所以整体是 estimated。与 NVML 代理是两条独立路径：一致说明结论稳，不一致要查采样代表性",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dram_bytes_per_launch_trace_bounds",
+      "value": 0.699,
+      "unit": "MB",
+      "source": "替换策略下界（强制缺失 0.699 MB）~ 上界（完全不复用 2.097 MB）",
+      "note": "同一份轨迹的**模型影响范围**：真实值一定落在两者之间；界很宽说明结论对缓存模型敏感，要换口径或加约束（例如把工作集压到 L2 以内）",
+      "provenance": "estimated"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+Kernoscope 0.2.0 能力自检：本机最高可用层 = 3 (instrumented)
+  这一层能给：指令级：访存轨迹（sectors/request、L2 命中模型）、动态指令数、发射槽利用率上界
+  再加 4 层（counters）能多给：与 ncu 同源的硬件计数器：精确 DRAM 字节、各 pipe 利用率、stall 周期细分
+    需要的依赖：ncu 可用权限（CAP_SYS_ADMIN / RmProfilingAdminOnly=0）
+
+能用它回答的问题（yes=能答 / weak=能答但口径更弱 / no=不答）：
+  [ yes] kernel_time            哪个 kernel 最耗时、每次跑多久
+  [ yes] launch_configs         同名 kernel 有几组 launch 配置，各自多快
+  [ yes] static_resources       静态寄存器/共享内存，以及谁是 occupancy 限制因素
+  [ yes] theoretical_occupancy  occupancy 理论上界是多少
+  [ yes] device_busy            这段时间 GPU 显存子系统有多忙（实测）
+  [weak] dram_bytes             DRAM 搬了多少字节 / 是不是 DRAM bound（NVML 代理口径）
+  [weak] roofline               离 roofline 多远、compute 还是 memory bound
+  [  no] achieved_occupancy     实际达到的 occupancy（不是上界）
+         no 的原因：no_occupancy_probe — 没跑 occupancy 探针：实际达到的 occupancy 需要 (smid, globaltimer) 探针
+         怎么办：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）（代价 ≈600s）
+  [  no] dram_bytes_trace       DRAM 字节的第二条口径（访存轨迹 + 缓存模型）
+         no 的原因：no_memtrace — 没有提供轨迹文件：加 --ks-memtrace <trace> 换轨迹口径
+         怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响（代价 ≈600s）
+  [  no] issue_slot             发射槽用了多少、瓶颈方向是 latency 还是 throughput
+         no 的原因：no_instr_hist — 没有提供指令直方图：加 --ks-instr-hist <file>
+         怎么办：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界（代价 ≈600s）
+  [  no] l2_locality            L1/L2 命中率与工作集是否驻留
+         no 的原因：no_memtrace — 没有提供轨迹文件：加 --ks-memtrace <trace> 换轨迹口径
+         怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响（代价 ≈600s）
+  [  no] static_mix             静态 SASS 指令混合（哪些指令占多数）
+         no 的原因：no_static_input — 没有 cubin/.so：加 --ks-cubin <file> 才能给静态指令混合
+         怎么办：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS（代价 需人工）
+  [  no] stall_breakdown        warp 到底在等什么（stall 周期细分）
+         no 的原因：counters_denied — 硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字
+  [  no] exact_dram             DRAM 字节/L2 命中率的精确值（与 ncu 同源）
+         no 的原因：counters_denied — 硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字
+  [  no] pipe_utilization       各 pipe（FP32/INT/Tensor）的动态利用率
+         no 的原因：counters_denied — 硬件计数器不可用（状态 denied）：这一项与 ncu 同源，本工具不给替代数字
+  [  no] nvlink                 NVLink 的流量与利用率
+         no 的原因：no_nvlink — NVLink 计数不可得（单卡实例上这个问题本来就不适用）
+
+下一步（按解锁的价值/代价排序）：
+  - 解锁 1 个问题（static_mix），代价 需人工：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享内存/SASS
+      kernoscope --ks-cubin build/app.so ...
+  - 解锁 2 个问题（dram_bytes_trace, l2_locality），代价 ≈600s：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗口构成影响
+      kernoscope --ks-memtrace ks-memtrace.txt ...
+  - 解锁 1 个问题（issue_slot），代价 ≈600s：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发射槽利用率上界
+      kernoscope --ks-instr-hist opcode_hist.txt ...
+  - 解锁 1 个问题（achieved_occupancy），代价 ≈600s：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupancy 传进来（需要 NVBit）
+      kernoscope occupancy --records <probe-records> -o occ.json
+
+注：本次未做计数器实测探测（静态推断）：要实测结论请加 --probe

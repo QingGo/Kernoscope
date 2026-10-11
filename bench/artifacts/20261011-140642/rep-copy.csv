@@ -1,0 +1,39 @@
+kernel,section,section_provenance,metric,value,unit,provenance,resolution,source,reason,refusal_code,refusal_observed,refusal_threshold,refusal_remedy,note
+"copy_k(const float *, float *, long)",Duration,exact,gpu__time_duration.sum,7946.8345,ms,exact,,CUPTI activity timestamps (nsys sqlite),,,,,,
+"copy_k(const float *, float *, long)",Duration,exact,ks__launch_time_mean,0.6408,ms,exact,,CUPTI activity timestamps,,,,,,
+"copy_k(const float *, float *, long)",Duration,exact,ks__launch_time_min,0.6335,ms,exact,,CUPTI activity timestamps,,,,,,
+"copy_k(const float *, float *, long)",Duration,exact,ks__launch_time_max,0.6587,ms,exact,,CUPTI activity timestamps,,,,,,
+"copy_k(const float *, float *, long)",Duration,exact,ks__launch_count,12402,,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__grid_size,1024,,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__block_size,256,,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__thread_count,262144,,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__registers_per_thread,32,,exact,,CUPTI activity (nsys),,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,ks__registers_used_for_occupancy,32,,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__shared_mem_per_block_static,0,B,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__shared_mem_per_block_dynamic,0,B,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,launch__local_mem_per_thread,0,B,exact,,CUPTI activity,,,,,,
+"copy_k(const float *, float *, long)",LaunchStats,exact,ks__cuda_graph_capture,yes,,exact,,CUPTI gridId != 0,,,,,,
+"copy_k(const float *, float *, long)",Occupancy,exact,ks__theoretical_occupancy_pct,100.0,%,exact,,arithmetic from CUPTI stats + sm_89 limits,,,,,,
+"copy_k(const float *, float *, long)",Occupancy,exact,ks__blocks_per_sm,6,,exact,,arithmetic (theoretical),,,,,,
+"copy_k(const float *, float *, long)",Occupancy,exact,ks__warps_per_sm,48,,exact,,arithmetic (theoretical),,,,,,
+"copy_k(const float *, float *, long)",Occupancy,exact,ks__occupancy_limiter,threads+warps,,exact,,arithmetic (theoretical),,,,,,并列的限制因素用 + 连接
+"copy_k(const float *, float *, long)",Occupancy,exact,sm__maximum_warps_per_active_cycle_pct,,,unavailable,,ncu computes this from hardware counters,"requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports ERR_NVGPUCTRPERM",counters_denied,,,计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu,
+"copy_k(const float *, float *, long)",SpeedOfLight,unavailable,est__achieved_tflops,,,unavailable,,,"workload not provided: pass --ks-gemm M,N,K or --ks-flops/--ks-bytes (plus --ks-calibration machine-profile.json for measured peaks)",no_workload,"{""peaks_provided"": true}",,"给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes",
+"copy_k(const float *, float *, long)",SpeedOfLight,unavailable,sm__throughput.avg.pct_of_peak_sustained_elapsed,,,unavailable,,,"requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports ERR_NVGPUCTRPERM",counters_denied,,,计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu,
+(device),DeviceStatistics,estimated,meas__nvml_mem_busy_mean_pct,70.2,%,measured,1 %（整数百分比）,NVML utilization.memory（显存子系统忙碌时间占比，管理计数器，免 admin）,,,,,,区间平均；是「显存子系统忙碌占比」，不是 DRAM 吞吐本身。读数 0.0% 只说明低于分辨率下限，不等于「DRAM 完全没动」；必须让 GPU 保持饱和，否则会被宿主间隙稀释（实测 96.8% vs 6.3%）
+(device),DeviceStatistics,estimated,est__dram_busy_equivalent_gbs,639.9,GB/s,estimated,1 %,"NVML mem_util × 本机实测峰值 912 GB/s（bench/artifacts/20261011-140642/machine-profile.json @ 2026-10-11 14:06:58, dtype=bf16, bw=912 GB/s, compute=163.5 TFLOP/s, 累加口径=bf16 (fp32 accumulate), 口径离散=3.9%）",,,,,,等效带宽口径；与按字节/时间的口径略有差异
+(device),DeviceStatistics,estimated,meas__sm_clock_mean_mhz,2442.4,MHz,measured,1 MHz / 1 W（驱动报数粒度）,nvidia-smi / NVML（管理计数器，免 admin）,,,,,,
+(device),DeviceStatistics,estimated,meas__sm_clock_max_mhz,2730.0,MHz,measured,1 MHz / 1 W（驱动报数粒度）,nvidia-smi / NVML（管理计数器，免 admin）,,,,,,
+(device),DeviceStatistics,estimated,meas__power_max_w,233.7,W,measured,1 MHz / 1 W（驱动报数粒度）,nvidia-smi / NVML（管理计数器，免 admin）,,,,,,
+(device),DeviceStatistics,estimated,meas__device_energy_j,2039.702,J,measured,1 mJ,NVML total energy accumulator,,,,,,ncu 不提供能耗指标
+(device),DramTraffic,estimated,est__dram_bytes_total,7299074.8,MB,estimated,1 %,NVML memory-busy time × measured peak bandwidth（对应 ncu dram__bytes.sum）,,,,,,窗口已按首个/末个忙碌采样点裁到稳态段（--ks-window auto）：参与积分 8.4 s，裁掉约 3.1 s 启动/JIT/空闲；用 --ks-window full 可关闭；采样周期 200 ms、区间平均（utilization.memory 分辨率 1 个百分点）；字节 = Σ(mem_util×Δt)×实测峰值带宽
+(device),DramTraffic,estimated,est__dram_bytes_per_launch,588.54,MB,estimated,归因上偏估计 +0 %,窗口内字节 ÷ 窗口内 launch 数（12402；整段运行匹配到 12402 个）（对应 ncu dram__bytes.sum 的按 launch 口径）,,,,,,仅在『被匹配 kernel 占窗口 ≥95% + 窗口覆盖率 ≥80% + 分母与分子覆盖同一窗口』时成立（前提②见 ks__matched_kernel_kernel_share_pct）；分母 = 窗口内等效 launch 数 12402（整段运行匹配到 12402 个；窗口 8.4 s，比整段短 27%）；offset ±1 采样周期下的计数区间 12401.9…12402；launch 时间戳与采样时钟的推导偏移 +26780691.8 s、速率比 1.006
+(device),DramTraffic,estimated,est__dram_throughput_pct_of_peak,95.2,%,estimated,1 %,NVML memory-busy 占比（对应 ncu dram__throughput.avg.pct_of_peak_sustained_elapsed）,,,,,,忙碌时间占比口径，与按字节/时间的口径略有差异
+(device),DramTraffic,estimated,ks__sampler_window_coverage_pct,95.2,%,derived,1 个采样点,采样窗中 SM≥5% 或显存≥20% 的采样点占比,,,,,,前提①「窗口被被测负载主导」：<80% 不给 per-launch 归因，<50% 连总量也不给
+(device),DramTraffic,estimated,ks__matched_kernel_kernel_share_pct,100.0,%,derived,0.1 %,被匹配 kernel 的 gpu__time_duration.sum ÷ 窗口内**所有** kernel 的 GPU 时间（7.95 s / 7.95 s）,,,,,,前提②「窗口被被匹配的 kernel 主导」：<95% 不给 per-launch 归因。空闲时段贡献 0 字节，所以判据用内核时间份额而不是墙钟份额：单 kernel 的窗口无论有多少空闲都是 100%
+(device),DramTraffic,estimated,ks__matched_kernel_window_share_pct,94.5,%,derived,0.1 %,被匹配 kernel 的 GPU 时间 ÷ 参与积分的窗口长度（7.95 s / 8.4 s）,,,,,,与覆盖率同量纲的对照量（95% 门槛用的是内核时间份额）；通常 ≤ 覆盖率，差值就是窗口里的空闲；本次分子含窗口外的同名 launch（窗口被裁过），所以它是**上界**，可能高于覆盖率，不能当作保守估计
+(device),DramTraffic,estimated,ks__attribution_bias_estimate_pct,0.0,%,derived,0.1 %,100×(1/内核时间份额 − 1)：把窗口总量归因到单个 kernel 时**归因本身**引入的上偏估计,,,,,,实测校验：k_fused 内核时间份额 44.9% → 估计 +123%，而那次观测误差是 +146.9% —— 观测值比估计更高，因为该 kernel 的字节密度低于窗口里其他 kernel。所以这是**估计而非严格上界**：字节强度不一致的混合窗口必须换轨迹口径
+(device),DramTraffic,estimated,ks__window_busy_segments,1.0,段,derived,1 段,窗口里「连续忙碌期」的段数（段间 ≥2 个空闲采样点才算分开）,,,,,,多段 ⇒ 窗口可能是多个阶段/变体拼接（例如先跑正确性再跑性能、依次跑 v1/v2/v3），此时 per-launch 归因需谨慎：这是启发式信号，不是判据
+(device),DramTraffic,estimated,ks__dram_window_mem_busy_mean_pct,95.2,%,derived,1 %,参与积分窗口内 NVML utilization.memory 的区间平均（**被积函数的均值**）,,,,,,这就是摘要里那个「窗口显存忙碌」，也是字节估算真正用到的那个数；整进程均值另见 meas__nvml_mem_busy_mean_pct，两者不可互换
+(device),DramTraffic,estimated,est__dram_bytes_per_launch_trace,,,unavailable,模型量,访存轨迹模型（L2 miss sector × 32B × grid/blocks_traced / launches）,未提供访存轨迹：加 --ks-memtrace <trace> 可换用轨迹口径，在 NVML 代理口径不成立时仍能完成账本对拍,trace_unavailable,"{""trace_bytes_per_launch"": null}",,轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel,
+(device),DramTraffic,estimated,est__dram_vs_ledger_err_pct,9.6,%,estimated,归因上偏估计 +0 %,（估算 − 账本）/ 账本，同为「每次 launch」口径；实际口径：NVML 代理 per-launch,,,,,,账本 536.9 MB；对拍常用 |误差| < 10% 作为验收线

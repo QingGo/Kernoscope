@@ -1,0 +1,13 @@
+date: 2026-10-11T14:06:42+08:00
+host: <host>
+uname: Linux <host> 5.15.0-94-generic #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux
+revision: 010dcdc66cec0172bd37a6a11d7b62378309af51
+revision_source: git
+revision_dirty: no
+source_sha256: 9978e7b7348667d1
+kernoscope: kernoscope 0.2.0
+python: Python 3.12.3
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0
+nsys: NVIDIA Nsight Systems version 2025.3.1.0
+nvidia-smi: NVIDIA GeForce RTX 4090, 580.105.08, 8.9
+nvbit: <workdir>/lab/nvbit_release_x86_64

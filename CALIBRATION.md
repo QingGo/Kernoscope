@@ -26,23 +26,23 @@ python tools/machine-profile.py --out bench/machine-profile.json
   "schema_version": 2,
   "gpu": "NVIDIA GeForce RTX 4090",
   "torch": "2.12.1+cu130",
-  "ts": "2026-10-11 09:45:52",
+  "ts": "2026-10-11 14:06:58",
   "tool": "tools/machine-profile.py",
   "measured_dram": {
-    "copy_gbs": 910.0,
-    "read_gbs": 907.5,
-    "write_gbs": 940.6
+    "copy_gbs": 911.8,
+    "read_gbs": 904.4,
+    "write_gbs": 940.0
   },
   "l2_info": {
     "l2_resident_max_mb": 64,
     "l2_drop_mb": 96,
-    "l2_read_peak_gbs": 2195.8
+    "l2_read_peak_gbs": 2167.5
   },
   "measured_matmul_tflops": {
     "torch.bfloat16": {
-      "tflops": 163.3,
+      "tflops": 163.5,
       "size": 16384,
-      "ms": 53.8628,
+      "ms": 53.8077,
       "acc_caliber": "bf16 (fp32 accumulate)",
       "precision_settings": {
         "allow_fp16_reduced_precision_reduction": true,
@@ -53,40 +53,40 @@ python tools/machine-profile.py --out bench/machine-profile.json
       "tflops_protocol": "default",
       "tflops_is_variant_reading": true,
       "caliber_variants_tflops": {
-        "default": 163.3,
-        "reduced_precision_reduction_off": 163.3,
-        "fp32_ieee": 156.8
+        "default": 163.5,
+        "reduced_precision_reduction_off": 163.5,
+        "fp32_ieee": 157.1
       },
       "caliber_probe_size": 16384,
-      "caliber_spread_pct": 4.0,
+      "caliber_spread_pct": 3.9,
       "caliber_distinguishable": true
     },
     "torch.float16": {
-      "tflops": 159.5,
-      "size": 8192,
-      "ms": 6.8922,
+      "tflops": 155.1,
+      "size": 4096,
+      "ms": 0.8859,
       "acc_caliber": "fp16 (fp32 accumulate; 允许 reduced-precision reduction)",
       "precision_settings": {
-        "allow_fp16_reduced_precision_reduction": false,
+        "allow_fp16_reduced_precision_reduction": true,
         "allow_tf32": false,
-        "fp32_precision": "none",
+        "fp32_precision": "ieee",
         "float32_matmul_precision": null
       },
-      "tflops_protocol": "reduced_precision_reduction_off",
+      "tflops_protocol": "fp32_ieee",
       "tflops_is_variant_reading": true,
       "caliber_variants_tflops": {
-        "default": 158.2,
-        "reduced_precision_reduction_off": 159.5,
-        "fp32_ieee": 159.5
+        "default": 154.9,
+        "reduced_precision_reduction_off": 140.8,
+        "fp32_ieee": 155.1
       },
-      "caliber_probe_size": 8192,
-      "caliber_spread_pct": 0.8,
-      "caliber_distinguishable": false
+      "caliber_probe_size": 4096,
+      "caliber_spread_pct": 9.2,
+      "caliber_distinguishable": true
     },
     "torch.float32": {
-      "tflops": 53.8,
+      "tflops": 53.9,
       "size": 8192,
-      "ms": 20.4247,
+      "ms": 20.4146,
       "acc_caliber": "fp32 (fp32 accumulate)",
       "precision_settings": {
         "allow_fp16_reduced_precision_reduction": true,
@@ -97,35 +97,35 @@ python tools/machine-profile.py --out bench/machine-profile.json
       "tflops_protocol": "fp32_ieee",
       "tflops_is_variant_reading": true,
       "caliber_variants_tflops": {
-        "default": 52.4,
+        "default": 52.7,
         "reduced_precision_reduction_off": 53.1,
-        "fp32_ieee": 53.8
+        "fp32_ieee": 53.9
       },
       "caliber_probe_size": 8192,
-      "caliber_spread_pct": 2.6,
+      "caliber_spread_pct": 2.2,
       "caliber_distinguishable": true
     }
   },
   "clocks_during_measurement": {
-    "sm_clock_min": 1860.0,
-    "sm_clock_max": 2535.0,
-    "sm_clock_mean": 2331.8,
-    "power_max": 455.74,
-    "util_mean": 89.5,
-    "n_samples": 11
+    "sm_clock_min": 1785.0,
+    "sm_clock_max": 2670.0,
+    "sm_clock_mean": 2319.0,
+    "power_max": 464.09,
+    "util_mean": 86.4,
+    "n_samples": 10
   },
   "bandwidth_sweep": [
     {
       "size_mb": 2,
-      "copy_gbs": 330.5636837471004,
-      "read_gbs": 123.75246283167994,
-      "write_gbs": 199.7693234284287
+      "copy_gbs": 360.6341790014811,
+      "read_gbs": 119.54766477411596,
+      "write_gbs": 198.85197930812856
     },
     {
       "size_mb": 4,
-      "copy_gbs": 771.9574267004622,
-      "read_gbs": 253.06808425323084,
-      "write_gbs": 408.08260487228125
+      "copy_gbs": 722.193654164608,
+      "read_gbs": 250.36689055873336,
+      "write_gbs": 404.8543354342409
     },
     {
       "…": "共 10 个尺寸，明细见产物"
@@ -134,7 +134,7 @@ python tools/machine-profile.py --out bench/machine-profile.json
 }
 ```
 
-（以上是 [`bench/artifacts/20261011-094535/machine-profile.json`](bench/artifacts/) 的节选，**由该产物渲染**（`tools/gen_calibration_excerpt.py`）；原始产物与 `bandwidth_sweep` 明细见同一目录。新的 bench 运行会让这一段与门禁一起更新。）
+（以上是 [`bench/artifacts/20261011-140642/machine-profile.json`](bench/artifacts/) 的节选，**由该产物渲染**（`tools/gen_calibration_excerpt.py`）；原始产物与 `bandwidth_sweep` 明细见同一目录。新的 bench 运行会让这一段与门禁一起更新。）
 <!-- calib-excerpt:end -->
 
 ## 为什么标定必须记录"累加口径"
@@ -156,11 +156,11 @@ matmul 的 TFLOP/s 不是机器常数，它取决于**累加口径**：fp16/bf16
 
 | dtype | 头条 TFLOP/s | 头条来自哪个变体 | 三个口径变体的读数 | 最大相对差 | 可分辨（≥2%） |
 |---|---|---|---|---|---|
-| `torch.bfloat16` | **163.3** | `default` | default 163.3 / reduced_precision_reduction_off 163.3 / fp32_ieee 156.8 | 4.0% | **是** |
-| `torch.float16` | **159.5** | `reduced_precision_reduction_off` | default 158.2 / reduced_precision_reduction_off 159.5 / fp32_ieee 159.5 | 0.8% | **否** |
-| `torch.float32` | **53.8** | `fp32_ieee` | default 52.4 / reduced_precision_reduction_off 53.1 / fp32_ieee 53.8 | 2.6% | **是** |
+| `torch.bfloat16` | **163.5** | `default` | default 163.5 / reduced_precision_reduction_off 163.5 / fp32_ieee 157.1 | 3.9% | **是** |
+| `torch.float16` | **155.1** | `fp32_ieee` | default 154.9 / reduced_precision_reduction_off 140.8 / fp32_ieee 155.1 | 9.2% | **是** |
+| `torch.float32` | **53.9** | `fp32_ieee` | default 52.7 / reduced_precision_reduction_off 53.1 / fp32_ieee 53.9 | 2.2% | **是** |
 
-（本表由 `bench/artifacts/20261011-094535/machine-profile.json` 渲染。同一 dtype 的三口径最大相对差在不同产物里可以跨过 2% 门槛 —— 跨已登记产物看：`torch.bfloat16` 3.8%~4.0%；`torch.float16` 0.8%~13.2%；`torch.float32` 0.4%~2.6%。所以「口径能不能被分辨」本身是**测量结果**，不是常量。本产物的三个 dtype 头条**都等于**某个变体读数 ✓。）
+（本表由 `bench/artifacts/20261011-140642/machine-profile.json` 渲染。同一 dtype 的三口径最大相对差在不同产物里可以跨过 2% 门槛 —— 跨已登记产物看：`torch.bfloat16` 3.8%~4.0%；`torch.float16` 0.8%~13.2%；`torch.float32` 0.4%~2.6%。所以「口径能不能被分辨」本身是**测量结果**，不是常量。本产物的三个 dtype 头条**都等于**某个变体读数 ✓。）
 <!-- calib-caliber:end -->
 
 报告里会带上 `caliber_spread_pct` 与 `caliber_distinguishable`，让读者自己判断。

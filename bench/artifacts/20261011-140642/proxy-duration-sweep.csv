@@ -1,0 +1,5 @@
+target_s,coverage_pct,mem_busy_pct,window_share_pct,kernel_share_pct,bias_est_pct,est_per_launch_mb,ledger_per_launch_mb,err_pct,basis
+1.2,71.4,71.4,87.9,100.0,0.0,,536.8709,,unavailable
+3,88.2,88.2,88.5,100.0,0.0,583.2,536.8709,8.6,nvml
+8,95.2,95.2,94.8,100.0,0.0,587.39,536.8709,9.4,nvml
+20,98.0,98.0,97.1,100.0,0.0,590.11,536.8709,9.9,nvml

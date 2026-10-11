@@ -1,0 +1,136 @@
+{
+  "kernel": "copy_k(float const*, float*, long)",
+  "launches": 120,
+  "warp_instrs": 2205941760,
+  "thread_blocks": 122880,
+  "duration_ns": 3000000000.0,
+  "sm_count": 128,
+  "clock_mhz": 2450.0,
+  "issue_slots": 3763200000000.0,
+  "issue_slot_utilization_pct": 0.05861877551020408,
+  "issued_ipc_per_sm": 0.0023447510204081634,
+  "category_pct": {
+    "alu": 73.7970654971238,
+    "memory": 22.816484018434412,
+    "control": 3.074877729046825,
+    "sync": 0.17825378139401885,
+    "fp": 0.13331897400094325
+  },
+  "stall_direction": "偏延迟受限：发射槽只用掉约 0%、显存也不忙 ⇒ 大部分时间在等（长依赖链 / 访存延迟 / 同步），需要看 ILP、占用率与访存模式",
+  "available": true,
+  "unavailable_reason": "",
+  "opcode_counts": {
+    "BRA": 64880640,
+    "BSSY": 1966080,
+    "BSYNC": 1966080,
+    "EXIT": 2949120,
+    "F2I.FTZ.U32.TRUNC.NTZ": 983040,
+    "I2F.U32.RP": 974848,
+    "IADD3": 637992960,
+    "IADD3.X": 128778240,
+    "IMAD": 2949120,
+    "IMAD.HI.U32": 1966080,
+    "IMAD.IADD": 1966080,
+    "IMAD.MOV": 1966080,
+    "IMAD.MOV.U32": 195624960,
+    "IMAD.SHL.U32": 983040,
+    "IMAD.WIDE.U32": 3932160,
+    "IMAD.X": 504299520,
+    "ISETP.GE.AND.EX": 63897600,
+    "ISETP.GE.U32.AND": 66846720,
+    "ISETP.GE.U32.AND.EX": 983040,
+    "ISETP.NE.AND.EX": 983040,
+    "ISETP.NE.U32.AND": 2949120,
+    "LDG.E.CONSTANT": 251658240,
+    "LOP3.LUT": 4915200,
+    "MUFU.RCP": 983040,
+    "S2R": 1966080,
+    "SHF.L.U32": 983040,
+    "SHF.L.U64.HI": 1966080,
+    "STG.E": 251658240,
+    "ULDC.64": 983040,
+    "UMOV": 983040
+  },
+  "metrics": [
+    {
+      "name": "est__dynamic_warp_instructions",
+      "value": 2205941760.0,
+      "unit": "",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "动态指令构成：alu 73.8%、memory 22.8%、control 3.1%、sync 0.2%；发射槽上限 = SM 数 × 4 调度器 × 时钟 × 时长；动态指令数按 **warp 级**计（NVBit count_warp_level=1），因此这是发射槽占用的直接计数",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__issue_slot_utilization_pct",
+      "value": 0.1,
+      "unit": "%",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "**上界口径**：每 SM 4 个调度器、每周期各发 1 条；真实可用发射槽只会更少",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__issued_ipc_per_sm",
+      "value": 0.002,
+      "unit": "warp-instr/SM/cycle",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "同为上界口径",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__stall_direction",
+      "value": "偏延迟受限：发射槽只用掉约 0%、显存也不忙 ⇒ 大部分时间在等（长依赖链 / 访存延迟 / 同步），需要看 ILP、占用率与访存模式",
+      "unit": "",
+      "source": "由发射槽利用率 + 显存忙碌 + 指令构成推出的方向性判断",
+      "note": "**不是** ncu 的 stall 计数器细分（smsp__warp_issue_stalled_*）：这里只回答「到底发不出去还是在等数据」，且标 estimated",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__warp_instructions_per_launch",
+      "value": 18382848.0,
+      "unit": "",
+      "source": "NVBit opcode_hist 动态指令数 × 发射槽上限（128 SM × 4 调度器 × 2450 MHz × 3000.000 ms）",
+      "note": "共 120 次 launch",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dyn_instr_share_alu",
+      "value": 73.8,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dyn_instr_share_memory",
+      "value": 22.8,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dyn_instr_share_control",
+      "value": 3.1,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dyn_instr_share_sync",
+      "value": 0.2,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权",
+      "provenance": "estimated"
+    },
+    {
+      "name": "est__dyn_instr_share_fp",
+      "value": 0.1,
+      "unit": "%",
+      "source": "同一份动态计数的指令类别构成（类别规则与 SASS 静态混合一致）",
+      "note": "按 warp 级指令数加权",
+      "provenance": "estimated"
+    }
+  ]
+}

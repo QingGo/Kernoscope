@@ -19,7 +19,9 @@
 - **拒绝条目参与尺寸裁剪**：受限环境（无 nsys/NVBit/cubin/计数器）天然产生十几个拒绝码，
   过去只裁 `cmd` 子字段、条目本身不裁，包会常态化突破 4096 B 预算。现在有序降级里加了
   「处置文本截短 → 拒绝条目上限」，并把裁掉的 code 列进 `refusals_omitted`。
-- 裁剪顺序的注释与实现对齐；`write_packet` 不再额外追加换行（落盘字节数 == `packet_bytes`）。
+- 裁剪顺序的注释与实现对齐；`write_packet` 不再额外追加换行，**`--packet <路径>` 的落盘字节数
+  == `packet_bytes`**（`--packet -` 走 stdout，是流，按惯例补一个终止换行 ⇒ 重定向出来的
+  文件会多 1 B；两种路径都有测试钉住）。
 
 ### `kernoscope diff`
 

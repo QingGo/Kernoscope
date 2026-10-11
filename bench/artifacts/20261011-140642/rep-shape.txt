@@ -1,0 +1,146 @@
+Kernoscope 0.2.0 · 协议 e2426af6d919 · 层 3 (instrumented)
+------------------------------------------------------------------------------------------------
+[ok  ] 最耗时的是 copy_k(const float *, float *, long)（10.782 ms / 1050 次，占 kernel 时间 100.0%），进程内 kernel 时间合计 10.782 ms  (10.782 ms, exact)
+        前提 该 kernel 占全部 kernel 时间的比例：100.0%
+        前提 kernel 时间占进程 wall 的比例：0.3%
+        下一步：用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词
+[no  ] 不给数字：没有 NVML 采样点（关掉采样／不可用／稳态段短于 200 ms）
+        怎么办：确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段跑长到至少几个采样周期（…（代价 ≈20s）  [kernoscope --ks-window auto -- python bench_loop.py]
+[no  ] 不给数字：没有 NVML 采样点（关掉采样／不可用／稳态段短于 200 ms）
+        前提 被匹配 kernel 是否占窗口 kernel 时间 ≥95%：**无法判定**（门槛 95.0%） → **不满足**
+        怎么办：确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段跑长到至少几个采样周期（…（代价 ≈20s）  [kernoscope --ks-window auto -- python bench_loop.py]
+[no  ] 不给数字：访存轨迹给不出字节数
+        怎么办：轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --…（代价 ≈20s）
+[soft] 理论上界 100.0%；限制因素 threads+warps  (100.0 %, exact)
+        下一步：装上 NVBit 探针可拿到实测 occupancy（不只是上界）
+
+没测到什么（共 16 个指标，按原因归组）：
+  - 7 个 no_nvml_samples（没有 NVML 采样点（关掉采样／不可用／稳态段短于 200 ms））；怎么办：确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段跑长到至少几个采样周期（…（代价 ≈20s）
+  - 3 个 share_unknown（逐 launch 时长为空，份额无法判定）；怎么办：逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kern…（代价 ≈5s）
+  - 2 个 counters_denied（硬件计数器被权限/驱动策略拒绝）；怎么办：计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…
+  - 2 个 mixed_launch_config（同名 kernel 有多组 launch 配置，单值会误导）；怎么办：同名 kernel 有多组 launch 配置时我们不报单一数值（会误导多数 launch…（代价 ≈0）
+  - 1 个 no_workload（没有给工作量（FLOPs/bytes））；怎么办：给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops…（代价 ≈0）
+  - 1 个 trace_unavailable（访存轨迹给不出字节数）；怎么办：轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --…（代价 ≈20s）
+  - 本机缺件 no_instr_hist（没有提供指令直方图）；怎么办：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发…
+  - 本机缺件 no_memtrace（没有提供访存轨迹文件）；怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…
+  - 本机缺件 no_occupancy_probe（没跑 occupancy 探针）；怎么办：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…
+  - 本机缺件 no_static_input（没有提供 cubin/.so）；怎么办：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…
+
+本次代价：wall 4.115s · 包 4094B · 完整报告 563 KB · 1050 次 launch · 无本机误差带（跑 kernoscope selftest 后 diff 才有 MDD） · 包已按尺寸预算裁剪（unmeasured_examples, verdict_metrics, next_pointers）
+
+====================================================================================================
+完整报告（上面的判词都出自这里的数据；每个数字都带出处）
+====================================================================================================
+==PROF== Kernoscope 0.2.0 - provenance-honest profile (no performance counters required)
+==PROF== Target: bash bench/shape_sweep_target.sh bench/artifacts/.build/ledger_probe
+==PROF== DRAM 估算不可用：没有 NVML 采样点：采样被 --ks-no-nvml 关掉、采样器不可用，或这次运行的稳态段不足一个采样周期（200 ms）；缺少本机实测峰值带宽：先跑 tools/machine-profile.py，再加 --ks-calibration machine-profile.json（或 --ks-peak-gbp
+==PROF== Kernel time: 10.782 ms of 4114.828 ms wall (0.3%)
+==PROF== Window: mode=auto 采样 0 点 / 参与积分 0.0 s / 裁掉 0.0 s / 进程 wall 4.1 s
+==PROF== source[kernel activity]: nsys sqlite CUPTI_ACTIVITY_KIND_KERNEL (no counters needed)
+==PROF== source[device counters]: nvidia-smi (energy/PCIe/mem-busy are management counters, available without admin)
+==PROF== source[static]: not used
+==PROF== source[peaks]: not provided
+
+Kernel: copy_k(const float *, float *, long)
+  nsys short name: copy_k
+  1050 launch(es), 10.7819 ms total, 0.0103 ms mean
+  ⚠ 3 组 launch 配置（grid1024x1x1 block256x1x1 smem0, grid256x1x1 block256x1x1 smem0, grid64x1x1 block256x1x1 smem0）：逐组读数见 LaunchConfigs
+
+  Section: Duration                           [exact]
+    gpu__time_duration.sum                                10.7819 ms       [exact]
+    ks__launch_time_mean                                   0.0103 ms       [exact]  (**多组 launch 配置的混合均值**，不可当作某一组配置的读数)
+    ks__launch_time_min                                    0.0095 ms       [exact]
+    ks__launch_time_max                                    0.0118 ms       [exact]
+    ks__launch_count                                         1050          [exact]
+    ks__launch_config_count                                     3          [exact]  (逐组读数见 LaunchConfigs section)
+
+  Section: LaunchStats                        [exact] (+2 n/a)
+    launch__grid_size                                         n/a          [unavailable]  [mixed_launch_config] 该 kernel 有 3 组不同 launch 配置（grid=64/256/1024）：单一数值会误导 2/3 的 launch，故报 n/a；逐组读数见 LaunchConfigs section
+        observed configs=3, grid_sizes=[64, 256, 1024]  (downgraded: degraded)
+        fix: 同名 kernel 有多组 launch 配置时我们不报单一数值（会误导多数 launch）：逐组读数见 LaunchConfigs section；只关心一组时用 -c/-k 固定它  (代价≈≈0)
+    launch__block_size                                        n/a          [unavailable]  [mixed_launch_config] 该 kernel 有 3 组不同 launch 配置（block=256）：单一数值会误导，故报 n/a
+        observed configs=3, block_sizes=[256]  (downgraded: degraded)
+        fix: 同名 kernel 有多组 launch 配置时我们不报单一数值（会误导多数 launch）：逐组读数见 LaunchConfigs section；只关心一组时用 -c/-k 固定它  (代价≈≈0)
+    ks__grid_sizes_observed                           64|256|1024          [exact]  (取值集合口径；逐组时长与 occupancy 见 LaunchConfigs section)
+    ks__block_sizes_observed                                  256          [exact]
+    launch__registers_per_thread                               32          [exact]
+    ks__registers_used_for_occupancy                           32          [exact]
+    launch__shared_mem_per_block_static                         0 B        [exact]
+    launch__shared_mem_per_block_dynamic                        0 B        [exact]
+    launch__local_mem_per_thread                                0 B        [exact]
+    ks__cuda_graph_capture                                    yes          [exact]
+    ks__dominant_config                            grid1024x1x1_block256x1x1_smem0          [exact]  (350/1050 次 launch；本节未标注逐组的数值均取这组配置)
+
+  Section: LaunchConfigs                      [exact]
+    ks__cfg_grid1024x1x1_block256x1x1_smem0__launch_time_mean_ms         0.0098 ms       [exact]
+    ks__cfg_grid1024x1x1_block256x1x1_smem0__launch_count            350          [exact]
+    ks__cfg_grid1024x1x1_block256x1x1_smem0__theoretical_occupancy_pct            100 %        [exact]
+    ks__cfg_grid256x1x1_block256x1x1_smem0__launch_time_mean_ms         0.0096 ms       [exact]
+    ks__cfg_grid256x1x1_block256x1x1_smem0__launch_count            350          [exact]
+    ks__cfg_grid256x1x1_block256x1x1_smem0__theoretical_occupancy_pct            100 %        [exact]
+    ks__cfg_grid64x1x1_block256x1x1_smem0__launch_time_mean_ms         0.0114 ms       [exact]
+    ks__cfg_grid64x1x1_block256x1x1_smem0__launch_count            350          [exact]
+    ks__cfg_grid64x1x1_block256x1x1_smem0__theoretical_occupancy_pct            100 %        [exact]
+
+  Section: Occupancy                          [exact] (+1 n/a)
+    ks__theoretical_occupancy_pct                             100 %        [exact]
+    ks__blocks_per_sm                                           6          [exact]
+    ks__warps_per_sm                                           48          [exact]
+    ks__occupancy_limiter                           threads+warps          [exact]  (并列的限制因素用 + 连接；本节按主导配置 grid1024x1x1_block256x1x1_smem0 计算，逐组见 LaunchConfigs)
+    sm__maximum_warps_per_active_cycle_pct                    n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+  Section: SpeedOfLight                       [unavailable] (+2 n/a)
+    est__achieved_tflops                                      n/a          [unavailable]  [no_workload] workload not provided: pass --ks-gemm M,N,K or --ks-flops/--ks-bytes (plus --ks-calibration machine-profile.json for measured peaks)
+        observed peaks_provided=False  (downgraded: degraded)
+        fix: 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes  (代价≈≈0)
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            n/a          [unavailable]  [counters_denied] requires GPU hardware performance counters, which are restricted here (RmProfilingAdminOnly=1 and no CAP_SYS_ADMIN/CAP_PERFMON in the container); CUPTI reports 
+        fix: 计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换用本工具的非计数器口径，或在有权限的机器上跑 ncu  (代价≈本机不可行)
+
+----------------------------------------------------------------------------------------------------
+Kernel: (device)
+  0 launch(es), 0.0000 ms total, 0.0000 ms mean
+
+  Section: DeviceStatistics                   [unavailable] (+1 n/a)
+    meas__nvml_mem_busy_mean_pct                              n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点：采样被关闭（--ks-no-nvml）、nvidia-smi/pynvml 不可用，或稳态段短于一个采样周期（200 ms）；没有它就无法给出显存忙碌代理
+        fix: 去掉 --ks-no-nvml 让设备级采样生效（代价接近 0：采样在后台线程里做）  (代价≈≈0)
+
+  Section: DramTraffic                        [unavailable] (+10 n/a)
+    est__dram_bytes_total                                     n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点：采样被 --ks-no-nvml 关掉、采样器不可用，或这次运行的稳态段不足一个采样周期（200 ms）；缺少本机实测峰值带宽：先跑 tools/machine-profile.py，再加 --ks-calibration machine-profile.json（或 --ks-peak-gbp
+        observed nvml_samples=0
+        fix: 确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段跑长到至少几个采样周期（每个 200 ms）  (代价≈20 秒)
+    est__dram_bytes_per_launch                                n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点：采样被 --ks-no-nvml 关掉、采样器不可用，或这次运行的稳态段不足一个采样周期（200 ms）；缺少本机实测峰值带宽：先跑 tools/machine-profile.py，再加 --ks-calibration machine-profile.json（或 --ks-peak-gbp
+        observed nvml_samples=0
+        fix: 确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段跑长到至少几个采样周期（每个 200 ms）  (代价≈20 秒)
+    est__dram_throughput_pct_of_peak                          n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点：采样被 --ks-no-nvml 关掉、采样器不可用，或这次运行的稳态段不足一个采样周期（200 ms）；缺少本机实测峰值带宽：先跑 tools/machine-profile.py，再加 --ks-calibration machine-profile.json（或 --ks-peak-gbp
+        observed nvml_samples=0
+        fix: 确认设备级采样开着（不要加 --ks-no-nvml），并把稳态段跑长到至少几个采样周期（每个 200 ms）  (代价≈20 秒)
+    ks__sampler_window_coverage_pct                           n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点（--ks-no-nvml 打开，或采样器不可用）：覆盖率无定义
+        observed nvml_samples=0
+        fix: 去掉 --ks-no-nvml 让设备级采样生效（代价接近 0：采样在后台线程里做）  (代价≈≈0)
+    ks__matched_kernel_kernel_share_pct                       n/a          [unavailable]  [share_unknown] 无法判定窗口主导性：报告里没有被匹配 kernel 的 GPU 时间（逐 launch 时长为空），per-launch 归因不可验证
+        observed matched_kernel_ns=0
+        fix: 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库  (代价≈5 秒)
+    ks__matched_kernel_window_share_pct                       n/a          [unavailable]  [share_unknown] 无法判定窗口主导性：报告里没有被匹配 kernel 的 GPU 时间（逐 launch 时长为空），per-launch 归因不可验证
+        observed matched_kernel_ns=0
+        fix: 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库  (代价≈5 秒)
+    ks__attribution_bias_estimate_pct                         n/a          [unavailable]  [share_unknown] 无法给出归因上偏估计：无法判定窗口主导性：报告里没有被匹配 kernel 的 GPU 时间（逐 launch 时长为空），per-launch 归因不可验证
+        observed matched_kernel_ns=0
+        fix: 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库  (代价≈5 秒)
+    ks__window_busy_segments                                  n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点（采样被关掉／不可用／稳态段短于一个 200 ms 采样周期）：窗口内统计量无定义
+        observed nvml_samples=0
+        fix: 去掉 --ks-no-nvml 让设备级采样生效（代价接近 0：采样在后台线程里做）  (代价≈≈0)
+    ks__dram_window_mem_busy_mean_pct                         n/a          [unavailable]  [no_nvml_samples] 没有 NVML 采样点（采样被关掉／不可用／稳态段短于一个 200 ms 采样周期）：窗口内统计量无定义
+        observed nvml_samples=0
+        fix: 去掉 --ks-no-nvml 让设备级采样生效（代价接近 0：采样在后台线程里做）  (代价≈≈0)
+    est__dram_bytes_per_launch_trace                          n/a          [unavailable]  [trace_unavailable] 未提供访存轨迹：加 --ks-memtrace <trace> 可换用轨迹口径，在 NVML 代理口径不成立时仍能完成账本对拍
+        observed trace_bytes_per_launch=None
+        fix: 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel  (代价≈20 秒)
+
+----------------------------------------------------------------------------------------------------
+
+Provenance summary: exact=28, unavailable=16
+Legend: exact=与 ncu 同源 | derived=本机实测标定/模型 | measured=我们的探针实测 | estimated=采样或代理(附误差) | unavailable=需要硬件计数器，只报 n/a
+Output(json): bench/artifacts/20261011-140642/rep-shape.ksreport.json
+Output(perfetto): bench/artifacts/20261011-140642/rep-shape.perfetto.json
+Open the timeline at https://ui.perfetto.dev -> Load trace -> the file above

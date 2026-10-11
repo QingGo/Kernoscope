@@ -317,8 +317,8 @@ def test_error_band_statement_matches_the_artifact():
     art = _newest()
     errs = [e for e in (_ledger_error(art, k) for k in ("copy", "read", "write"))
             if e is not None]
-    if len(errs) < 3:
-        pytest.skip(f"{art.name} 里没有三个已知答案微基准的误差")
+    if len(errs) < 2:
+        pytest.skip(f"{art.name} 里给数的已知答案微基准不足两个")
     low, high = min(errs), max(errs)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     ud = "\u2212"
@@ -434,11 +434,17 @@ def test_calibration_excerpt_gate_can_go_red(monkeypatch, tmp_path):
 
 
 def _bands_by_artifact() -> dict[str, str]:
+    """每份产物能算出的误差带（**有几个负载给数就用几个**）。
+
+    放宽到 `>= 2` 是因为拒绝是正常结果：某次运行里"只写"那行的 per-launch 可能因为
+    对齐自检没通过（`window_launch_unaligned`）而**拒绝给数** —— 那是 R-47 的修法在
+    正常工作，不该让整份产物的带消失（否则文档会被逼着引用一个不存在的数）。
+    """
     out: dict[str, str] = {}
     for art in _artifact_dirs():
         errs = [e for e in (_ledger_error(art, k) for k in ("copy", "read", "write"))
                 if e is not None]
-        if len(errs) == 3:
+        if len(errs) >= 2:
             out[art.name] = f"{min(errs):+.1f}% ~ {max(errs):+.1f}%"
     return out
 

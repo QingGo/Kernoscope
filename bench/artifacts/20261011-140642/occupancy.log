@@ -1,0 +1,14 @@
+make: Entering directory '<repo>/tools/probes'
+./occupancy_probe occupancy-records.txt
+GPU: NVIDIA GeForce RTX 4090  SM=128  warps/SM=48  arch=sm_89
+对照实验（无 smem 理论上限 12 blocks/SM；32KB smem 上限 3 blocks/SM）：
+  k_occ<0>（无 smem） 理论 12 blocks/SM (100.0%)  已采集 12288 个 block 记录
+  已写出 occupancy-records.txt（12288 条记录，理论 100.0%）
+  k_occ<32768>（32KB smem） 理论  3 blocks/SM (25.0%)  已采集 12288 个 block 记录
+  已写出 occupancy-records.txt.smem32k（12288 条记录，理论 25.0%）
+
+已写出 occupancy-records.txt（12288 条 block 记录）
+下一步:
+  kernoscope occupancy --from occupancy-records.txt --write-json occ-smem0.json
+  kernoscope occupancy --from occupancy-records.txt.smem32k --write-json occ-smem32k.json
+make: Leaving directory '<repo>/tools/probes'
