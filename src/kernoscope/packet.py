@@ -1176,7 +1176,19 @@ def _propagate_over_peak(verdicts: list[Verdict]) -> None:
     # 两边都拿不到身份时保守传播（宁可拒绝一个可疑的达成率，也不要放行一个物理不可能的）。
     op_k = op.owner_key or (op.facts or {}).get("kernel") or ""
     roof_k = roof.owner_key or (roof.facts or {}).get("kernel") or ""
-    if op_k and roof_k and op_k != roof_k:
+
+    def _same_owner(a: str, b: str) -> bool:
+        # `(device)` = **没有归属**的超峰（`ks__over_peak_warning` 只挂在设备级伪 kernel 上，
+        # `-i` 回读老报告时可达）。没有归属时**保守传播**：宁可拒绝一个可疑的达成率，
+        # 也不要放行一个物理不可能的（第七轮 X-14：W-12 让判词回来了，却把这条传播链弄断了 ——
+        # `owner_key="(device)"` 与真 kernel 名必然不同，于是 `--require-actionable roofline` 放绿）。
+        if not a or not b:
+            return True
+        if a == "(device)" or b == "(device)":
+            return True
+        return a == b
+
+    if not _same_owner(op_k, roof_k):
         return
     if roof.value is not None:
         roof.facts = {**roof.facts, "uncitable_value": roof.value}

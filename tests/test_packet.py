@@ -1245,3 +1245,25 @@ def test_conditional_answer_survives_the_packet_budget():
         trimmed = p["cost"].get("trimmed_ids") or []
         assert "facts_primary:cost_per_token" in trimmed, \
             f"facts 没了却查不到留痕：{p['cost'].get('trimmed')} / {trimmed}"
+
+
+def test_device_level_over_peak_poisons_the_kernel_roofline_conservatively():
+    """第七轮 X-14：W-12 让设备级超峰判词回来了，却把**传播链**弄断了。
+
+    没有归属的超峰（`(device)`）与真 kernel 名必然不同 ⇒ 旧逻辑判"不是同一个 kernel"、
+    不传播，于是 `--require-actionable roofline` 对一份"达成率物理不可能"的包 rc=0。
+    正确做法是**保守传播**（宁可拒绝一个可疑的达成率，也不要放行一个物理不可能的）。
+    """
+    from kernoscope.packet import build
+
+    dev = _KK("(device)", 1_000_000, [_KSec("SpeedOfLight", [
+        _KM("ks__over_peak_warning", 1.0, "", "derived"),
+    ])])
+    rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=False)
+    rep.kernels.append(dev)
+    p = build(rep)
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["status"] == "refused"
+    assert by_id["roofline"]["status"] == "refused", \
+        f"设备级超峰没有传播到 kernel 的 roofline：{by_id['roofline']}"
+    assert by_id["roofline"]["actionable"] is False

@@ -104,6 +104,22 @@ def _find_verdict(packet: dict[str, Any], vid: str) -> dict[str, Any] | None:
     return next((v for v in _verdicts(packet) if v.get("id") == vid), None)
 
 
+def _omitted_codes_truncated(packet: dict[str, Any]) -> tuple[bool, int]:
+    """包里"丢掉的拒绝码"列表有没有被自己的上限截断，以及截掉了多少。
+
+    为什么这决定了门禁能不能判通过（第七轮 X-16）：`refusals_omitted.codes` 最多列 4 个
+    （再多只给 `count`），受限期机器上十几个 code 时它是**常态**。于是"我在可见的那部分里
+    没找到 → 通过"这条推理是**错的**：13 个真实 code 查不到就被放绿了。截断时唯一诚实的结论是
+    "无法判定"，而不是"通过"。
+    """
+    omitted = packet.get("refusals_omitted") or {}
+    env_more = packet.get("environment_refusals_more") or {}
+    truncated = bool(omitted.get("codes_truncated")) or bool(env_more.get("codes_truncated"))
+    hidden = max(0, int(omitted.get("count") or 0) - len(omitted.get("codes") or []))
+    hidden += max(0, int(env_more.get("count") or 0) - len(env_more.get("codes") or []))
+    return truncated, hidden
+
+
 def _refusal_codes(packet: dict[str, Any]) -> set[str]:
     """包里**所有**位置出现过的拒绝码 —— `--forbid-code` 只认这个集合。
 
@@ -240,7 +256,20 @@ def _check_metric_rule(res: GateResult, *, op: str, better: str, name: str,
                 {"kernel": kname, "refusal": (m.get("refusal") or {}).get("code")}))
             res.passed = False
             continue
-        value = float(m["value"])
+        raw_value = m["value"]
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            # X-13（第七轮）：数值阈值打到**字符串取值**的指标上（`est__bound="memory"`、
+            # `ks__occupancy_limiter="registers"`）曾经是裸 `ValueError` traceback。
+            # 语义上这是**用法错误**（规则对这类指标无定义），与 `--max-metric X=abc` 同类 ⇒ rc=2；
+            # 同时记一条 failure，让 `--json` 里也能看到是哪一条指标、值是什么。
+            msg = (f"规则对指标 `{name}` 无定义：`{kname}` 的值是字符串 {raw_value!r}，"
+                   f"数值阈值只适用于数值型指标")
+            res.usage_errors.append(f"{op}-metric {name}: {msg}")
+            res.failures.append(Failure(check, msg, {"kernel": kname, "value": raw_value}))
+            res.passed = False
+            continue
         ok = value <= threshold if op == "max" else value >= threshold
         if not ok:
             res.failures.append(Failure(
@@ -318,6 +347,17 @@ def run_gate(packet: dict[str, Any], *, report: dict[str, Any] | None = None,
                    f"永远不会命中，静默放绿等于骗人）。{_codes_hint()}")
             res.usage_errors.append(f"forbid-code {code}: {msg}")
             res.failures.append(Failure(f"forbid-code {code}", msg))
+            res.passed = False
+            continue
+        if code not in codes and _omitted_codes_truncated(packet)[0]:
+            # 找不到 + 列表被截断 ⇒ **不能判通过**（X-16）。报文要把"为什么判不了"说清，
+            # 并给出最便宜的补法（把预算放宽或直接看完整报告）。
+            truncated, hidden = _omitted_codes_truncated(packet)
+            msg = (f"无法判定：包里丢掉的拒绝码列表被截断（还有约 {hidden} 个 code 未列出），"
+                   f"所以 `{code}` 没找到**不能**当作没出现。"
+                   f"补法：放宽决策包预算重跑采集，或直接对完整报告 `-o rep` 里的 refusals 判")
+            res.failures.append(Failure(f"forbid-code {code}", msg,
+                                        {"codes_truncated": truncated, "hidden_codes": hidden}))
             res.passed = False
             continue
         if code in codes:

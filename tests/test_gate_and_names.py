@@ -552,3 +552,56 @@ def test_strict_refuses_a_name_we_genuinely_cannot_produce(capsys):
                       "--screen", "off", "--strict", "--metrics",
                       "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed")
     assert rc == 2 and "给不出" in err
+
+
+# --------------------------------------------------------------------------
+# 第七轮 X-13 / X-14 / X-16：gate 的三条"能放绿或崩掉"的路径
+# --------------------------------------------------------------------------
+def test_numeric_threshold_on_a_string_valued_metric_is_a_usage_error(tmp_path, capsys):
+    """X-13：`--max-metric est__bound=1` 打到字符串取值的指标上曾经是**裸 ValueError traceback**。
+
+    数值阈值对这类指标无定义 ⇒ 与 `--max-metric X=abc` 同类的**用法错误 rc=2**；
+    `--json` 里能看出是哪条指标、值是什么。
+    """
+    packet, _ = _pipeline(tmp_path, capsys)
+    # 指标规则判的是**报告**（逐个 kernel 判），报文形状是 kernels[].sections[].metrics[]
+    report = {"kernels": [{"name": "k", "sections": [{"metrics": [
+        {"name": "est__bound", "value": "memory", "provenance": "estimated"}]}]}]}
+    f = tmp_path / "string-metric.report.json"
+    f.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+    rc, out, err = _run(capsys, "gate", "--packet", packet, "--report", str(f),
+                        "--max-metric", "est__bound=1", "--json")
+    assert rc == 2, (rc, out, err)
+    payload = json.loads(out)
+    assert payload["usage_errors"], payload
+    assert "est__bound" in out and "字符串" in out
+    assert "Traceback" not in (out + err)
+
+
+def test_forbid_code_is_not_passed_when_the_code_list_is_truncated(tmp_path, capsys):
+    """X-16：≥25 个拒绝码时 `refusals_omitted.codes` 自己会被截断（最多列 4 个，其余只给 count）。
+
+    旧实现"可见部分里没找到 ⇒ 通过" —— 于是 13 个真实 code 查不到就被放绿（受限机的常态）。
+    截断时唯一诚实的结论是**无法判定 ⇒ 不通过**，并给出最便宜的补法。
+    """
+    packet, _ = _pipeline(tmp_path, capsys)
+    base = json.loads(Path(packet).read_text(encoding="utf-8"))
+    tidied = {"refusals": {}, "unmeasured": []}
+
+    truncated = tmp_path / "truncated.packet.json"
+    truncated.write_text(json.dumps(dict(base, **tidied, refusals_omitted={
+        "count": 27, "codes": ["no_gpu", "nsys_missing"], "codes_truncated": True})),
+        encoding="utf-8")
+    rc, out, err = _run(capsys, "gate", "--packet", str(truncated),
+                        "--forbid-code", "counters_denied")
+    assert rc == 1, (rc, out, err)
+    assert "无法判定" in (out + err), (out, err)
+
+    # 反面对照：没有截断、确实没出现 ⇒ 照常通过（不许把这条防线做成"一律不通过"）
+    whole = tmp_path / "whole.packet.json"
+    whole.write_text(json.dumps(dict(base, **tidied, refusals_omitted={
+        "count": 2, "codes": ["no_gpu", "nsys_missing"]})), encoding="utf-8")
+    rc2, out2, err2 = _run(capsys, "gate", "--packet", str(whole),
+                           "--forbid-code", "counters_denied")
+    assert rc2 == 0, (rc2, out2, err2)

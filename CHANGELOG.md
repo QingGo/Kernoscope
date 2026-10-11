@@ -563,6 +563,22 @@ kernoscope mcp --stdio
 - **`bench/preflight-first-run.sh` 自带 `UV_CACHE_DIR`**：陌生机器/沙箱里 uv 的默认缓存位置
   不一定可写，而"缓存不可写"会让 `uv build` 失败、看起来像产品坏了。
 
+### `gate` 的三条放绿/崩溃路径（第七轮 X-13 / X-14 / X-16）
+
+- **数值阈值打到字符串取值的指标 ⇒ 用法错误 rc=2**（X-13）：`--max-metric est__bound=1`
+  （`est__bound` 的值是 `"memory"`、`ks__occupancy_limiter` 是 `"registers"`）旧实现是
+  **裸 `ValueError` traceback**。现在归类为"规则对这类指标无定义" ⇒ rc=2 + `usage_errors`，
+  报文点名指标与值（数值阈值只适用于数值型指标）。
+- **没有归属的超峰要保守传播**（X-14）：`ks__over_peak_warning` 只挂在 `(device)` 伪 kernel 上时
+  （`-i` 回读老报告可达），它的 `owner_key="(device)"` 与真 kernel 名必然不同 ⇒ 旧逻辑判
+  "不是同一个 kernel"、不传播，于是 `--require-actionable roofline` 对一份"达成率物理不可能"的包
+  rc=0。现在 `(device)`/缺身份视为**未知归属 ⇒ 保守传播**（宁可拒绝一个可疑的达成率）。
+- **`--forbid-code` 在 code 列表被截断时判"无法判定 ⇒ 不通过"**（X-16）：
+  `refusals_omitted.codes` 最多列 4 个（再多只给 `count`），受限期机器上十几个 code 时是常态；
+  旧实现"可见部分里没找到 ⇒ 通过"，于是 13 个真实 code 查不到就被放绿。现在截断时给
+  `无法判定：…（还有约 N 个 code 未列出）` + 最便宜的补法，rc=1；**没有截断且确实没出现时照常通过**
+  （有反面对照测试，防止这条防线变成"一律不通过"）。
+
 ## 0.2.0
 
 首次把"给 agent 用"当成一等公民。没有破坏性变更；决策包 schema 追加到 **v1.1**。
