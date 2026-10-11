@@ -966,6 +966,8 @@ Nsight Compute 2025.3.1 上做过，但**没有作为产物入库**：它们的�
 - [`skills/kernoscope/SKILL.md`](skills/kernoscope/SKILL.md)：给 agent 的入口（触发条件 + 三步闭环）。
 - [`skills/kernoscope/references/diagnosis-playbook.md`](skills/kernoscope/references/diagnosis-playbook.md)：
   受限环境诊断手册（由代码生成：拒绝码 → 处置 → 代价；哪些是永久拿不到）。
+- [NON-GOALS.md](NON-GOALS.md)：**明确不做什么**、每条的理由与前提，以及什么情况下该重新考虑。
+- [RELEASING.md](RELEASING.md)：公开与发布流程（谁做什么、发布前检查单、版本与兼容策略）。
 - [NOTICE](NOTICE)：第三方与商标声明。许可见 [LICENSE](LICENSE)（Apache-2.0）。
 
 Kernoscope is **not affiliated with, endorsed by, or sponsored by NVIDIA Corporation.**
