@@ -118,7 +118,10 @@
   `issue` 缺时钟打 `n/a` 而不是 `0`；**新增拒绝码 `no_nvtx`**（无 NVTX 区间不再错报
   `metric_absent`，处方指向"重采时带 `--trace=nvtx`"）；`route` 的"会被拒的条件"从真源派生
   并全部渲染（旧实现只列 4 条、只印前 3 条，读者第一脚就踩到没列出的 `no_nvml_samples`）；
-  `skill --apply --source <不存在>` 报错而不是 rc=0 说"已经是目标状态"。
+  `skill --apply --source <不存在>` 报错而不是 rc=0 说"已经是目标状态"；
+  案件 `README.md` 压到文档承诺的 ≤1 KB（原 1245 B）。
+  **接口变更**：`case/manifest.json` 的 `next_actions` 由**整数**改成
+  `{count, items}`（内容与 `next.md` 同源）——读它的脚本要改；仓内无其它消费者。
 - **R-62**（部分）：新增 L2 读峰值 needle（`l2_read_peak_gbs` 此前没有任何 needle）；
   完全穷尽的"每个公开数字都能追到产物"仍未做到，如实记在这里。
 

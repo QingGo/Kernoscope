@@ -191,26 +191,23 @@ def next_markdown(packet: dict[str, Any], limit: int = NEXT_LIMIT,
     return "\n".join(lines) + "\n"
 
 
-_CASE_README = """# 这一次任务（kernoscope 案件目录）
+_CASE_README = """# 任务目录（kernoscope）
 
-这个目录是**一次优化任务**的证据与进度：跨会话继续、或交给别人/别的 agent 接手。
+一次优化任务的证据与进度：可跨会话继续、可交接。
 
 | 文件 | 看什么 |
 |---|---|
-| `manifest.json` | 任务是什么：工具版本、协议哈希、**输入指纹**（标定/轨迹）、参数、输出、下一步 |
-| `env.json` | 这台机器能答什么：层级、计数器状态、被哪些缺件挡住 |
-| `journal.jsonl` | 追加式日志：每次调用一条（命令、rc、判词、拒绝码、包大小） |
-| `next.md` | **下一步**：按挡住决策的程度排序，带「怎么办」与命令 |
-| `../*.ksreport.json` | 完整报告（每个数字带出处）；`../*.packet.json` 是给 agent 的决策包 |
+| `manifest.json` | 工具版本、协议哈希、**输入指纹**（标定/轨迹）、参数、输出、下一步 |
+| `env.json` | 本机层级、计数器状态、被哪些缺件挡住 |
+| `journal.jsonl` | 追加日志：命令、rc、判词、拒绝码 |
+| `next.md` | **下一步**：按挡住决策的程度排序（带命令） |
+| `../*.ksreport.json` | 完整报告（每个数字带出处）；`../*.packet.json` 给 agent |
 
-继续的方式：
-1. 读 `next.md`，照着改代码或补数据源；
-2. 再跑一次同一命令（`-o` 指同一前缀，日志**追加**在 `journal.jsonl`）；
-3. `kernoscope diff <旧包> <新包> --selfcheck <自检>` 判断"真改进/真退化/分不出来"。
+继续：① 读 `next.md` 照做；② 同前缀重跑（日志在 `journal.jsonl` 追加）；
+③ `kernoscope diff <旧> <新> --selfcheck <自检>` 判真改进/真退化/分不出。
 
-纪律：数字都带出处（exact/measured/estimated/unavailable）；`n/a` 不是失败，是"前提不成立
-所以不给数"，每条都带一个闭集 code 与处置。命令与输出里的路径不含绝对路径（就近的记成相对
-案件目录，别处的记成 `<abs>/名字`）—— 这个目录可以直接交接、入库。
+纪律：数字带出处；`n/a` = 前提不成立所以不给数（每条带闭集 code 与处置）；
+路径不含绝对路径（就近记相对，别处记 `<abs>/名字`），可直接交接入库。
 """
 
 

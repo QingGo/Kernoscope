@@ -106,6 +106,18 @@ def test_next_md_is_resumable_and_says_how_to_compare():
     assert "MDD" in text
 
 
+def test_case_readme_stays_within_its_documented_budget(tmp_path):
+    """案件目录的 `README.md` 是**每个案件都写一份**的入口：docstring 承诺 ≤ 1 KB。
+
+    它曾经 1245 B（承诺已经破了，且没人守）—— 这条测试把承诺变成可执行的预算。
+    """
+    from kernoscope.case import _CASE_README
+
+    assert len(_CASE_README.encode("utf-8")) <= 1024, len(_CASE_README.encode("utf-8"))
+    root = write_case(_packet(), str(tmp_path / "rep"), ["cmd"], 0, {}, quiet=True)
+    assert (root / "README.md").read_text(encoding="utf-8") == _CASE_README
+
+
 def test_manifest_next_actions_and_next_md_count_the_same_items(tmp_path):
     """V-26②：`next_actions` 与 `next.md` 必须**同源** —— 数几条就渲染几条。
 
@@ -120,6 +132,8 @@ def test_manifest_next_actions_and_next_md_count_the_same_items(tmp_path):
     text = (root / "next.md").read_text(encoding="utf-8")
     rendered = [ln for ln in text.splitlines() if re.match(r"^\d+\. \*\*", ln)]
     assert rendered, "next.md 必须有条目（否则这条测试退化成 0 == 0）"
+    assert isinstance(man["next_actions"], dict) and "count" in man["next_actions"], (
+        f"next_actions 要能表达「几条 + 哪几条」，修前只有一个 int：{man['next_actions']!r}")
     assert man["next_actions"]["count"] == len(rendered), (man["next_actions"], rendered)
     # 内容同源：清单里每一条的 code / 提示都能在 next.md 里找到
     for it in man["next_actions"]["items"]:
