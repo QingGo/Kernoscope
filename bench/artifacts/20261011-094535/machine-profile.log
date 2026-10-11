@@ -1,0 +1,42 @@
+GPU: NVIDIA GeForce RTX 4090  SM 128  CC 8.9  显存 23.5 GiB  L2 72 MiB
+nvidia-smi: driver, maxSM_MHz, power_W, pcie_gen, pcie_width = 580.105.08, 3105, 450.00, 2, 16
+
+===== 1) 带宽扫描（找 L2 拐点 + 测 DRAM 可达带宽） =====
+  size_MB   copy_GB/s   read_GB/s  write_GB/s
+        2       330.6       123.8       199.8
+        4       772.0       253.1       408.1
+        8      1342.8       483.5       724.8
+       16      1998.9       851.8      1109.0
+       32      2681.9      1449.7      1526.4
+       48       985.8      1869.7      1655.3
+       64       879.2      2195.8       894.8
+       96       896.3       831.2       914.4
+      128       901.7       859.0       922.2
+      256       910.0       907.5       940.6
+  -> 可达 DRAM: copy 910 GB/s, read 908 GB/s, write 941 GB/s
+  -> L2 驻留上限: 64 MB（read 2196 GB/s, 2.4× DRAM）; 掉出 L2: 96 MB
+
+===== 2) matmul 可达 TFLOP/s（本机真实上限，替代规格表） =====
+  torch.bfloat16   4096x4096      0.953 ms     144.2 TFLOP/s
+  torch.bfloat16   8192x8192      6.818 ms     161.3 TFLOP/s
+  torch.bfloat16  16384x16384    53.781 ms     163.6 TFLOP/s
+  -> torch.bfloat16 口径探针: {'default': 163.3, 'reduced_precision_reduction_off': 163.3, 'fp32_ieee': 156.8}  最大相对差 4.0% => 可分辨
+  -> torch.bfloat16 最好: 163.3 TFLOP/s  @ size=16384 协议=default (口径离散 4.0% / 可分辨=True)
+   torch.float16   4096x4096      0.842 ms     163.3 TFLOP/s
+   torch.float16   8192x8192      6.629 ms     165.9 TFLOP/s
+   torch.float16  16384x16384    54.640 ms     161.0 TFLOP/s
+  -> torch.float16 口径探针: {'default': 158.2, 'reduced_precision_reduction_off': 159.5, 'fp32_ieee': 159.5}  最大相对差 0.8% => 不可分辨
+  -> torch.float16 最好: 159.5 TFLOP/s  @ size=8192 协议=reduced_precision_reduction_off (口径离散 0.8% / 可分辨=False)
+   torch.float32   4096x4096      2.680 ms      51.3 TFLOP/s
+   torch.float32   8192x8192     19.816 ms      55.5 TFLOP/s
+   torch.float32  16384x16384   172.553 ms      51.0 TFLOP/s
+  -> torch.float32 口径探针: {'default': 52.4, 'reduced_precision_reduction_off': 53.1, 'fp32_ieee': 53.8}  最大相对差 2.6% => 可分辨
+  -> torch.float32 最好: 53.8 TFLOP/s  @ size=8192 协议=fp32_ieee (口径离散 2.6% / 可分辨=True)
+
+===== 测量期间的时钟/功耗 =====
+  {'sm_clock_min': 1860.0, 'sm_clock_max': 2535.0, 'sm_clock_mean': 2331.8, 'power_max': 455.74, 'util_mean': 89.5, 'n_samples': 11}
+
+已写入 <repo>/bench/artifacts/20261011-094535/machine-profile.json
+roofline 用法（同仓库自带，不需要额外脚本）：
+  kernoscope --ks-calibration bench/artifacts/20261011-094535/machine-profile.json --ks-gemm 4096,4096,4096 --ks-dtype bf16 -k regex:<kernel> -- <bench>
+口径提示：被测 matmul 的累加口径（fp32/fp16 acc）必须与产物里的 acc_caliber 一致；标定缺少该字段时 kernoscope 会拒绝用它算 roofline 拐点（R-09）。

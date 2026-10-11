@@ -1,0 +1,5 @@
+calibration: bench/artifacts/20261011-094535/machine-profile.json @ 2026-10-11 09:45:52, dtype=bf16, bw=910 GB/s, compute=163.3 TFLOP/s, 累加口径=bf16 (fp32 accumulate), 口径离散=4.0%
+==PROF== 输出体积: json 1000 KB / perfetto 949 KB（1921 次 launch）
+==PROF== 提示：体积主要来自逐 launch 记录。要限流可用 -c <N>（每个 kernel 只报 N 次）、--ks-json-no-launches（JSON 不带逐 launch 数组）、或 --launch-csv 单独出表
+error(strict): requested ledger comparison cannot be produced: est__dram_vs_ledger_err_pct - 误差行无法给出：窗口覆盖率 24% < 50%：窗口没被被测负载主导，忙碌时段是否饱和无从确认；把稳态循环延长到约 6 秒，或加 --ks-window auto 只统计稳态段；可以加 --ks-memtrace <trace> 换用**轨迹口径**的 per-launch 字节
+error(strict): refusing to continue - some requested data cannot be produced honestly on this machine. Re-run without --strict to get 'n/a' rows instead.

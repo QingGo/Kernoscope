@@ -26,100 +26,106 @@ python tools/machine-profile.py --out bench/machine-profile.json
   "schema_version": 2,
   "gpu": "NVIDIA GeForce RTX 4090",
   "torch": "2.12.1+cu130",
-  "ts": "2026-10-09 01:23:13",
+  "ts": "2026-10-11 09:45:52",
   "tool": "tools/machine-profile.py",
   "measured_dram": {
-    "copy_gbs": 908.5,
-    "read_gbs": 898.5,
-    "write_gbs": 937.2
+    "copy_gbs": 910.0,
+    "read_gbs": 907.5,
+    "write_gbs": 940.6
   },
   "l2_info": {
     "l2_resident_max_mb": 64,
     "l2_drop_mb": 96,
-    "l2_read_peak_gbs": 2082.8
+    "l2_read_peak_gbs": 2195.8
   },
   "measured_matmul_tflops": {
     "torch.bfloat16": {
-      "tflops": 166.2,
+      "tflops": 163.3,
       "size": 16384,
-      "ms": 52.9354,
+      "ms": 53.8628,
       "acc_caliber": "bf16 (fp32 accumulate)",
       "precision_settings": {
         "allow_fp16_reduced_precision_reduction": true,
-        "fp32_precision": "none"
+        "allow_tf32": false,
+        "fp32_precision": "none",
+        "float32_matmul_precision": null
       },
       "tflops_protocol": "default",
       "tflops_is_variant_reading": true,
       "caliber_variants_tflops": {
-        "default": 166.2,
-        "reduced_precision_reduction_off": 166.1,
-        "fp32_ieee": 159.9
+        "default": 163.3,
+        "reduced_precision_reduction_off": 163.3,
+        "fp32_ieee": 156.8
       },
       "caliber_probe_size": 16384,
-      "caliber_spread_pct": 3.8,
+      "caliber_spread_pct": 4.0,
       "caliber_distinguishable": true
     },
     "torch.float16": {
-      "tflops": 164.3,
+      "tflops": 159.5,
       "size": 8192,
-      "ms": 6.6923,
+      "ms": 6.8922,
       "acc_caliber": "fp16 (fp32 accumulate; 允许 reduced-precision reduction)",
       "precision_settings": {
-        "allow_fp16_reduced_precision_reduction": true,
-        "fp32_precision": "none"
+        "allow_fp16_reduced_precision_reduction": false,
+        "allow_tf32": false,
+        "fp32_precision": "none",
+        "float32_matmul_precision": null
       },
-      "tflops_protocol": "default",
+      "tflops_protocol": "reduced_precision_reduction_off",
       "tflops_is_variant_reading": true,
       "caliber_variants_tflops": {
-        "default": 164.3,
-        "reduced_precision_reduction_off": 162.7,
-        "fp32_ieee": 163.3
+        "default": 158.2,
+        "reduced_precision_reduction_off": 159.5,
+        "fp32_ieee": 159.5
       },
       "caliber_probe_size": 8192,
-      "caliber_spread_pct": 1.0,
+      "caliber_spread_pct": 0.8,
       "caliber_distinguishable": false
     },
     "torch.float32": {
-      "tflops": 54.2,
+      "tflops": 53.8,
       "size": 8192,
-      "ms": 20.2813,
+      "ms": 20.4247,
       "acc_caliber": "fp32 (fp32 accumulate)",
       "precision_settings": {
         "allow_fp16_reduced_precision_reduction": true,
-        "fp32_precision": "ieee"
+        "allow_tf32": false,
+        "fp32_precision": "ieee",
+        "float32_matmul_precision": null
       },
       "tflops_protocol": "fp32_ieee",
       "tflops_is_variant_reading": true,
       "caliber_variants_tflops": {
-        "default": 53.9,
-        "reduced_precision_reduction_off": 53.8,
-        "fp32_ieee": 54.2
+        "default": 52.4,
+        "reduced_precision_reduction_off": 53.1,
+        "fp32_ieee": 53.8
       },
       "caliber_probe_size": 8192,
-      "caliber_spread_pct": 0.7,
-      "caliber_distinguishable": false
+      "caliber_spread_pct": 2.6,
+      "caliber_distinguishable": true
     }
   },
   "clocks_during_measurement": {
-    "sm_clock_min": 1950.0,
-    "sm_clock_max": 2595.0,
-    "sm_clock_mean": 2376.8,
-    "power_max": 461.28,
-    "util_mean": 94.0,
+    "sm_clock_min": 1860.0,
+    "sm_clock_max": 2535.0,
+    "sm_clock_mean": 2331.8,
+    "power_max": 455.74,
+    "util_mean": 89.5,
     "n_samples": 11
   },
   "bandwidth_sweep": [
     {
       "size_mb": 2,
-      "copy_gbs": 237.4314438723374,
-      "read_gbs": 98.69389085226368,
-      "write_gbs": 157.1169281108881
+      "copy_gbs": 330.5636837471004,
+      "read_gbs": 123.75246283167994,
+      "write_gbs": 199.7693234284287
     },
     {
       "size_mb": 4,
-      "copy_gbs": 628.9943613645944,
-      "read_gbs": 211.6353208350797,
-      "write_gbs": 363.1935183363303
+      "copy_gbs": 771.9574267004622,
+      "read_gbs": 253.06808425323084,
+      "write_gbs": 408.08260487228125
     },
     {
       "…": "共 10 个尺寸，明细见产物"
@@ -128,7 +134,7 @@ python tools/machine-profile.py --out bench/machine-profile.json
 }
 ```
 
-（以上是 [`bench/artifacts/20261009-012257/machine-profile.json`](bench/artifacts/) 的节选，**由该产物渲染**（`tools/gen_calibration_excerpt.py`）；原始产物与 `bandwidth_sweep` 明细见同一目录。新的 bench 运行会让这一段与门禁一起更新。）
+（以上是 [`bench/artifacts/20261011-094535/machine-profile.json`](bench/artifacts/) 的节选，**由该产物渲染**（`tools/gen_calibration_excerpt.py`）；原始产物与 `bandwidth_sweep` 明细见同一目录。新的 bench 运行会让这一段与门禁一起更新。）
 <!-- calib-excerpt:end -->
 
 ## 为什么标定必须记录"累加口径"

@@ -1,0 +1,1 @@
+ANALYTIC kernel=copy bytes_per_launch=2097152 iters=1 total_bytes=2.09715e+06 grid=0 block=256 n=262144

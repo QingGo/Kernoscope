@@ -1,0 +1,164 @@
+{
+  "schema_version": 2,
+  "tool": "kernoscope",
+  "a": "bench/artifacts/20261011-094535/rep-copy.ksreport.json",
+  "b": "bench/artifacts/20261011-094535/rep-copy-fullwin.ksreport.json",
+  "protocol": {
+    "same": false,
+    "a": "sha256:c70726cc8474c554",
+    "b": "sha256:94b0cb70e27b1977",
+    "diffs": {
+      "protocol_hash": "sha256:c70726cc8474c554 → sha256:94b0cb70e27b1977（标定 / 窗口与 warmup / 精度 / 内核选择任一项不同都会这样）",
+      "window_mode": "auto（已裁剪） → full"
+    }
+  },
+  "mdd": {
+    "source": "",
+    "values": {}
+  },
+  "comparisons": [
+    {
+      "id": "dram_bytes",
+      "status": "incomparable",
+      "a": 7285839600000.0,
+      "b": 7293370300000.0,
+      "unit": "B",
+      "delta": 7530700000.0,
+      "delta_pct": 0.103,
+      "direction": "lower",
+      "refusal": {
+        "code": "protocol_mismatch",
+        "message": "协议不同：两次运行的口径不可比（同协议才谈方向）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "dram_bytes_per_launch",
+      "status": "incomparable",
+      "a": 588370000.0,
+      "unit": "B",
+      "direction": "lower",
+      "refusal": {
+        "code": "protocol_mismatch",
+        "message": "协议不同：两次运行的口径不可比（同协议才谈方向）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "dram_bytes_trace",
+      "status": "incomparable",
+      "direction": "lower",
+      "refusal": {
+        "code": "protocol_mismatch",
+        "message": "协议不同：两次运行的口径不可比（同协议才谈方向）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "kernel_time",
+      "status": "incomparable",
+      "a": 7941.163,
+      "b": 7974.243,
+      "unit": "ms",
+      "delta": 33.08,
+      "delta_pct": 0.417,
+      "direction": "lower",
+      "refusal": {
+        "code": "protocol_mismatch",
+        "message": "协议不同：两次运行的口径不可比（同协议才谈方向）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "ledger_verdict",
+      "status": "incomparable",
+      "note": "一侧缺失（通常是那次运行该口径不成立）",
+      "refusal": {
+        "code": "metric_absent",
+        "message": "只有一侧有这个判词（a 缺）：不能当成 0 来比",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "用 --json 看本次报告里实际存在哪些指标，或用 `kernoscope capabilities --json` 看哪些问题能答（不存在 ≠ 被拒）",
+          "command": "kernoscope capabilities --json",
+          "cost_s": 0.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": []
+        }
+      }
+    },
+    {
+      "id": "occupancy",
+      "status": "incomparable",
+      "a": 100.0,
+      "b": 100.0,
+      "unit": "%",
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "direction": "higher",
+      "refusal": {
+        "code": "protocol_mismatch",
+        "message": "协议不同：两次运行的口径不可比（同协议才谈方向）",
+        "severity": "blocking",
+        "observed": {},
+        "threshold": {},
+        "remedy": {
+          "action": "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比）",
+          "command": "",
+          "cost_s": 0.0,
+          "cost_kind": "wall_seconds",
+          "then_answers": []
+        }
+      }
+    }
+  ],
+  "not_judged": [],
+  "summary": {
+    "improved": 0,
+    "regressed": 0,
+    "indistinguishable": 0,
+    "incomparable": 6,
+    "not_judged": 0
+  },
+  "notes": [
+    "协议不同时我们拒绝给方向判词：宁可说不可比，也不说一个会误导的「变好了」",
+    "没有 MDD ⇒ 所有判词都是 incomparable(mdd_unknown)：先跑 `kernoscope selftest --out machine-selfcheck.json`"
+  ]
+}

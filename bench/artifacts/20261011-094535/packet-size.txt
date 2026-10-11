@@ -1,0 +1,2 @@
+bench/artifacts/20261011-094535/rep-copy.packet.json: 4088 B, 6 verdicts, trimmed=['unmeasured_examples', 'verdict_metrics', 'next_pointers']
+bench/artifacts/20261011-094535/rep-copy.packet-only.json: 3842 B, 6 verdicts, trimmed=[]

@@ -1,0 +1,7 @@
+采集 → bench/artifacts/20261011-094535/memtrace-official.txt（NO_EAGER_LOAD=0）
+被测程序退出码: 0
+记录行数: 49152
+  kernel: MEMTRACE: CTX 0x00005585d8a62ab0 - LAUNCH - Kernel pc 0x00007f04192ae900 - Kernel name copy_k(float const*, float*, long) - grid launch id 0 - grid size 16,1,1 - block size 128,1,1 - nregs 0 - shmem 0 - cuda stream id 0
+  kernel: MEMTRACE: CTX 0x00005585d8a62ab0 - LAUNCH - Kernel pc 0x00007f04192ae900 - Kernel name copy_k(float const*, float*, long) - grid launch id 1 - grid size 16,1,1 - block size 128,1,1 - nregs 0 - shmem 0 - cuda stream id 0
+  kernel: MEMTRACE: CTX 0x00005585d8a62ab0 - LAUNCH - Kernel pc 0x00007f04192ae900 - Kernel name copy_k(float const*, float*, long) - grid launch id 2 - grid size 16,1,1 - block size 128,1,1 - nregs 0 - shmem 0 - cuda stream id 0
+下一步: kernoscope memtrace --from bench/artifacts/20261011-094535/memtrace-official.txt --sm-count <SM数> --l2-bytes <L2字节> [--kernel <子串>]
