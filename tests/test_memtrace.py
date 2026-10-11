@@ -726,3 +726,57 @@ def test_official_atomic_lines_reach_global_caliber(tmp_path, capsys):
     assert doc["records_global"] == 4
     assert doc["sectors_per_request"] == pytest.approx(32.0)
     assert doc["dram_bytes_per_launch"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# 第五轮 R-75/R-76：v1 路径也要有指纹与"结尾换行"的截断判定
+# --------------------------------------------------------------------------- #
+def test_v1_trace_carries_a_fingerprint_and_truncation_flag(tmp_path):
+    """v1 路径此前只认工具自己写的 `# truncated 1`：
+
+    手动重定向（工具来不及写那一行）/ 被 ulimit 截断的文件，照样给数。
+    现在与官方路径同一纪律：指纹 + 结尾换行 + 显式结束标记。
+    """
+    p = tmp_path / "v1.txt"
+    body = ("# ks-memtrace v1\n# kernel k(float*)\n# l2_bytes 75497472\n"
+            "# sm_count 128\n# launches_traced 1\npc,op,lanes,size,sectors,smid,addrs\n"
+            "0x1,LDG.E,32,4,4,0,0;32;64;96\n")
+    p.write_text(body, encoding="utf-8")          # 结尾**有**换行
+    tr = load_memtrace(str(p))
+    assert tr.header.get("trace_sha256"), "v1 也要写内容指纹（R-75）"
+    assert not tr.truncated and tr.complete == "unknown"   # 没结束标记 ⇒ 不假装完整
+
+    p2 = tmp_path / "v1_cut.txt"
+    p2.write_text(body.rstrip("\n"), encoding="utf-8")     # 结尾**没有**换行 ⇒ 截断
+    tr2 = load_memtrace(str(p2))
+    assert tr2.truncated, "结尾不是换行 ⇒ 必须判截断（旧实现只看 # truncated）"
+    assert tr2.complete == "no"
+    # 同一内容两次读的指纹稳定；换一个字节就变
+    assert tr2.header["trace_sha256"] == load_memtrace(str(p2)).header["trace_sha256"]
+    p3 = tmp_path / "v1_other.txt"
+    p3.write_text(body.replace("0x1,", "0x2,"), encoding="utf-8")
+    assert load_memtrace(str(p3)).header["trace_sha256"] != tr.header["trace_sha256"]
+
+
+def test_v1_trace_with_complete_sentinel_is_marked_complete(tmp_path):
+    """显式结束标记（`KS-TRACE-COMPLETE`）才算完整 —— 与官方路径同一判定。"""
+    p = tmp_path / "v1_done.txt"
+    p.write_text("# ks-memtrace v1\n# kernel k(float*)\npc,op,lanes,size,sectors,smid,addrs\n"
+                 "0x1,LDG.E,32,4,4,0,0;32;64;96\n# KS-TRACE-COMPLETE\n", encoding="utf-8")
+    tr = load_memtrace(str(p))
+    assert tr.complete == "yes" and not tr.truncated
+
+
+def test_truncated_v1_trace_refuses_per_launch_bytes(tmp_path):
+    """截断 ⇒ 拒绝给 DRAM 字节（总量只是下界，不是实测值）—— 两条路径同一个后果。"""
+    from kernoscope.analyze.memtrace import analyze_memtrace
+
+    p = tmp_path / "v1_cut2.txt"
+    p.write_text("# ks-memtrace v1\n# kernel k(float*)\n# l2_bytes 75497472\n# sm_count 128\n"
+                 "# launches_traced 1\npc,op,lanes,size,sectors,smid,addrs\n"
+                 "0x1,LDG.E,32,4,4,0,0;32;64;96", encoding="utf-8")   # 无结尾换行
+    tr = load_memtrace(str(p))
+    st = analyze_memtrace(tr, l2_bytes=75497472, max_accesses=1_000_000)
+    assert st.truncated
+    assert st.dram_bytes_per_launch is None, "截断的轨迹不许给 per-launch 字节"
+    assert "截断" in (st.dram_bytes_unavailable_reason or "")

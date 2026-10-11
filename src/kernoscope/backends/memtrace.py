@@ -53,11 +53,13 @@ def trace_fingerprint(path: str, head: int = 1 << 20) -> tuple[str, bool]:
     """轨迹的（内容指纹, 是否以换行结尾）。
 
     R-75：同条件对拍需要一个"这是哪份轨迹"的标识 —— 指纹让"两次 diff 用的是不是同一份
-    轨迹"可比对。R-76：官方格式**没有结束标记**，被 `ulimit`/磁盘截断时工具察觉不到
-    （验收报告里两次拿到低于物理下界的数），所以：
-      * 我们自己采集的轨迹由 `collect.sh` 追加 `KS-TRACE-COMPLETE` 哨兵；
-      * 手动重定向的文件按"**无法确认完整**"处理，并在 note 里明说；
-      * 结尾不是换行 = 铁定被截断（最后一行不完整）。
+    轨迹"可比对。R-76：轨迹**可能没有结束标记**，被 `ulimit`/磁盘截断时工具察觉不到
+    （验收报告里两次拿到低于物理下界的数），所以两条判定一起用，**两种格式都走**：
+      * 内容指纹（sha256 前 16 位）—— 进报告与协议哈希；
+      * `ends_nl`（结尾是否换行）—— 不是换行就是最后一个记录行不完整，铁定被截断；
+        这是 `_ends_nl` 的**唯一**用途，返回给调用方，不再被丢掉；
+      * 显式结束标记另算：`KS-TRACE-COMPLETE` 哨兵（`collect.sh` 追加 `MEMTRACE: KS-TRACE-COMPLETE`）
+        或 `# complete 1` 才算 `complete=yes`，否则是 `unknown`（手动重定向就是这种）。
     """
     h = hashlib.sha256()
     tail = b""
@@ -254,12 +256,16 @@ def load_memtrace(path: str) -> MemTrace:
     header: dict[str, str] = {}
     records: list[MemRecord] = []
     saw_tag = False
+    saw_complete = False
     bad_sector = 0
 
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for lineno, raw in enumerate(f, 1):
             line = raw.strip()
             if not line:
+                continue
+            if COMPLETE_SENTINEL in line:      # 结束哨兵（R-76）：与官方路径同一判定
+                saw_complete = True
                 continue
             if line.startswith("#"):
                 if line[1:].strip() == FORMAT_TAG:
@@ -301,6 +307,20 @@ def load_memtrace(path: str) -> MemTrace:
 
     if not saw_tag:
         raise MemTraceError(f"{path}: 缺少首行 '# {FORMAT_TAG}'（轨迹格式标识）")
+    # R-75/R-76：v1 路径此前**只看**工具自己写的 `# truncated 1` —— 手动重定向/被 ulimit
+    # 截断时工具根本来不及写这一行，于是截断的轨迹照样给数（只在 note 里含糊说"无法确认完整"）。
+    # 官方路径早就有这两条（指纹 + 结尾换行），这里补齐，两条路径同一纪律：
+    #   * 内容指纹：让"两次 diff 用的是不是同一份轨迹"可比（报告与协议哈希都用它）；
+    #   * 结尾不是换行 ⇒ 最后一个记录行不完整 ⇒ `truncated=1` ⇒ 不给 DRAM 字节；
+    #   * 只有显式结束标记（`# complete 1` 或 `KS-TRACE-COMPLETE`）才算"完整"，
+    #     其余一律 `unknown`（不假装知道）。
+    fp, ends_nl = trace_fingerprint(path)
+    header.setdefault("source", FORMAT_TAG)
+    header["trace_sha256"] = fp
+    if not ends_nl:
+        header["truncated"] = "1"
+    if saw_complete:
+        header["complete"] = "1"
     if not records:
         raise MemTraceError(
             f"{path}: 没有任何访存记录 —— 要么 kernel 没有访存，要么插桩没生效。"

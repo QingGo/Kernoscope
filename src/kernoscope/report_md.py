@@ -197,19 +197,29 @@ def _select_kernel(rep: Report, kernel: str | None) -> KernelReport:
     return max(pool, key=lambda k: (k.total_ns, k.launch_count))
 
 
-def _metric_index(rep: Report, kr: KernelReport) -> dict[str, Metric]:
-    """``name -> Metric``。主体 kernel 的读数优先，其余 kernel（含设备级）兜底。
+#: 设备伪 kernel 的名字（NVML/窗口级读数的落脚点）
+DEVICE_KERNEL = "(device)"
 
-    设备级读数（NVML 忙碌/时钟/能耗）挂在 ``(device)`` 伪 kernel 上，但它们对 2.5 这类
-    维度是唯一来源；兜底读取让"这个维度有没有数据"的答案不依赖于读数被放在了哪个 kernel
-    对象里。同名冲突时主体 kernel 的读法优先 —— 报告要讲的是一个 kernel 的故事。
+
+def _metric_index(rep: Report, kr: KernelReport) -> dict[str, Metric]:
+    """``name -> Metric``：**本 kernel** 优先，缺失时只允许从 ``(device)`` 兜底。
+
+    为什么不再从别的**真 kernel** 兜底（第五轮 V-4）：per-kernel 报告里主体是
+    `synthetic_gemm`，却出现了 `synthetic_elementwise` 的 `ks__over_peak_warning = 1`
+    （16361.8 TFLOPS = 峰值 9779.9%）—— 读者会照着这个数字去查**错的那个 kernel**。
+    同名冲突时本 kernel 优先；本 kernel 没有的名字就是"这个 kernel 没这个数"，
+    要么显示 unavailable，要么不出现 —— 不许借用别人的。
+
+    保留 `(device)` 兜底的原因：NVML 忙碌/时钟/能耗、窗口级覆盖率这类读数**本来就挂在
+    `(device)` 上**，它们是"这次测量"的属性而不是某个 kernel 的属性；不兜底会让 2.5 类
+    维度凭空缺一半。
     """
     out: dict[str, Metric] = {}
     for s in kr.sections:
         for m in s.metrics:
             out.setdefault(m.name, m)
     for k in rep.kernels:
-        if k is kr:
+        if k is kr or getattr(k, "name", "") != DEVICE_KERNEL:
             continue
         for s in k.sections:
             for m in s.metrics:

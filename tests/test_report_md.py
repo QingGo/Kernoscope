@@ -495,3 +495,54 @@ def test_packet_is_optional_and_absence_is_stated():
 def test_bad_packet_type_fails_fast():
     with pytest.raises(TypeError, match="packet must be a dict"):
         render_report_md(_rich_report(), packet=["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------
+# 第五轮 V-4：per-kernel 报告不许借用别的**真 kernel** 的读数
+# --------------------------------------------------------------------------
+def _over_peak_two_kernel_report() -> Report:
+    """主体 kernel A 没有 `ks__over_peak_warning`，kernel B 有（且值很刺眼）。"""
+    rep = Report(device=DeviceInfo(name="RTX 4090", compute_capability="8.9", sm_count=128))
+    rep.wall_time_ns = 30_000_000_000
+    rep.meta["kernel_filter"] = "regex:gemm"
+
+    a = KernelReport("synthetic_gemm(float const*, float const*)", launch_count=5)
+    a.sections = [Section("Duration", [
+        Metric.exact("gpu__time_duration.sum", 4.0, "ms"),
+        Metric.exact("ks__launch_count", 5.0, ""),
+    ])]
+
+    b = KernelReport("synthetic_elementwise(float*)", launch_count=20)
+    b.sections = [Section("SpeedOfLight", [
+        Metric.exact("gpu__time_duration.sum", 0.2, "ms"),
+        # 这个数属于 B（例如 16361.8 TFLOPS = 峰值 9779.9%，是个"物理不可能"信号）
+        Metric.derived("ks__over_peak_warning", 1.0, ""),
+    ])]
+
+    dev = KernelReport("(device)")
+    dev.sections = [Section("DeviceStatistics", [
+        # 设备级读数：**应当**能在 A 的报告里看到（它是这次测量的属性）
+        Metric.measured("meas__nvml_mem_busy_mean_pct", 96.8, "%"),
+    ])]
+    rep.kernels = [a, b, dev]
+    return rep
+
+
+def test_per_kernel_report_never_borrows_another_kernels_metric():
+    """V-4：主体 `synthetic_gemm` 的报告里出现 `synthetic_elementwise` 的 over_peak 值 ⇒
+    读者会去查错 kernel。本 kernel 没有的名字必须是 n/a / 不出现，而不是借别人的。"""
+    md = render_report_md(_over_peak_two_kernel_report(), kernel="synthetic_gemm")
+    assert "ks__over_peak_warning" not in md, "借用了别的 kernel 的读数"
+    # 而设备级读数（挂在 (device) 上）本来就该能看到
+    assert "meas__nvml_mem_busy_mean_pct" in md
+    assert "96.8" in md
+
+
+def test_device_only_metrics_still_reach_a_per_kernel_report():
+    """保留 `(device)` 兜底：NVML/窗口级读数是"这次测量"的属性，不兜底会凭空缺一半。"""
+    from kernoscope.report_md import _metric_index
+
+    rep = _over_peak_two_kernel_report()
+    idx = _metric_index(rep, rep.kernels[0])
+    assert "meas__nvml_mem_busy_mean_pct" in idx
+    assert "ks__over_peak_warning" not in idx
