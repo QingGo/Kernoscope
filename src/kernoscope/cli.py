@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -639,6 +640,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif peaks is not None:
         peak_source = peaks.source_label()
     launches_for_dram = len(matched_all) if len(grouped_dram) == 1 else 0
+    # R-47：per-launch 的分母要落在**积分窗口内**。窗口被 --ks-window auto/--ks-warmup/
+    # --ks-window-s 裁过时，光给总数会让"窗口内字节 ÷ 整段 launch 数"——数字等比偏小。
+    # 所以把每个 launch 的绝对时间区间（CUPTI CLOCK_MONOTONIC，与采样同一时钟）传下去，
+    # 由 dram.py 按时间重叠加权算窗口内的等效 launch 数；对不上就拒绝这个口径。
+    launch_spans = ([(l.start_ns / 1e9, l.end_ns / 1e9) for l in matched_all]
+                    if len(grouped_dram) == 1 else None)
     trace_resolution = ""
     st0 = memtrace_stats.get(trace_kernel)
     if trace_bytes_per_launch is not None and st0 is not None:
@@ -647,6 +654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dram_est = estimate_dram(
         sampler.result.samples, peak_gbs=peak_gbs, window_s=wall_ns / 1e9,
         launches=launches_for_dram,
+        launch_spans=launch_spans,
         ledger_per_launch=ledger_per_launch, ledger_total=ledger_total,
         ledger_range=ledger_range,
         peak_source=peak_source,
@@ -745,6 +753,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 决策包要用它判断"账本裁决是否继承了不成立的 per-launch 口径"
     rep.meta["ledger_basis"] = dram_est.ledger_basis
     rep.meta["dtype"] = args.ks_dtype
+    # ---- 协议哈希的输入（R-49）：口径参数必须由**管线**写成，不能靠测试手工塞 meta ----
+    # 旧实现里 protocol_hash 读 meta["calibration"]/["peak_source"]/["kernel_filter"]/
+    # ["warmup_s"]/["window_s"]，而 CLI 从不写这些键 → 哈希里全是 null。后果是
+    # "换一份标定（roofline 的分母）"、"把窗口调短"都不算协议变化，`diff` 照报方向。
+    rep.meta.update(_protocol_meta(args, peaks, peak_gbs))
     rep.generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     rep.meta["window"] = (
         f"mode={dram_est.window_mode}{'（已裁剪）' if dram_est.trimmed else ''} "
@@ -845,6 +858,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check_exit_code and target_rc:
         return target_rc
     return rc
+
+
+def _calibration_identity(path: str) -> str:
+    """标定文件的身份：**文件名 + 内容哈希**。
+
+    不含绝对路径（那会把本机目录写进包 —— 包里不该有本机路径）；也不含标定时间戳
+    （重跑一次标定就会变，于是"同口径"被误判成不可比）。用内容哈希而不是只有文件名：
+    同名文件内容不同（换了一台机器、改了 dtype）必须算不同协议。
+    """
+    p = Path(path)
+    try:
+        digest = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    except OSError:
+        digest = "unreadable"
+    return f"{p.name}:{digest}"
+
+
+def _protocol_meta(args: argparse.Namespace, peaks: Any, peak_gbs: float) -> dict[str, Any]:
+    """一次写齐协议哈希要读的键（R-49）。
+
+    `protocol_hash()` 的 payload 早就读 `meta["calibration"]` / `["peak_source"]` /
+    `["kernel_filter"]` / `["warmup_s"]` / `["window_s"]`，但 CLI **从不写这些键** —— 于是
+    哈希里全是 null。后果：换一份标定（roofline 唯一的分母）、把采样窗口调短，都不算协议
+    变化，`diff` 照报"真改进"。协议输入必须由**管线**写，而不是靠测试手工塞 meta。
+
+    只放**稳定**的量：不含路径、不含时间戳（那些每次都变，会把同协议误判成不同）。
+    """
+    if args.ks_peak_tflops or args.ks_peak_gbps:
+        kind, override = "override", {"gbps": args.ks_peak_gbps, "tflops": args.ks_peak_tflops}
+    elif args.ks_calibration:
+        kind, override = "calibration", None
+    else:
+        kind, override = "none", None
+    out: dict[str, Any] = {
+        "kernel_filter": args.kernel_name or "",
+        "warmup_s": float(args.ks_warmup or 0.0),
+        "window_s": float(args.ks_window_s or 0.0),
+        "peak_source": kind,
+        "peak_override": override,
+        "peaks": {
+            "bw_gbs": round(float(peak_gbs), 3),
+            "compute_tflops": (round(float(peaks.compute_tflops), 3)
+                               if peaks is not None and peaks.compute_tflops else None),
+        },
+        "calibration": _calibration_identity(args.ks_calibration) if args.ks_calibration else None,
+    }
+    return out
 
 
 def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]) -> list[str]:

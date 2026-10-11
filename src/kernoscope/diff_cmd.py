@@ -190,7 +190,8 @@ def _protocol_diffs(pa: dict[str, Any], pb: dict[str, Any]) -> dict[str, Any]:
     ha = (pa.get("protocol") or {}).get("hash")
     hb = (pb.get("protocol") or {}).get("hash")
     if ha != hb:
-        diffs["protocol_hash"] = f"{ha} → {hb}"
+        diffs["protocol_hash"] = (f"{ha} → {hb}"
+                                  f"（标定 / 窗口与 warmup / 精度 / 内核选择任一项不同都会这样）")
         for k in ("window_mode", "basis"):
             va = (pa.get("protocol") or {}).get(k)
             vb = (pb.get("protocol") or {}).get(k)

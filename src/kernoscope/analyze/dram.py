@@ -85,6 +85,21 @@ class DramEstimate:
     mem_util_resolution_pct: float = MEM_UTIL_RESOLUTION_PCT
     n_samples: int = 0
     launches: int = 0
+    # ---- R-47：per-launch 的**分母**必须和分子覆盖同一个窗口 ----
+    # 旧实现：分子 = 窗口内字节（bytes_total 只覆盖 window_used_s），分母 = **整段运行的**
+    # launch 数（cli.py 传进来的 launches）。窗口一被裁，per-launch 就等比偏小：
+    # 真机实测同一负载 auto/warmup40/window-s20 三种窗口给出 235.08 / 130.61 / 45.84 MB，
+    # 而 share=100%、bias=+0%、无告警、rc=0 —— 账本是 per-launch 口径，于是使用者会得到
+    # 「账本错了 44%/80%」这个完全错误的结论。所以：窗口被裁过时，分母必须按**窗口内**
+    # 的等效 launch 数（按时间重叠加权）重算；算不出来就不给这个数。
+    launches_total: int = 0                 # 整段运行里匹配到的 launch 数
+    launches_in_window: float | None = None  # 窗口内的等效 launch 数（重叠加权）
+    window_t0: float | None = None          # 积分窗口的绝对边界（采样时钟）
+    window_t1: float | None = None
+    sample_t0: float | None = None          # 采样覆盖的边界（裁窗口**之前**）
+    sample_t1: float | None = None
+    launch_clock_aligned: bool | None = None  # None=没给 launch 时间戳；False=两个时钟对不上
+    window_bias_pct: float | None = None    # 100×(window_used_s/window_s − 1)，可算的偏差估计
     # ---- R-46：窗口主导性（per-launch 归因的第二个前提）----
     # 被匹配 kernel 的 GPU 时间（ns，来自 CUPTI 的逐 launch 时长求和）。
     # 分母是**参与积分的窗口长度** window_used_s。窗口被 --ks-window auto 裁短时，
@@ -205,14 +220,16 @@ class DramEstimate:
     def attributable(self) -> bool:
         """能否把总量归因到单个 kernel。
 
-        per-launch 口径要求窗口**同时**满足两个前提：
+        per-launch 口径要求窗口**同时**满足三个前提：
           ① 窗口被被测负载主导（覆盖率 ≥ DUTY_WEAK）—— GPU 在不在干活；
-          ② 窗口被**被匹配的那个** kernel 主导（份额 ≥ SHARE_STRONG）—— 它是不是主角。
+          ② 窗口被**被匹配的那个** kernel 主导（份额 ≥ SHARE_STRONG）—— 它是不是主角；
+          ③ **分母可信**：窗口没被裁过，或裁过但窗口内的等效 launch 数算得出来（R-47）。
         只有 ① 时，一个窗口里顺序跑了多个 kernel/变体的负载会被误判为可归因（R-46）。
+        少了 ③ 时，分子是窗口内字节、分母是整段 launch 数，数字会等比偏小（D5）。
         """
         share = self.matched_kernel_kernel_share_pct
         return (self.reliable and self.window_coverage_pct >= DUTY_WEAK
-                and self.launches > 0
+                and self.launches > 0 and self.bytes_per_launch is not None
                 and share is not None and share >= SHARE_STRONG)
 
     def per_launch_verdict(self) -> tuple[bool, str]:
@@ -302,9 +319,9 @@ class DramEstimate:
             RefusalCode.SHARE_TOO_LOW,
             f"窗口主导性不足：被匹配的 kernel 只占窗口 kernel 时间的 "
             f"{_fmt_pct_cmp(share, SHARE_STRONG, digits=1)}，{bound}{detail}；"
-            f"把窗口缩到只含该 kernel（--ks-warmup/--ks-window-s 只跑一段），"
-            f"或改用 --ks-ledger-total-mb 走整窗口口径，"
-            f"或加 --ks-memtrace 换用**轨迹口径**（只测被追踪 kernel，不受窗口构成影响）",
+            f"份额是按**整段运行的 launch 表**算的，缩采样窗口改不动它 —— "
+            f"要么让被测区间里只有这一个 kernel，要么改用 --ks-ledger-total-mb 走整窗口口径，"
+            f"要么加 --ks-memtrace 换用**轨迹口径**（只测被追踪 kernel，不受窗口构成影响）",
             observed={"matched_kernel_kernel_share_pct": round(share, 1),
                       "other_kernel_count": self.other_kernel_count,
                       "matched_kernel_ns": self.matched_kernel_ns,
@@ -333,6 +350,26 @@ class DramEstimate:
                 + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto" if need else ""),
                 observed={"coverage_pct": round(self.window_coverage_pct, 1)},
                 threshold={"min_pct": DUTY_WEAK}))
+        # R-47：分母不可信时**先**说这一条 —— 它才是"窗口被裁过"的那种情况的真正原因，
+        # 否则读者会以为把窗口调一下就能拿到数（那正是 SHARE_TOO_LOW 旧文案的坑）。
+        if self.reliable and self.launches > 0 and self.bytes_per_launch is None:
+            why = ("没有 launch 时间戳（拿不到逐 launch 的起止时间）"
+                   if self.launch_clock_aligned is None
+                   else "launch 时间戳与采样时钟对不上（CUPTI 与 NVML 不在同一时钟域）")
+            bias = self.window_bias_pct
+            est_bias = (f"按窗口长度粗算，这个数字本来会偏小约 {abs(bias):.0f}%；"
+                        if bias not in (None, 0.0) else "")
+            out.append(Refusal(
+                RefusalCode.WINDOW_LAUNCH_UNALIGNED,
+                f"窗口被裁过，而窗口内的 launch 数算不出来（{why}）：per-launch 的分子是"
+                f"窗口内字节、分母必须是**同一个窗口内**的 launch 数，否则整个数字等比偏小。"
+                f"{est_bias}改用 --ks-window full 让两者同覆盖，或走整窗口口径"
+                f"（--ks-ledger-total-mb）/ 轨迹口径（--ks-memtrace）—— 后两条不需要这个分母",
+                observed={"launches_total": self.launches_total,
+                          "launches_in_window": None,
+                          "window_used_s": round(self.window_used_s, 2),
+                          "window_bias_pct": (round(bias, 1) if bias is not None else None)},
+                threshold={"launches_in_window": 1}))
         share = self.matched_kernel_kernel_share_pct
         if self.reliable and (share is None or share < SHARE_STRONG):
             out.append(self._share_refusal())
@@ -628,6 +665,52 @@ def _fmt_pct_cmp(value: float, threshold: float, digits: int = 0) -> str:
     return f"{value:.2f}% < {threshold:.2f}%"
 
 
+def _fmt_launches(n: float | None) -> str:
+    """等效 launch 数的人读形式：整数就不带小数点（跨窗口边界的会是小数）。"""
+    if n is None:
+        return "不可用"
+    return f"{n:.0f}" if abs(n - round(n)) < 1e-6 else f"{n:.2f}"
+
+
+def _launches_in_window(spans: Sequence[tuple[float, float]] | None,
+                        t0: float | None, t1: float | None,
+                        sample_t0: float | None, sample_t1: float | None,
+                        tol: float) -> tuple[float | None, bool | None]:
+    """窗口内的**等效 launch 数**（按时间重叠加权）与"两个时钟对得上吗"。
+
+    返回 `(count, aligned)`：
+
+    * `count=None` ⇒ 分母不可信，per-launch 必须拒绝（R-47 / `window_launch_unaligned`）。
+      两种情形：没有 launch 时间戳；或**有**时间戳但和采样时钟对不上。
+    * 跨窗口边界的 launch 只算它落在窗口里的那一段（`(hi-lo)/(b-a)`）—— 因为分子
+      （窗口内字节）也就是那一段的字节。落在窗口外的整段算 0。
+    * `aligned` 的判断：匹配到的 launch 必须都落在采样覆盖范围 `[sample_t0-tol, sample_t1+tol]`
+      内，且至少有一个与采样范围相交。采样器与 CUPTI 在 Linux 上同为 CLOCK_MONOTONIC，
+      这里不"假设"它们对得上，而是**当场核对**：对不上（偏移通常以小时计）就拒绝，
+      而不是把两个时钟域的数字相除。
+    """
+    if not spans:
+        return None, None
+    if t0 is None or t1 is None or sample_t0 is None or sample_t1 is None:
+        return None, None
+    lo_ok, hi_ok = sample_t0 - tol, sample_t1 + tol
+    aligned = all(lo_ok <= a and b <= hi_ok for a, b in spans)
+    if aligned and not any(b >= sample_t0 and a <= sample_t1 for a, b in spans):
+        aligned = False
+    if not aligned:
+        return None, False
+    total = 0.0
+    for a, b in spans:
+        if b <= a:                       # 零长度（坏数据）：按起点判
+            if t0 <= a <= t1:
+                total += 1.0
+            continue
+        lo, hi = max(a, t0), min(b, t1)
+        if hi > lo:
+            total += (hi - lo) / (b - a)
+    return total, True
+
+
 def estimate(samples: Sequence, peak_gbs: float, window_s: float,
              launches: int = 0, sampler_period_s: float = 0.0,
              ledger_per_launch: float | None = None,
@@ -643,12 +726,16 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
              matched_kernel_ns: int = 0,
              other_kernels_ns: int = 0,
              other_kernel_count: int = 0,
+             launch_spans: Sequence[tuple[float, float]] | None = None,
              trace_resolution: str = "") -> DramEstimate:
     """从 NVML 采样序列估算 DRAM 流量。
 
     samples: 具 `.t`(秒) / `.mem_util_pct` / `.sm_util_pct` 属性的采样点列表。
     window_mode: 'full' 用整段采样窗；'auto' 先按首个/末个忙碌采样点裁到稳态段。
     matched_kernel_ns: 被 `-k` 匹配的 kernel 的 GPU 时间（R-46 的分子）。
+    launch_spans: 被匹配 launch 的 (start_s, end_s) 绝对时间（**与 samples 同一时钟**，
+        即 `time.monotonic()` / CUPTI 的 CLOCK_MONOTONIC）。R-47 用它把 per-launch 的
+        分母对齐到积分窗口内。给不出时，窗口一旦被裁就只能拒绝这个口径。
     """
     est = DramEstimate(peak_gbs=peak_gbs, peak_source=peak_source,
                        window_s=window_s, launches=launches,
@@ -674,6 +761,10 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     est.sampler_period_s = default_dt
 
     # ---- 窗口限定（R-03）：--ks-warmup / --ks-window-s / 自动裁剪 ----
+    # 采样器覆盖的整段（对上 launch 时间戳要用它判断两个时钟对不对得上，R-47）
+    sample_t0 = float(samples[0].t)
+    span_before_trim = float(samples[-1].t) - sample_t0 if len(samples) > 1 else 0.0
+    sample_t1 = float(samples[-1].t) + default_dt
     t_first = float(samples[0].t)
     if warmup_s > 0:
         samples = [s for s in samples if float(s.t) - t_first >= warmup_s] or [samples[-1]]
@@ -683,6 +774,11 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     span_before_trim = float(samples[-1].t) - float(samples[0].t) if len(samples) > 1 else 0.0
     samples, trimmed = _trim_window(samples, window_mode, default_dt)
     est.trimmed = trimmed
+    est.launches_total = int(launches)
+    est.sample_t0, est.sample_t1 = sample_t0, sample_t1
+    est.window_t0 = float(samples[0].t)
+    est.window_t1 = float(samples[-1].t) + default_dt
+    window_cut = bool(trimmed or warmup_s > 0 or (window_limit_s or 0) > 0)
     est.matched_kernel_ns = int(matched_kernel_ns)
     est.other_kernels_ns = int(other_kernels_ns)
     est.other_kernel_count = int(other_kernel_count)
@@ -714,7 +810,20 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     est.window_busy_segments = _busy_segments(samples)
     est.bytes_total = busy_time * peak_gbs * 1e9
     est.throughput_pct_of_peak = est.mem_util_pct_mean
-    if launches > 0:
+    # 可算的偏差估计：窗口被裁掉多少，per-launch 就会等比偏小多少（R-47 要报这个数）
+    if window_s and window_s > 0:
+        est.window_bias_pct = 100.0 * (total_time / window_s - 1.0)
+    if window_cut:
+        # 分母必须落在窗口内。窗口内的等效 launch 数按时间重叠加权（跨边界的 launch
+        # 只算它落在窗口里的那一段），否则分子是窗口内字节、分母是整段 launch 数。
+        est.launches_in_window, est.launch_clock_aligned = _launches_in_window(
+            launch_spans, est.window_t0, est.window_t1,
+            sample_t0, sample_t1, tol=max(5.0 * default_dt, 1.0))
+        if est.launches_in_window is not None and est.launches_in_window > 0:
+            est.bytes_per_launch = est.bytes_total / est.launches_in_window
+    elif launches > 0:
+        # 窗口没被裁：分子与分母都覆盖整段运行，直接用整段 launch 数
+        est.launches_in_window = float(launches)
         est.bytes_per_launch = est.bytes_total / launches
 
     # ---- 说明文字（原因文本由 reason_for 生成，这里只补口径与边界）----
@@ -765,12 +874,21 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
                 "NVML memory-busy time × measured peak bandwidth（对应 ncu dram__bytes.sum）",
                 note, f"{est.mem_util_resolution_pct:.0f} %"))
     basis_used = est.resolve_basis(basis)
+    # R-47：分母也要能被读者复核 —— 说明它来自哪个窗口、窗口比整段短多少。
+    denom_note = ""
+    if est.window_bias_pct not in (None, 0.0):
+        denom_note = (f"；分母 = 窗口内等效 launch 数 {_fmt_launches(est.launches_in_window)}"
+                      f"（整段运行匹配到 {est.launches_total} 个；窗口 {est.window_used_s:.1f} s，"
+                      f"比整段短 {abs(est.window_bias_pct):.0f}%）")
     out.append(("est__dram_bytes_per_launch",
                 round(est.bytes_per_launch / 1e6, 2)
                 if (est.bytes_per_launch is not None and est.attributable) else None, "MB",
-                f"total / {est.launches} launches（对应 ncu dram__bytes.sum 的按 launch 口径）",
-                f"仅在『被匹配 kernel 占窗口 ≥{SHARE_STRONG:.0f}% + 窗口覆盖率 ≥{DUTY_WEAK:.0f}%』"
-                f"时成立（前提②见 ks__matched_kernel_window_share_pct）",
+                f"窗口内字节 ÷ 窗口内 launch 数（{_fmt_launches(est.launches_in_window)}；"
+                f"整段运行匹配到 {est.launches_total} 个）"
+                f"（对应 ncu dram__bytes.sum 的按 launch 口径）",
+                f"仅在『被匹配 kernel 占窗口 ≥{SHARE_STRONG:.0f}% + 窗口覆盖率 ≥{DUTY_WEAK:.0f}%"
+                f" + 分母与分子覆盖同一窗口』时成立"
+                f"（前提②见 ks__matched_kernel_kernel_share_pct）" + denom_note,
                 attribution_res))
     out.append(("est__dram_throughput_pct_of_peak",
                 round(est.throughput_pct_of_peak, 1) if est.reliable else None, "%",

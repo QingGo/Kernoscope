@@ -65,7 +65,8 @@
           "status": "soft",
           "actionable": true,
           "facts": {
-            "mb": 120.0
+            "mb": 120.0,
+            "source_unit": "MB"
           },
           "value": 120000000.0,
           "unit": "B",
@@ -209,7 +210,7 @@
         "unmeasured_metrics": 3,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 4003
+        "packet_bytes": 4022
       }
     }
   },

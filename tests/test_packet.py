@@ -5,11 +5,19 @@
   2. **不丢拒绝**：判词/未测到里出现的每个 code 都能在 `refusals` 表里查到怎么办；
   3. **防分叉**：人视图只由包渲染 —— 包里没有的东西不许出现在人视图里；
   4. **协议哈希**只认口径：同协议两次运行同哈希，换了窗口/标定就不同，换了时间/主机名不变。
+
+另外一条是从真机产物学来的：**量纲必须同源**。这里的 fixture 过去把
+`est__dram_bytes_total` 写成 `5.0e9`（**字节**口径），而真机 metric 的 unit 是 **MB** ——
+于是"7.27 TB 在包里写成 7.3 MB"在 384 条绿测试下活了很久。所以单位回归走**入库真机产物**
+（`bench/artifacts/**/rep-*.csv` 里带 value+unit），不用手搓的 fixture。
 """
 
 from __future__ import annotations
 
+import csv
+import dataclasses
 import json
+import pathlib
 
 import pytest
 
@@ -17,7 +25,8 @@ from kernoscope.packet import (MAX_VERDICTS, OK, PACKET_SCHEMA_VERSION,
                               PACKET_SIZE_BUDGET_BYTES, REFUSED, SOFT, Premise, Verdict,
                               build, dumps, packet_bytes, protocol_hash, refusal_index,
                               render_onepage)
-from kernoscope.provenance import Metric, Provenance, Section
+from kernoscope.diff_cmd import diff_packets
+from kernoscope.provenance import Metric, Provenance, Section, fmt_bytes, to_bytes
 from kernoscope.refusals import RefusalCode
 from kernoscope.report import DeviceInfo, KernelLaunch, KernelReport, Report
 
@@ -219,6 +228,10 @@ def test_onepage_uses_only_packet_contents():
         for key, val in (v.get("facts") or {}).items():
             if isinstance(val, dict):
                 assert all(str(x) in text for x in val.values()), f"{v['id']}.{key}"
+            elif key == "mb" and v.get("value") is not None:
+                # `mb` 不是独立信息，而是 `value`（字节）的另一种单位表示；一屏按人读单位
+                # 印它（7.27 TB），所以这里断言**同源**而不是子串 —— 断言关系比断言子串更强。
+                assert float(val) == pytest.approx(float(v["value"]) / 1e6, rel=1e-6), v["id"]
             elif isinstance(val, str) and len(val) < 6:
                 continue
             else:
@@ -401,3 +414,153 @@ def test_actionable_helper_rules_match_the_explicit_field():
                                   "premises": [{"id": "p", "ok": False}]}) is False
     # 显式字段优先于推导
     assert verdict_is_actionable({"id": "x", "status": "soft", "actionable": False}) is False
+
+
+# --------------------------------------------------------------------------
+# 量纲：用**入库真机产物**回归（R-51）
+# --------------------------------------------------------------------------
+ARTIFACTS = pathlib.Path(__file__).resolve().parents[1] / "bench" / "artifacts"
+
+
+def _real_csv_metrics() -> dict[str, tuple[float, str]]:
+    """从入库真机产物的 CSV 里读 (value, unit)。CSV 是报告自己的输出，单位是真的。"""
+    out: dict[str, tuple[float, str]] = {}
+    for path in sorted(ARTIFACTS.glob("*/rep-copy.csv")):
+        with path.open(encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                name, raw, unit = row.get("metric"), row.get("value"), row.get("unit")
+                if name and raw and name.startswith("est__dram_bytes"):
+                    out.setdefault(name, (float(raw), unit or ""))
+    return out
+
+
+def _report_with_real_dram_units() -> tuple[Report, dict[str, tuple[float, str]]]:
+    rep = _rich_report()
+    real = _real_csv_metrics()
+    assert "est__dram_bytes_total" in real, "入库产物里应当有真机 dram 指标"
+    # 用真机的 value+unit 换掉 fixture 里的字节口径值；前提给足，保证判词是 soft 而不是 refused
+    reps = {
+        "est__dram_bytes_total": real["est__dram_bytes_total"],
+        "est__dram_bytes_per_launch": real.get("est__dram_bytes_per_launch", (2.5e7, "MB")),
+    }
+    for sec in rep.kernels[0].sections:
+        for i, m in enumerate(sec.metrics):
+            if m.name in reps:
+                val, unit = reps[m.name]
+                sec.metrics[i] = dataclasses.replace(m, value=val, unit=unit)
+        sec.add(Metric.derived("ks__sampler_window_coverage_pct", 99.5, "%"))
+        sec.add(Metric.derived("ks__matched_kernel_kernel_share_pct", 100.0, "%"))
+    return rep, real
+
+
+def test_dram_verdict_units_are_bytes_on_a_real_run():
+    """真机 metric 的单位是 MB，包里的契约是字节 —— 两者必须只差一次换算，不是 10⁶。
+
+    这条**能红**：把 `metric_bytes()` 换回 `float(m.value)`（旧实现），
+    `dram_bytes.value` 会变成 7273090.3 而不是 7.2730903e12。
+    """
+    rep, real = _report_with_real_dram_units()
+    p = build(rep)
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    for vid, name in (("dram_bytes", "est__dram_bytes_total"),
+                      ("dram_bytes_per_launch", "est__dram_bytes_per_launch")):
+        val_mb, unit = real[name]
+        v = by_id[vid]
+        assert v["unit"] == "B", f"{vid}: 包里 dram 字节一族的单位必须是 B"
+        assert v["value"] == pytest.approx(to_bytes(val_mb, unit), rel=1e-9), \
+            f"{vid}: 包里 {v['value']} 与产物里的 {val_mb} {unit} 不是同一个量"
+        assert v["facts"]["mb"] == pytest.approx(v["value"] / 1e6, rel=1e-6), \
+            f"{vid}: value 与 facts.mb 必须同源"
+        assert v["facts"].get("source_unit") == (unit or "B"), f"{vid}: 要留下原单位"
+    # 散文（一屏）里印的量级也必须与 value 同源：它由 phrase_verdict 从 facts/value 生成
+    text = render_onepage(p)
+    for vid in ("dram_bytes", "dram_bytes_per_launch"):
+        assert fmt_bytes(by_id[vid]["value"]) in text, (vid, text)
+
+
+def test_packet_dram_value_matches_the_documented_terabyte_scale():
+    """入库产物的报告写 7.273 TB；包必须同量级（这条就是 7.3 MB 那个 bug 的回归）。"""
+    rep, real = _report_with_real_dram_units()
+    p = build(rep)
+    v = next(x for x in p["verdicts"] if x["id"] == "dram_bytes")
+    assert v["value"] > 1e12, v["value"]
+    onepage = render_onepage(p)
+    assert "TB" in onepage and "7.3 MB" not in onepage, onepage
+    assert "MB" == real["est__dram_bytes_total"][1], \
+        "这条回归的意义就在于：真机单位是 MB，而包里的契约是字节"
+
+
+def test_unknown_unit_is_refused_not_guessed():
+    """单位认不出来时必须抛错，不许当字节用 —— 猜错就是 10⁶ 级。"""
+    from kernoscope.provenance import ProvenanceError, to_bytes
+
+    assert to_bytes(1.0, "MB") == 1e6
+    assert to_bytes(1.0, "") == 1.0
+    assert to_bytes(1.0, "MiB") == 2.0 ** 20
+    with pytest.raises(ProvenanceError):
+        to_bytes(1.0, "MB/s")
+
+
+# --------------------------------------------------------------------------
+# 协议哈希的输入必须由**管线**写（R-49），不能靠测试手工塞 meta
+# --------------------------------------------------------------------------
+CALIB_A = ARTIFACTS / "20261009-012257" / "machine-profile.json"
+CALIB_B = ARTIFACTS / "20261008-235142" / "machine-profile.json"
+
+
+def _packet_from_cli(tmp_path, name: str, *extra: str) -> dict:
+    """**经 CLI** 产出一个包（不是手搓 Report），路径：--ks-synthetic + 入库标定产物。"""
+    from kernoscope.cli import main
+
+    out = tmp_path / f"{name}.json"
+    rc = main(["--ks-synthetic", "--ks-no-nvml", "--set", "basic",
+               "--packet", str(out), "--screen", "off", "--quiet", *extra])
+    assert rc == 0, f"CLI 失败：{extra}"
+    return json.loads(out.read_text())
+
+
+@pytest.mark.skipif(not CALIB_A.exists() or not CALIB_B.exists(),
+                    reason="需要入库的标定产物")
+def test_pipeline_writes_every_protocol_input(tmp_path):
+    """换标定 / 换窗口必须改变协议哈希 —— 这条**只能经 CLI 测**。
+
+    旧测试（`test_protocol_hash_changes_with_caliber`）是手工 `c.meta["calibration"]=...`
+    再断言哈希变化：它证明的是**函数**支持这个键，不是**管线**会填它。而 CLI 从来不写这组键，
+    于是生产里 `calibration/peaks/kernel/warmup_s/window_s` 全是 null ——
+    "换了一份标定（roofline 唯一的分母）"照样算同协议，`diff` 照样报"真改进"。
+    """
+    base = _packet_from_cli(tmp_path, "base", "--ks-calibration", str(CALIB_A))
+    a = base["protocol"]["hash"]
+    # ① 同一份标定、同一条命令 ⇒ 同哈希（不含路径/时间戳，否则每次都不可比）
+    assert _packet_from_cli(tmp_path, "base2", "--ks-calibration", str(CALIB_A))["protocol"]["hash"] == a
+    # ② 换标定（峰值不同）⇒ 必不同
+    other = _packet_from_cli(tmp_path, "calib_b", "--ks-calibration", str(CALIB_B))
+    assert other["protocol"]["hash"] != a, "换标定必须改变协议哈希"
+    # ③ 窗口参数 ⇒ 必不同（D5 的量就随它变，不能算同协议）
+    for extra in (("--ks-warmup", "40"), ("--ks-window-s", "20"), ("--ks-window", "full")):
+        got = _packet_from_cli(tmp_path, f"w_{extra[0]}", "--ks-calibration", str(CALIB_A), *extra)
+        assert got["protocol"]["hash"] != a, f"{extra} 必须改变协议哈希"
+
+
+@pytest.mark.skipif(not CALIB_A.exists() or not CALIB_B.exists(),
+                    reason="需要入库的标定产物")
+def test_calibration_change_makes_diff_incomparable(tmp_path):
+    """R-49 的验收：换了标定（分母变了）之后，`diff` 必须拒绝给方向。"""
+    a = _packet_from_cli(tmp_path, "a", "--ks-calibration", str(CALIB_A))
+    b = _packet_from_cli(tmp_path, "b", "--ks-calibration", str(CALIB_B))
+    res = diff_packets(a, b)
+    assert not res.comparable, "协议不同必须不可比"
+    assert "protocol_hash" in res.protocol_diffs
+    # 没有任何一条判词可以带方向
+    assert all(c.status == "incomparable" for c in res.comparisons if c.a is not None)
+
+
+def test_protocol_payload_has_no_paths_or_timestamps(tmp_path):
+    """协议输入里不许出现本机路径或标定时间戳：那会让"同口径"每次都变成不可比，
+    也会把本机目录写进包（包是要发出去的）。"""
+    p = _packet_from_cli(tmp_path, "clean", "--ks-calibration", str(CALIB_A))
+    blob = json.dumps(p, ensure_ascii=False)
+    assert str(ARTIFACTS) not in blob and "/Users/" not in blob and "C:\\" not in blob
+    cal = p["protocol"].get("calibration")
+    if cal is not None:                      # 暴露与否都可；暴露了就必须是"文件名+内容哈希"
+        assert "/" not in cal and ":" in cal

@@ -63,7 +63,8 @@
           "status": "soft",
           "actionable": true,
           "facts": {
-            "mb": 5000.0
+            "mb": 5000.0,
+            "source_unit": "MB"
           },
           "value": 5000000000.0,
           "unit": "B",
@@ -95,6 +96,7 @@
           "actionable": false,
           "facts": {
             "mb": 25.0,
+            "source_unit": "MB",
             "bias_pct": 147,
             "uncitable_value": 25000000.0
           },
@@ -176,10 +178,9 @@
       ],
       "refusals": {
         "share_too_low": {
-          "action": "把窗口缩到只含被匹配的 kernel（--ks-warmup/--ks-window-s…",
+          "action": "份额按整段运行的 launch 表算，缩采样窗口改不动它。三条有效路径：① 让被测区间里只…",
           "cost_kind": "wall_seconds",
-          "cost_s": 20.0,
-          "cmd": "kernoscope --ks-window-s 10 -k regex:<kernel> -- python…"
+          "cost_s": 20.0
         },
         "counters_denied": {
           "action": "计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…",
@@ -223,7 +224,7 @@
         "unmeasured_metrics": 3,
         "selftest_band": false,
         "trimmed": [],
-        "packet_bytes": 3905
+        "packet_bytes": 3925
       }
     },
     "files": {
@@ -248,7 +249,7 @@
       "换轨迹"
     ],
     "code_change_allowed": false,
-    "why": "per-launch 归因的两个前提里，'被匹配 kernel 占窗口 kernel 时间 ≥95%'不成立（实测 41.0%）。于是 per-launch、窗口总量、与账本的差值**都不能归给这个 kernel**；+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径（把窗口缩到只含目标 kernel，或换只覆盖它的轨迹口径），拿到可归因的读数再谈改代码。",
+    "why": "per-launch 归因的两个前提里，'被匹配 kernel 占窗口 kernel 时间 ≥95%'不成立（实测 41.0%）。于是 per-launch、窗口总量、与账本的差值**都不能归给这个 kernel**；+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径：份额是按**整段运行的 launch 表**算的，缩采样窗口（--ks-warmup/--ks-window-s）改不动它（R-48），所以有效的是①让被测区间里只有这一个 kernel、②改走整窗口口径 --ks-ledger-total-mb、③换只覆盖它的轨迹口径 --ks-memtrace。拿到可归因的读数再谈改代码。",
     "classification_aliases": [
       "window_unattributable",
       "unattributable",

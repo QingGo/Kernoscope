@@ -70,6 +70,39 @@ EXACT_COUNTER_ALLOWLIST: frozenset[str] = frozenset()
 # 自有指标前缀：任何非 EXACT 的数据都必须落在这里
 OUR_PREFIXES: tuple[str, ...] = ("est__", "meas__", "model__", "ks__")
 
+# 单位换算表 —— **只有这一处**。决策包（dram_bytes 一族的契约是字节）与任何人读格式
+# 都从这里取；加单位请加在这里，不要在下游各写一套换算。
+#
+# 为什么必须单独收口：真机 metric 的 unit 是 **MB**（analyze/dram.py 的 est__dram_bytes_*），
+# 而决策包曾经直接把 `value / 1e6` 当字节用 —— 于是 7.27 TB 在包里写成 "7.3 MB"（差 10⁶），
+# 而且 `value` / `facts.mb` / 自然语言 claim 三处**同时**错。一个量在两处各算一次，就会这样错。
+UNIT_TO_BYTES: dict[str, float] = {
+    "B": 1.0,
+    "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12, "PB": 1e15,
+    "KIB": 2.0 ** 10, "MIB": 2.0 ** 20, "GIB": 2.0 ** 30, "TIB": 2.0 ** 40,
+}
+
+
+def to_bytes(value: float, unit: str | None) -> float:
+    """按**指标自己声明的单位**折算成字节。
+
+    未知单位直接抛错、不猜 —— 猜错的量级就是 10⁶ 级，而这个项目的全部价值是"数字可复核"。
+    """
+    key = str(unit or "B").strip().upper()
+    if key not in UNIT_TO_BYTES:
+        raise ProvenanceError(
+            f"未知单位 {unit!r}：不能猜（先登记到 provenance.UNIT_TO_BYTES）")
+    return float(value) * UNIT_TO_BYTES[key]
+
+
+def fmt_bytes(n_bytes: float) -> str:
+    """字节数的人读串（十进单位）。阈值与报告侧 MB→GB/TB 的阶梯一致，
+    这样"包里的 claim"与"报告里那一行"不会各说一个量级。"""
+    for scale, unit in ((1e12, "TB"), (1e9, "GB"), (1e6, "MB"), (1e3, "KB")):
+        if abs(n_bytes) >= scale:
+            return f"{n_bytes / scale:.3g} {unit}"
+    return f"{n_bytes:.3g} B"
+
 UNAVAILABLE_REASONS: dict[str, str] = {
     "counters": (
         "requires GPU hardware performance counters, which are restricted here "

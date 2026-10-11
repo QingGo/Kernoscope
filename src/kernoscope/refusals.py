@@ -60,6 +60,7 @@ class RefusalCode(str, Enum):
     COVERAGE_TOO_LOW = "coverage_too_low"      # 窗口没被负载主导
     SHARE_TOO_LOW = "share_too_low"            # 被匹配 kernel 不是窗口主角
     SHARE_UNKNOWN = "share_unknown"            # 逐 launch 时长为空，份额无法判定
+    WINDOW_LAUNCH_UNALIGNED = "window_launch_unaligned"  # 窗口内 launch 数对不上采样窗口
     BELOW_RESOLUTION = "below_resolution"      # 读数低于仪器分辨率下限
     MEM_BUSY_ZERO = "mem_busy_zero"            # 显存忙碌恒为 0
     TRACE_UNAVAILABLE = "trace_unavailable"    # 轨迹口径给不出字节
@@ -110,6 +111,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.COVERAGE_TOO_LOW: "采样窗口没被被测负载主导",
     RefusalCode.SHARE_TOO_LOW: "被匹配的 kernel 不是窗口主角",
     RefusalCode.SHARE_UNKNOWN: "逐 launch 时长为空，份额无法判定",
+    RefusalCode.WINDOW_LAUNCH_UNALIGNED: "窗口内的 launch 数没法和采样窗口对齐",
     RefusalCode.BELOW_RESOLUTION: "读数低于仪器分辨率下限",
     RefusalCode.MEM_BUSY_ZERO: "显存忙碌恒为 0",
     RefusalCode.TRACE_UNAVAILABLE: "访存轨迹给不出字节数",
@@ -264,10 +266,23 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         command="kernoscope --ks-window auto -- python bench_loop.py", cost_s=20.0,
         then_answers=("dram_bytes",)),
     RefusalCode.SHARE_TOO_LOW: Remedy(
-        "把窗口缩到只含被匹配的 kernel（--ks-warmup/--ks-window-s 只跑一段），"
-        "或走整窗口口径（--ks-ledger-total-mb），或加 --ks-memtrace 换轨迹口径",
-        command="kernoscope --ks-window-s 10 -k regex:<kernel> -- python bench_loop.py",
-        cost_s=20.0, then_answers=("dram_bytes_per_launch",)),
+        # R-48：份额是按**整段运行的 launch 表**算的（cli.py 的 matched_all），
+        # 缩采样窗口改不动它 —— 旧文案让人「--ks-warmup/--ks-window-s 只跑一段」，
+        # 那条路既解不开这个前提，又会在能出数的时候把 per-launch 弄错（分母是整段、
+        # 分子变成窗口内）。所以这里只留真正有效的三条：让窗口里只有它、
+        # 换整窗口口径、或换轨迹口径。
+        "份额按整段运行的 launch 表算，缩采样窗口改不动它。三条有效路径："
+        "① 让被测区间里只有这一个 kernel（改 bench 脚本单独跑它）；"
+        "② 改走整窗口口径 --ks-ledger-total-mb（不要求归因）；"
+        "③ 加 --ks-memtrace 换轨迹口径（只测被追踪的那个 kernel，不受窗口影响）",
+        cost_s=20.0, then_answers=("dram_bytes", "dram_bytes_trace")),
+    RefusalCode.WINDOW_LAUNCH_UNALIGNED: Remedy(
+        "per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；"
+        "窗口被裁过、而 launch 时间戳与采样时钟又对不上时，分母不可信，所以不给这个数。"
+        "把窗口放开（--ks-window full；代价是启动/JIT 会稀释覆盖率，可能被 coverage_too_low 挡），"
+        "或改走整窗口口径 --ks-ledger-total-mb / 轨迹口径 --ks-memtrace —— 后两条不需要这个分母",
+        command="kernoscope --ks-window full -- python bench_loop.py", cost_s=20.0,
+        then_answers=("dram_bytes", "dram_bytes_trace")),
     RefusalCode.SHARE_UNKNOWN: Remedy(
         "逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，"
         "通常不缺）；缺时用 --ks-sqlite 直接指定库",

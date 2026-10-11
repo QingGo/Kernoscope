@@ -6,7 +6,7 @@
 **硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，
 或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。
 
-共 45 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
+共 46 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
 
 | code | 什么意思 | 怎么办 | 命令 | 代价 |
 |---|---|---|---|---|
@@ -36,8 +36,9 @@
 | `no_kernels` | 报告里没有 kernel | 先确认采集到了 kernel 活动（见 no_launch_activity 的补救办法） |  | ≈30s |
 | `multi_kernel_window` | 窗口里不止一个 kernel，per-launch 不可归因 | 用 -k 只选一个 kernel，让窗口里只有它；否则只能给整窗口总量 | `kernoscope -k regex:<kernel> --set detailed -- python app.py` | ≈0 |
 | `coverage_too_low` | 采样窗口没被被测负载主导 | 把稳态循环跑长（建议 ≥20 秒），或加 --ks-window auto 只统计稳态段；覆盖率不足时窗口里大部分时间是空闲，忙碌时段是否饱和无从确认 | `kernoscope --ks-window auto -- python bench_loop.py` | ≈20s |
-| `share_too_low` | 被匹配的 kernel 不是窗口主角 | 把窗口缩到只含被匹配的 kernel（--ks-warmup/--ks-window-s 只跑一段），或走整窗口口径（--ks-ledger-total-mb），或加 --ks-memtrace 换轨迹口径 | `kernoscope --ks-window-s 10 -k regex:<kernel> -- python bench_loop.py` | ≈20s |
+| `share_too_low` | 被匹配的 kernel 不是窗口主角 | 份额按整段运行的 launch 表算，缩采样窗口改不动它。三条有效路径：① 让被测区间里只有这一个 kernel（改 bench 脚本单独跑它）；② 改走整窗口口径 --ks-ledger-total-mb（不要求归因）；③ 加 --ks-memtrace 换轨迹口径（只测被追踪的那个 kernel，不受窗口影响） |  | ≈20s |
 | `share_unknown` | 逐 launch 时长为空，份额无法判定 | 逐 launch 时长为空：确认 nsys 的 CUPTI kernel 表可用（kernel 时长是 exact 的，通常不缺）；缺时用 --ks-sqlite 直接指定库 | `kernoscope --ks-sqlite kernels.sqlite` | ≈5s |
+| `window_launch_unaligned` | 窗口内的 launch 数没法和采样窗口对齐 | per-launch 要求分子（窗口内字节）与分母（窗口内 launch 数）覆盖**同一个窗口**；窗口被裁过、而 launch 时间戳与采样时钟又对不上时，分母不可信，所以不给这个数。把窗口放开（--ks-window full；代价是启动/JIT 会稀释覆盖率，可能被 coverage_too_low 挡），或改走整窗口口径 --ks-ledger-total-mb / 轨迹口径 --ks-memtrace —— 后两条不需要这个分母 | `kernoscope --ks-window full -- python bench_loop.py` | ≈20s |
 | `below_resolution` | 读数低于仪器分辨率下限 | 让 GPU 保持饱和：NVML 显存忙碌是整数百分比，低于 1 个百分点的读数会被截断成 0；把测量窗口对准真正在搬数据的时段（--ks-window auto / --ks-warmup） | `kernoscope --ks-window auto -- python bench_loop.py` | ≈20s |
 | `mem_busy_zero` | 显存忙碌恒为 0 | 显存忙碌恒为 0：确认被测负载真的在搬显存（而不是 L2 命中），且采样周期（200 ms）没有整段错过忙碌期 |  | ≈20s |
 | `trace_unavailable` | 访存轨迹给不出字节数 | 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel |  | ≈20s |

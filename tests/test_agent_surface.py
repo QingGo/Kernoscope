@@ -173,6 +173,9 @@ def test_verdict_catalog_is_exactly_what_builders_can_emit(monkeypatch):
         def __init__(self, name, value):
             self.name, self.value, self.note = name, value, "note"
             self.provenance = Provenance.ESTIMATED
+            # 与真 Metric 同构的字段：R-51 之后 packet 会读 unit 做字节换算，
+            # 这个替身少了它就会炸 —— 替身与真类型不一致时，测的是替身不是产品
+            self.unit = "B"
 
     monkeypatch.setattr(pk, "find_metric", lambda rep, name: FakeMetric(name, values.get(name)))
     monkeypatch.setattr(pk, "metric_value", lambda rep, name: values.get(name))

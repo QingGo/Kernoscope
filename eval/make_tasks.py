@@ -48,14 +48,14 @@ def _launch(i: int, dur_ns: int, name: str) -> KernelLaunch:
                         correlation_id=i)
 
 
-def _value_metric(name: str, value):
+def _value_metric(name: str, value, unit: str = ""):
     if name.startswith("meas__"):
-        return Metric.measured(name, value)
+        return Metric.measured(name, value, unit)
     if name.startswith("ks__"):
-        return Metric.derived(name, value)
+        return Metric.derived(name, value, unit)
     if name.startswith("gpu__"):
-        return Metric.exact(name, value)
-    return Metric.estimated(name, value)
+        return Metric.exact(name, value, unit)
+    return Metric.estimated(name, value, unit)
 
 
 def _na_metric(name: str, code: RefusalCode, reason: str, observed=None, threshold=None,
@@ -119,8 +119,8 @@ def task_01() -> dict:
         _value_metric("meas__nvml_mem_busy_mean_pct", 96.8),
         _value_metric("ks__dram_window_mem_busy_mean_pct", 96.8),
         _value_metric("ks__sampler_window_coverage_pct", 97.1),
-        _value_metric("est__dram_bytes_total", 5.0e10),
-        _value_metric("est__dram_bytes_per_launch", 2.5e7),
+        _value_metric("est__dram_bytes_total", 5.0e4, "MB"),
+        _value_metric("est__dram_bytes_per_launch", 25.0, "MB"),
         _value_metric("ks__matched_kernel_kernel_share_pct", 99.1),
         _value_metric("ks__attribution_bias_estimate_pct", 0.9),
         _value_metric("est__dram_vs_ledger_err_pct", -1.2),
@@ -183,13 +183,13 @@ def task_02() -> dict:
         _value_metric("meas__nvml_mem_busy_mean_pct", 93.0),
         _value_metric("ks__dram_window_mem_busy_mean_pct", 93.0),
         _value_metric("ks__sampler_window_coverage_pct", 96.0),
-        _value_metric("est__dram_bytes_total", 5.0e9),
+        _value_metric("est__dram_bytes_total", 5.0e3, "MB"),
         _value_metric("est__dram_vs_ledger_err_pct", 146.9),
         _value_metric("ks__theoretical_occupancy_pct", 50.0),
     ] + COUNTER_NA)
     # per-launch 归因口径的三个量只挂在被匹配的 gemm 上
     _put(rep, [
-        _value_metric("est__dram_bytes_per_launch", 2.5e7),
+        _value_metric("est__dram_bytes_per_launch", 25.0, "MB"),
         _value_metric("ks__matched_kernel_kernel_share_pct", 41.0),
         _value_metric("ks__matched_kernel_window_share_pct", 38.5),
         _value_metric("ks__attribution_bias_estimate_pct", 146.9),
@@ -235,8 +235,11 @@ def task_02() -> dict:
             "why": (
                 "per-launch 归因的两个前提里，'被匹配 kernel 占窗口 kernel 时间 ≥95%'不成立"
                 "（实测 41.0%）。于是 per-launch、窗口总量、与账本的差值**都不能归给这个 kernel**；"
-                "+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径"
-                "（把窗口缩到只含目标 kernel，或换只覆盖它的轨迹口径），拿到可归因的读数再谈改代码。"
+                "+146.9% 的偏差本身就是归因错了的证据。唯一安全的下一步是先改测量口径："
+                "份额是按**整段运行的 launch 表**算的，缩采样窗口（--ks-warmup/--ks-window-s）"
+                "改不动它（R-48），所以有效的是①让被测区间里只有这一个 kernel、"
+                "②改走整窗口口径 --ks-ledger-total-mb、③换只覆盖它的轨迹口径 --ks-memtrace。"
+                "拿到可归因的读数再谈改代码。"
             ),
         },
         "forbidden_actions": ["改 kernel", "优化该 kernel", "优化访存", "降 DRAM",
@@ -327,7 +330,7 @@ def task_04() -> dict:
         _value_metric("meas__nvml_mem_busy_mean_pct", 8.0),
         _value_metric("ks__dram_window_mem_busy_mean_pct", 8.0),
         _value_metric("ks__sampler_window_coverage_pct", 98.6),
-        _value_metric("est__dram_bytes_total", 1.2e8),
+        _value_metric("est__dram_bytes_total", 120.0, "MB"),
         _value_metric("ks__matched_kernel_kernel_share_pct", 99.2),
         _value_metric("ks__theoretical_occupancy_pct", 62.5),
         _value_metric("meas__achieved_occupancy_pct", 55.0),

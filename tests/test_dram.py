@@ -16,6 +16,7 @@ import kernoscope.cli as cli
 from kernoscope.analyze.dram import DUTY_UNUSABLE, DUTY_WEAK, estimate
 from kernoscope.backends.nvml import DeviceSample, SamplerResult
 from kernoscope.provenance import Provenance
+from kernoscope.refusals import RefusalCode, default_remedy
 from kernoscope.sections import BuildOptions, build_dram_section
 
 
@@ -262,14 +263,20 @@ def test_window_auto_trim_removes_startup_overhead():
     samples += [DeviceSample(t=(40 + i) * 0.2, mem_util_pct=95.0, sm_util_pct=99.0,
                              sm_clock_mhz=2500.0, power_w=300.0) for i in range(4)]
     full = estimate(samples, peak_gbs=900.0, window_s=8.8, launches=100, window_mode="full")
+    # R-47 之后，窗口被裁过时必须给出 launch 的绝对时间区间：per-launch 的分母要落在
+    # **同一个窗口内**。真实管线（cli.py）总是传它；这个用例以前不传，测的其实是
+    # "窗口被裁但没有时间戳"那条路径 —— 而那条路径现在必须拒绝给数。
+    spans = [(8.0 + i * 0.008, 8.0 + (i + 1) * 0.008) for i in range(100)]
     auto = estimate(samples, peak_gbs=900.0, window_s=8.8, launches=100, window_mode="auto",
-                    matched_kernel_ns=int(round(0.8e9)))
+                    matched_kernel_ns=int(round(0.8e9)), launch_spans=spans)
     assert full.window_coverage_pct < DUTY_UNUSABLE
     assert not full.reliable
     assert auto.window_coverage_pct >= DUTY_WEAK, "裁剪后应能给出 per-launch 归因"
     assert auto.attributable
     assert auto.trimmed and auto.window_used_s < full.window_used_s
     assert any("稳态段" in n for n in auto.notes)
+    # 100 个 launch 全落在裁剪后的窗口内 ⇒ 等效 launch 数就是 100
+    assert auto.launches_in_window == pytest.approx(100.0)
 
 
 def test_warmup_and_window_limit_are_honoured():
@@ -617,3 +624,107 @@ def test_launch_count_flag_does_not_change_the_per_launch_denominator(monkeypatc
         values[tag] = m["est__dram_bytes_per_launch"]["value"]
     assert values["all"] == pytest.approx(values["capped"]), \
         "-c 只是展示上限，不该改变 per-launch 的分母"
+
+
+# --------------------------------------------------------------------------
+# R-47 / D5：per-launch 的**分母**必须和分子覆盖同一个窗口
+# --------------------------------------------------------------------------
+def _uniform_run(seconds: float = 40.0, launches: int = 200, dt: float = 0.2):
+    """一段均匀负载：采样全忙，launch 均匀铺满整段（真机紧循环的形态）。"""
+    n = int(seconds / dt)
+    samples = [DeviceSample(t=i * dt, mem_util_pct=96.0, sm_util_pct=99.0,
+                            sm_clock_mhz=2500.0, power_w=300.0) for i in range(n)]
+    step = seconds / launches
+    spans = [(i * step, (i + 1) * step) for i in range(launches)]
+    return samples, spans
+
+
+def test_per_launch_denominator_follows_the_window():
+    """**D5 的回归**：同一负载换窗口，per-launch 必须不变（旧实现会等比偏小）。
+
+    真机实测（验收报告 D5）：同一驱动、同一账本，`--ks-window auto` 给 235.08 MB，
+    `--ks-warmup 40` 给 130.61 MB（−44.4%），`--ks-window-s 20` 给 45.84 MB（−80.5%），
+    而 share=100%、bias=+0%、无告警、rc=0。算术上就是 `235.08 × 45.4/81.5 ≈ 130.9`
+    —— **报告的 per-launch 是「窗口内字节 ÷ 整段运行的 launch 数」**。
+    """
+    samples, spans = _uniform_run()
+    full = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                    window_mode="full", launch_spans=spans,
+                    matched_kernel_ns=int(40.0e9))
+    cut = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                   window_mode="full", window_limit_s=20.0, launch_spans=spans,
+                   matched_kernel_ns=int(20.0e9))
+    assert full.attributable and cut.attributable
+    # 分子确实变小了（这就是当年出错的来源）
+    assert cut.bytes_total == pytest.approx(full.bytes_total / 2, rel=0.05)
+    # 但 per-launch 必须**基本不变**：分母跟着窗口走
+    assert cut.bytes_per_launch == pytest.approx(full.bytes_per_launch, rel=0.05), (
+        f"per-launch 随窗口变了：{full.bytes_per_launch / 1e6:.1f} → "
+        f"{cut.bytes_per_launch / 1e6:.1f} MB")
+    assert cut.launches_in_window == pytest.approx(100.0, rel=0.05)
+    # 旧公式（窗口内字节 ÷ 整段 200 个 launch）会给出约一半的值 —— 这条断言就是那个负样本
+    assert cut.bytes_total / 200 < cut.bytes_per_launch * 0.55
+    # R-47：可算的偏差要报出来
+    assert cut.window_bias_pct == pytest.approx(-50.0, abs=1.0)
+
+
+def test_untrimmed_window_keeps_using_all_launches():
+    """窗口没被裁时行为不变（真机 v3-only 的 235.08 MB / +0.1% 就是这一条路径）。"""
+    samples, spans = _uniform_run()
+    est = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                   window_mode="full", launch_spans=spans, matched_kernel_ns=int(40.0e9))
+    assert est.launches_in_window == pytest.approx(200.0)
+    assert est.bytes_per_launch == pytest.approx(est.bytes_total / 200)
+
+
+def test_window_cut_without_launch_times_refuses_per_launch():
+    """窗口被裁、又拿不到 launch 时间戳 ⇒ 必须拒绝，而不是给一个等比偏小的数。"""
+    samples, _ = _uniform_run()
+    est = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                   window_mode="full", window_limit_s=20.0, matched_kernel_ns=int(20.0e9))
+    assert est.bytes_per_launch is None
+    assert not est.attributable
+    r = est.refusal_for("est__dram_bytes_per_launch")
+    assert r.code is RefusalCode.WINDOW_LAUNCH_UNALIGNED
+    assert "分母" in r.message and "--ks-window full" in r.message
+    # R-47 要求把可算的偏差报出来；W3/D24 要求 observed 与 threshold 都不空
+    assert r.observed and r.threshold
+    assert r.observed["window_bias_pct"] == pytest.approx(-50.0, abs=1.0)
+    rem = default_remedy(r.code)
+    assert rem.command and "full" in rem.command
+
+
+def test_misaligned_clocks_are_refused_not_divided():
+    """两个时钟对不上（launch 时间戳远在采样窗之外）时必须拒绝，而不是相除。"""
+    samples, _ = _uniform_run()
+    spans = [(9_000_000.0 + i, 9_000_001.0 + i) for i in range(200)]   # 偏移 ~104 天
+    est = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                   window_mode="full", window_limit_s=20.0, launch_spans=spans,
+                   matched_kernel_ns=int(20.0e9))
+    assert est.launch_clock_aligned is False
+    assert est.bytes_per_launch is None
+    assert est.refusal_for("est__dram_bytes_per_launch").code \
+        is RefusalCode.WINDOW_LAUNCH_UNALIGNED
+
+
+def test_share_too_low_remedy_no_longer_sells_shrinking_the_window():
+    """R-48：份额按**整段 launch 表**算，缩采样窗口改不动它 —— 处方里不许再有那一条。
+
+    旧文案让人 `--ks-warmup/--ks-window-s 只跑一段` 并把这条写进 command：它既解不开这个
+    前提（份额不看采样窗口），又会在能出数的时候把 per-launch 弄错（分母是整段）。
+    """
+    samples, spans = _uniform_run(seconds=40.0, launches=200)
+    # 造一个"份额不足"的窗口：被匹配 kernel 只占窗口 kernel 时间的 40%
+    est = estimate(samples, peak_gbs=900.0, window_s=40.0, launches=200,
+                   window_mode="full", launch_spans=spans,
+                   matched_kernel_ns=int(16.0e9), other_kernels_ns=int(24.0e9),
+                   other_kernel_count=3)
+    assert not est.attributable
+    r = est.refusal_for("est__dram_bytes_per_launch")
+    assert r.code is RefusalCode.SHARE_TOO_LOW
+    rem = default_remedy(RefusalCode.SHARE_TOO_LOW)
+    for bad in ("--ks-warmup", "--ks-window-s"):
+        assert bad not in rem.action, f"处方里还在推荐 {bad} 缩窗口"
+        assert bad not in rem.command, f"command 里还在推荐 {bad} 缩窗口"
+        assert bad not in r.message, f"拒绝文案里还在推荐 {bad} 缩窗口"
+    assert "--ks-memtrace" in rem.action and "--ks-ledger-total-mb" in rem.action

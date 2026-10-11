@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from . import __version__
-from .provenance import Metric, Provenance
+from .provenance import Metric, Provenance, fmt_bytes, to_bytes
 from .refusals import Refusal, RefusalCode, Remedy, code_title, default_remedy
 
 PACKET_SCHEMA_VERSION = 1
@@ -209,6 +209,19 @@ def metric_value(rep: Any, name: str) -> float | int | None:
     return m.value  # type: ignore[return-value]
 
 
+def metric_bytes(rep: Any, name: str) -> float | None:
+    """把指标值折成**字节**，单位只从 `Metric.unit` 一处读（provenance.to_bytes）。
+
+    决策包里 `dram_bytes` 一族的契约是字节（`unit="B"`、`facts.mb`、claim 都从它派生），
+    而真机 metric 的 unit 是 MB。历史上这里写的是 `float(m.value) / 1e6` —— 把 MB 当字节，
+    于是 7.27 TB 被写成 7.3 MB。所以：**任何按字节消费 dram 指标的地方都必须走这个函数**。
+    """
+    m = find_metric(rep, name)
+    if m is None or m.value is None:
+        return None
+    return to_bytes(float(m.value), getattr(m, "unit", ""))  # type: ignore[arg-type]
+
+
 def _prov(rep: Any, name: str) -> str:
     m = find_metric(rep, name)
     return m.provenance.value if m is not None else ""
@@ -269,14 +282,17 @@ def _verdict_dram_total(rep: Any) -> Verdict | None:
     if m.provenance is Provenance.UNAVAILABLE:
         return _refused("dram_bytes", "DRAM 搬了多少字节", m, premises,
                         ("est__dram_bytes_total",))
-    val = float(m.value)  # type: ignore[arg-type]
+    nbytes = metric_bytes(rep, "est__dram_bytes_total")
+    if nbytes is None:          # 不变量上不可达；真到了这里，宁可不给判词也不给错的量级
+        return None
     return Verdict(
         id="dram_bytes", question="DRAM 搬了多少字节 / 是不是 DRAM bound", status=SOFT,
-        facts={"mb": round(val / 1e6, 1)}, value=round(val, 1), unit="B",
+        facts={"mb": round(nbytes / 1e6, 1), "source_unit": str(m.unit or "B")},
+        value=round(nbytes, 1), unit="B",
         provenance=m.provenance.value, premises=premises,
         metrics=("est__dram_bytes_total", "ks__sampler_window_coverage_pct"),
         next="与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期",
-        claim=f"整窗口 DRAM 约 {val / 1e6:.1f} MB（代理口径：NVML 显存忙碌时间 × "
+        claim=f"整窗口 DRAM 约 {fmt_bytes(nbytes)}（代理口径：NVML 显存忙碌时间 × "
               f"本机实测峰值），前提见 premises")
 
 
@@ -294,17 +310,20 @@ def _verdict_per_launch(rep: Any) -> Verdict | None:
     if m.provenance is Provenance.UNAVAILABLE:
         return _refused("dram_bytes_per_launch", "每次 launch 搬多少字节", m, premises,
                         ("est__dram_bytes_per_launch",))
+    nbytes = metric_bytes(rep, "est__dram_bytes_per_launch")
+    if nbytes is None:
+        return None
     bias = metric_value(rep, "ks__attribution_bias_estimate_pct")
-    facts: dict[str, Any] = {"mb": round(float(m.value) / 1e6, 2)}
+    facts: dict[str, Any] = {"mb": round(nbytes / 1e6, 2), "source_unit": str(m.unit or "B")}
     if bias:
         facts["bias_pct"] = round(float(bias))
     return Verdict(
         id="dram_bytes_per_launch", question="每次 launch 搬多少字节", status=SOFT,
-        facts=facts, value=round(float(m.value), 1), unit="B",
+        facts=facts, value=round(nbytes, 1), unit="B",
         provenance=m.provenance.value, premises=premises,
         metrics=("est__dram_bytes_per_launch", "ks__attribution_bias_estimate_pct"),
         next="改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进",
-        claim=f"每次 launch 约 {float(m.value) / 1e6:.2f} MB（代理口径）"
+        claim=f"每次 launch 约 {fmt_bytes(nbytes)}（代理口径）"
               + (f"；归因上偏估计 +{bias:.0f}%" if bias else ""))
 
 
@@ -319,13 +338,17 @@ def _verdict_trace(rep: Any) -> Verdict | None:
     if m.provenance is Provenance.UNAVAILABLE:
         return _refused("dram_bytes_trace", "DRAM 字节的第二条口径（访存轨迹）", m, premises,
                         ("est__dram_bytes_per_launch_trace",))
+    nbytes = metric_bytes(rep, "est__dram_bytes_per_launch_trace")
+    if nbytes is None:
+        return None
     return Verdict(
         id="dram_bytes_trace", question="DRAM 字节的第二条口径（访存轨迹）", status=SOFT,
-        facts={"mb": round(float(m.value) / 1e6, 2)}, value=round(float(m.value), 1), unit="B",
+        facts={"mb": round(nbytes / 1e6, 2), "source_unit": str(m.unit or "B")},
+        value=round(nbytes, 1), unit="B",
         provenance=m.provenance.value, premises=premises,
         metrics=("est__dram_bytes_per_launch_trace",),
         next="两条口径差得远时先查采样代表性与 L2 模型参数，不要挑好看的那个",
-        claim=f"轨迹口径每次 launch 约 {float(m.value) / 1e6:.2f} MB（L2 命中模型）")
+        claim=f"轨迹口径每次 launch 约 {fmt_bytes(nbytes)}（L2 命中模型）")
 
 
 def _verdict_ledger(rep: Any) -> Verdict | None:
@@ -918,6 +941,18 @@ def _clip(text: Any, limit: int) -> Any:
 _STATUS_MARK = {OK: "ok  ", SOFT: "soft", REFUSED: "no  "}
 
 
+def _bytes_phrase(v: dict[str, Any]) -> str:
+    """判词里的字节量级：从 `value`（字节）走统一的单位阶梯。
+
+    不要拿 `facts.mb` 再拼一个 " MB" —— 旧实现把 MB 当成字节，于是同一句话印出
+    "约 7.3 MB"，而报告里那一行是 7.273 TB（差 10⁶）。散文只由这里生成，所以这里也必须
+    只认 `value` 一个来源。
+    """
+    if v.get("value") is not None:
+        return fmt_bytes(float(v["value"]))
+    return "?"
+
+
 def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
     """判词的一句话（散文只在这里生成，包与报告里都不存它）。"""
     fid = v.get("id", "")
@@ -931,12 +966,12 @@ def phrase_verdict(v: dict[str, Any], index: dict[str, dict[str, Any]]) -> str:
                 f"占 kernel 时间 {f.get('share_pct')}%），进程内 kernel 时间合计 "
                 f"{f.get('total_ms')} ms")
     if fid == "dram_bytes":
-        return f"整窗口 DRAM 约 {f.get('mb')} MB（代理口径：NVML 显存忙碌 × 本机实测峰值）"
+        return f"整窗口 DRAM 约 {_bytes_phrase(v)}（代理口径：NVML 显存忙碌 × 本机实测峰值）"
     if fid == "dram_bytes_per_launch":
-        return (f"每次 launch 约 {f.get('mb')} MB（代理口径）"
+        return (f"每次 launch 约 {_bytes_phrase(v)}（代理口径）"
                 + (f"；归因上偏估计 +{f['bias_pct']}%" if f.get("bias_pct") else ""))
     if fid == "dram_bytes_trace":
-        return f"轨迹口径每次 launch 约 {f.get('mb')} MB（L2 命中模型）"
+        return f"轨迹口径每次 launch 约 {_bytes_phrase(v)}（L2 命中模型）"
     if fid == "ledger_verdict":
         if "err_pct" in f:
             return f"与账本相差 {float(f['err_pct']):+.1f}%（同口径对拍）"
