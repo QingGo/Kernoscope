@@ -28,6 +28,7 @@ from kernoscope.packet import (MAX_VERDICTS, OK, PACKET_SCHEMA_VERSION,
 from kernoscope.diff_cmd import diff_packets
 from kernoscope.provenance import Metric, Provenance, Section, fmt_bytes, to_bytes
 from kernoscope.packet import BUILDERS
+import kernoscope.packet as packet_mod
 from kernoscope.refusals import DEFAULT_REMEDIES
 from kernoscope.refusals import RefusalCode
 from kernoscope.report import DeviceInfo, KernelLaunch, KernelReport, Report
@@ -665,3 +666,78 @@ def test_written_packet_size_equals_packet_bytes(tmp_path):
     path, n = write_packet(p, str(tmp_path / "pk.json"))
     on_disk = (tmp_path / "pk.json").stat().st_size
     assert n == on_disk == p["cost"]["packet_bytes"], (n, on_disk, p["cost"]["packet_bytes"])
+
+
+# --------------------------------------------------------------------------
+# R-65：包里**被引用到的每个 code** 都必须查得到处置（+ 真能走到 refusal_entries 的 fixture）
+# --------------------------------------------------------------------------
+def test_refusal_codes_cited_in_the_packet_are_always_resolvable():
+    """R-65/N2：不变量 —— `cited ⊆ keys(refusals) ∪ refusals_omitted.codes`。
+
+    第四轮验收报告按不变量扫了 47 个构造场景，**32 个**有悬空 code（例如
+    `share_unknown`、`trace_unavailable`）：`_cap_refusal_entries` 按字母序留 8 条，
+    而 `unmeasured` 另按组截断 ⇒ 被引用的 code 可能整条消失、又不在 `refusals_omitted`
+    里；一屏会印"还有 N 个 `no_occupancy_probe`"却不给办法。受限环境正是命中它的场景。
+
+    这里用三种场景覆盖（含报告没试过的 `environment_refusals`：它的 code 此前**从不**
+    进拒绝表，是结构性的悬空）。
+    """
+    from kernoscope.provenance import Section
+    from kernoscope.refusals import DEFAULT_REMEDIES, RefusalCode
+
+    def check(p: dict, tag: str) -> None:
+        cited = packet_mod._cited_codes(p)
+        have = (set((p.get("refusals") or {}).keys())
+                | set((p.get("refusals_omitted") or {}).get("codes") or []))
+        assert not (cited - have), f"{tag}: 悬空 code {sorted(cited - have)}"
+        assert len(dumps(p).encode("utf-8")) <= 4096, f"{tag}: 超预算"
+
+    codes = [c for c in RefusalCode if c in DEFAULT_REMEDIES]
+
+    # ① 47 个 code 全塞进拒绝表
+    rep = _rich_report()
+    sec = Section("受限环境")
+    for i, c in enumerate(codes):
+        sec.add(Metric.unavailable(f"est__blocked_{i}", "本机拿不到", code=c))
+    rep.kernels[0].sections.append(sec)
+    p1 = build(rep)
+    assert "refusal_entries" in p1["cost"]["trimmed"], "这个 fixture 必须真的走到条目上限那一步"
+    check(p1, "47 code")
+
+    # ② environment_refusals 的 code（曾经结构性悬空）
+    rep2 = _rich_report()
+    rep2.meta["environment_refusals"] = [
+        {"code": c, "message": "缺件降级"}
+        for c in ("nsys_missing", "nvbit_missing", "cuobjdump_missing", "no_nvml",
+                  "pytorch_missing", "no_gpu", "no_calibration", "no_memtrace",
+                  "no_instr_hist", "no_sass_source", "no_static_input", "no_workload")]
+    p2 = build(rep2)
+    check(p2, "env×12")
+
+    # ③ 两者叠加
+    rep3 = _rich_report()
+    sec3 = Section("受限环境")
+    for i, c in enumerate(codes):
+        sec3.add(Metric.unavailable(f"est__b{i}", "本机拿不到", code=c))
+    rep3.kernels[0].sections.append(sec3)
+    rep3.meta["environment_refusals"] = rep2.meta["environment_refusals"]
+    p3 = build(rep3)
+    check(p3, "叠加")
+
+
+def test_onepage_says_what_was_left_out():
+    """R-70/D10：一屏不能只说"裁了哪一步"，要说**少了哪几条**。
+
+    全仓此前除 `packet.py` 外没有任何视图引用 `verdicts_more` / `refusals_omitted` /
+    `unmeasured_more` —— 机器契约有了，人视图没有。
+    """
+    rep = _rich_report()
+    rep.meta["environment_refusals"] = [
+        {"code": c, "message": "缺件降级"} for c in
+        ("nsys_missing", "nvbit_missing", "cuobjdump_missing", "no_nvml", "pytorch_missing",
+         "no_gpu", "no_calibration", "no_memtrace", "no_instr_hist", "no_sass_source")]
+    p = build(rep)
+    assert p.get("refusals_omitted"), "这个 fixture 应当触发条目省略"
+    text = render_onepage(p)
+    assert "拒绝条目省了" in text and str(p["refusals_omitted"]["count"]) in text
+    assert (p["refusals_omitted"]["codes"] or [""])[0] in text

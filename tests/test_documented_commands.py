@@ -12,11 +12,17 @@ R-55 的三处修正（旧门禁的声明比能力大得多）：
    `$( )` 完全不受检，而且校验器**不认识自家新子命令**（`capabilities`/`selftest`/`diff`），
    放宽范围反而会红一批合法命令。现在把每条命令切成 argv 后交给**真实解析器**：
    子命令表来自 `cli.SUBCOMMANDS`（单一真源），开关集合来自各子命令自己的 `--help`。
-3. **逐字执行**：以前**0 条**文档命令被真的跑过。现在登记若干条**从文档里逐字取出来的**
-   离线可跑命令，跑它们并断言结论；登记表里的那行文字必须真的还在文档里（否则测试红）。
+3. **逐字执行 + 断言结论**：以前**0 条**文档命令被真的跑过。现在两件事分开算清楚：
 
-规则表 `DOC_VERBATIM` 里每条是：(文档, 文档里那一行的片段, 断言函数)。
-断言函数拿 (rc, stdout, stderr) 判断；任何一条不成立就失败。
+   * **全部**可检命令（当前 34 条）都交给真实解析器 —— 保证"照抄不会因为开关/子命令写错
+     而失败"；
+   * 其中**读者面**的 9 条（医生自检 / 合成首跑 / 入口层 / E4-6 per-launch / 参考层 packet /
+     strict 卡门 / metrics / 轨迹口径 / occupancy / diff 对拍）**逐字执行并断言它承诺的
+     结论**（`DOC_VERBATIM`）。比例是 9/34 —— 不写成"每条命令的结论都被断言"。
+
+规则表 `DOC_VERBATIM` 每条是：(文档, 文档里那一行的片段, 断言函数, 适配函数, 为什么)。
+**适配函数只做一件事**：把文档里的占位符/外部文件换成夹具（`<每次 launch 的 MB>` → 数值、
+`-- <读者自己的程序>` → `--ks-synthetic`）；开关一个都不改，`needle` 必须真的还在文档里。
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import json
 import re
 import shlex
 import subprocess
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -376,11 +383,259 @@ def _assert_brief_is_entry_layer(rc, out, err):
     assert b["next_layer"]["bytes"] > 0 and b["next_layer"]["contains"]
 
 
-# 登记表：(文档, 文档里那一行必须存在的片段, 断言函数)
-DOC_VERBATIM: list[tuple[str, str, object]] = [
-    ("README.md", "kernoscope doctor", _assert_doctor_ok),
-    ("README.md", "--ks-synthetic --set detailed", _assert_synthetic_report),
-    ("skills/kernoscope/SKILL.md", "capabilities --brief", _assert_brief_is_entry_layer),
+# --------------------------------------------------------------------------
+# 2) 读者面命令：逐字执行 + 断言**结论**
+# --------------------------------------------------------------------------
+# 登记表：(文档, 文档里必须存在的那一行片段, 断言函数, 适配函数, 为什么这条值得登记)
+#
+# 纪律：`needle` 必须真的在文档里（否则测试红 —— 登记表不许过期）；argv 从**文档那一行**
+# 取（含 `\` 续行拼接），适配函数只做"把占位符换成夹具文件"这一件事，不再改开关。
+Registered = namedtuple("Registered", "doc needle check adapt why")
+
+
+def _doc_command_line(doc: str, needle: str) -> str:
+    """在文档的 bash 块里找到含 `needle` 的**逻辑行**（续行已拼接）。"""
+    path = ROOT / doc
+    for _start, block in _fenced_blocks(path):
+        for line in _logical_lines(block):
+            if needle in line and kernoscope_argv(line) is not None:
+                return line
+    raise AssertionError(f"{doc} 里找不到这一行（登记表过期）：{needle!r}")
+
+
+def _assert_doctor_ok(rc, out, err):
+    # doctor 的退出码说的是"这台机器能不能跑核心路径"（无 GPU 的机器就是 1），
+    # 不是"命令对不对" —— 所以这里只要求它跑完并给出结论。
+    assert rc in (0, 1), (rc, err)
+    assert "结论" in out or "conclusion" in out.lower()
+
+
+def _assert_synthetic_report(rc, out, err):
+    assert rc == 0, err
+    assert "SYNTHETIC" in out or "合成" in out, "无 GPU 的路径必须明确标注是合成数据"
+    assert "n/a" in out, "拿不到的计数器必须报 n/a"
+
+
+def _assert_brief_is_entry_layer(rc, out, err):
+    assert rc == 0, err
+    b = json.loads(out)                      # 入口层必须是纯 JSON
+    assert b["next_layer"]["bytes"] > 0 and b["next_layer"]["contains"]
+
+
+def _adapt_calibration(argv: list[str], work: Path) -> list[str]:
+    """把文档里的占位符换成夹具：标定文件、`-o` 目录、`<每次 launch 的 MB>`。
+
+    文档那条命令的最后是 `-- python bench_loop.py`（读者自己的负载），离线跑不了；
+    所以补一个 `--ks-synthetic`（合成负载），并在测试里把采样器与 launch 表换成夹具 ——
+    这正是"文档说的口径能不能跑通"的最小可执行形式。
+    """
+    out, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--ks-calibration", "-o", "--packet") and i + 1 < len(argv):
+            val = {"--ks-calibration": str(ROOT / "bench/artifacts/20261011-094535/"
+                                           "machine-profile.json"),
+                   "-o": str(work / "rep"),
+                   "--packet": str(work / "pk.json")}[a]
+            out += [a, val]
+            i += 2
+            continue
+        nxt = (argv[i + 1] if i + 1 < len(argv) else "")
+        if a == "-k" and nxt.startswith("regex:"):
+            out += ["-k", "regex:gemm"]          # 文档里的 <kernel>/my_kernel → 夹具里的 gemm
+            i += 2
+            continue
+        if a == "--ks-ledger-mb" and i + 1 < len(argv):
+            out += ["--ks-ledger-mb", "420000" if argv[i + 1] == PLACEHOLDER
+                    else argv[i + 1]]
+            i += 2
+            continue
+        out.append("420000" if a == PLACEHOLDER else a)   # <每次 launch 的 MB>
+        i += 1
+    if "--ks-synthetic" not in out:
+        out.append("--ks-synthetic")      # 追加（插到中间会把 `--set` 的值吃掉）
+    return out
+
+
+def _assert_per_launch_with_premises(rc, out, err, work: Path):
+    """E4-6 的结论：给了 per-launch，并且**同时**给出它的前提与分母（R-47/R-48）。"""
+    assert rc == 0, err
+    m = _load_metrics(work / "rep.ksreport.json")
+    assert m["est__dram_bytes_per_launch"]["value"] is not None
+    for k in ("ks__sampler_window_coverage_pct", "ks__matched_kernel_kernel_share_pct",
+              "ks__attribution_bias_estimate_pct"):
+        assert m[k]["value"] is not None, k
+
+
+def _assert_packet_window_mode(rc, out, err, work: Path):
+    """参考层那条（`--packet -`）：包必须带上协议（窗口模式）与 per-launch 判词。"""
+    assert rc == 0, err
+    pk = json.loads((work / "pk.json").read_text(encoding="utf-8"))
+    assert pk["protocol"]["window_mode"] == "auto"
+    vs = {v["id"]: v for v in pk["verdicts"]}
+    assert "dram_bytes_per_launch" in vs, sorted(vs)
+
+
+def _adapt_offline(argv: list[str], work: Path) -> list[str]:
+    """给"文档里最后是 `-- <读者自己的程序>`"的命令补一个合成负载（离线可跑的最小形式）。"""
+    if not any(a in argv for a in ("--ks-synthetic", "--ks-sqlite", "--ks-nsys-rep")):
+        return [*argv, "--ks-synthetic"]
+    return argv
+
+
+def _adapt_strict(argv: list[str], work: Path) -> list[str]:
+    """`--strict` 那条要的是"请求了拿不到的数据" ⇒ 追加合成负载 + 关掉 NVML。"""
+    return [*argv, "--ks-synthetic", "--ks-no-nvml"] if "--ks-synthetic" not in argv else argv
+
+
+def _assert_strict_refuses(rc, out, err):
+    assert rc == 2, "文档承诺 --strict 会让 CI 在缺数据时失败"
+    assert "error(strict)" in err
+
+
+def _assert_metrics_not_silently_empty(rc, out, err):
+    """README 那条是 `--strict --metrics <拿不到的计数器>`：结论就是 **CI 必须红**。
+
+    （"写错名字不静默"由下面的合成用例单独守。）
+    """
+    assert rc == 2, (rc, err[-200:])
+    assert "一个都不存在" in err or "strict" in err
+
+
+def _write_official_trace(path: Path, kernel: str = "gemm_k") -> Path:
+    """写一段**官方 mem_trace 格式**的最小轨迹（含全局 LDG 与共享 STS 两种访存）。"""
+    lines = [
+        f"MEMTRACE: CTX 0x1 - LAUNCH - Kernel pc 0x2 - Kernel name {kernel}(float*, float*) "
+        f"- grid launch id 0",
+    ]
+    base = 0x7f0000000000
+    for cta in range(4):
+        for lane in range(4):                       # 每个 warp 4 个地址 = 16 B（半 sector）
+            a = base + cta * 0x1000 + lane * 4
+            lines.append(f"MEMTRACE: CTX 0x1 - grid_launch_id 0 - CTA {cta},0,0 - warp 0 "
+                         f"- LDG.E.128 - " + " ".join(hex(a + k * 16) for k in range(4)))
+        # 共享访存：**不该**进入全局口径（R-73）
+        lines.append(f"MEMTRACE: CTX 0x1 - grid_launch_id 0 - CTA {cta},0,0 - warp 0 "
+                     f"- STS.U16 - " + " ".join(hex(0x100 + cta + k) for k in range(4)))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _make_trace_argv(work: Path):
+    def adapt(argv: list[str], w: Path) -> list[str]:
+        out, i = [], 0
+        while i < len(argv):
+            a = argv[i]
+            if a in ("--ks-memtrace", "-o") and i + 1 < len(argv):
+                val = (str(_write_official_trace(w / "trace.txt")) if a == "--ks-memtrace"
+                       else str(w / "rep"))
+                out += [a, val]
+                i += 2
+                continue
+            out.append(a)
+            i += 1
+        if "--ks-synthetic" not in out:
+            out.append("--ks-synthetic")   # 文档最后是 `-- ./your_app`：离线用合成负载顶上
+        return out
+    return adapt
+
+
+def _assert_trace_caliber(rc, out, err, work: Path):
+    """E5-4 的结论：轨迹口径给出 measured 的访存统计，且合并效率**不超过 100%**。"""
+    assert rc == 0, err
+    rep = json.loads((work / "rep.ksreport.json").read_text(encoding="utf-8"))
+    metrics = {}
+    for k in rep.get("kernels", []):
+        for s in k.get("sections", []):
+            for m in s.get("metrics", []):
+                metrics.setdefault(m["name"], m)
+    for name in ("meas__sectors_per_request", "meas__coalescing_efficiency_pct",
+                 "meas__trace_records"):
+        assert name in metrics, f"轨迹口径少了 {name}"
+    coal = metrics["meas__coalescing_efficiency_pct"]["value"]
+    assert coal is None or coal <= 100.0 + 1e-9, f"合并效率 {coal}% 物理上不可能"
+
+
+def _assert_diff_json(rc, out, err, work: Path):
+    assert rc == 0, err
+    d = json.loads(out)
+    assert d["comparisons"] and "not_judged" in d
+
+
+def _make_diff_argv(work: Path):
+    def adapt(argv: list[str], w: Path) -> list[str]:
+        from kernoscope.packet import build, write_packet
+        from test_packet import _rich_report
+
+        a = w / "a.json"
+        b = w / "b.json"
+        sc = w / "selfcheck.json"
+        write_packet(build(_rich_report()), str(a))
+        write_packet(build(_rich_report()), str(b))
+        sc.write_text(json.dumps({"band": {"dram_bytes_pct": [-5.0, 5.0]},
+                                  "mdd": {"dram_bytes_pct": 5.0, "kernel_time_pct": 0.5}}),
+                      encoding="utf-8")
+        out = []
+        for t in argv:
+            out.append({"before.json": str(a), "after.json": str(b),
+                        "machine-selfcheck.json": str(sc)}.get(t, t))
+        return out
+    return adapt
+
+
+def _make_occupancy_argv(argv: list[str], work: Path) -> list[str]:
+    """把 `occupancy-records.txt` 换成仓库里那份真记录、把 `occ.json` 指到临时目录。"""
+    rec = str(ROOT / "bench/artifacts/20261011-094535/occupancy-records.txt")
+    out = []
+    for i, a in enumerate(argv):
+        if a == "--from" and i + 1 < len(argv):
+            out += [a, rec]
+            continue
+        if a == "--write-json" and i + 1 < len(argv):
+            out += [a, str(work / "occ.json")]
+            continue
+        if i > 0 and argv[i - 1] in ("--from", "--write-json"):
+            continue
+        out.append(a)
+    return out
+
+
+def _assert_occupancy_json(rc, out, err, work: Path):
+    """结论：区间重叠法给出每个 kernel 的达到 occupancy（可以 >1 个 kernel，按名字分桶）。"""
+    assert rc == 0, err
+    d = json.loads((work / "occ.json").read_text(encoding="utf-8"))
+    assert d, "occupancy JSON 是空的"
+    for name, row in d.items():
+        assert row.get("occupancy_pct", 0) > 0, (name, row)
+        assert row.get("peak_concurrent_blocks", 0) > 0, (name, row)
+
+
+DOC_VERBATIM: list[Registered] = [
+    Registered("README.md", "kernoscope doctor", _assert_doctor_ok, None,
+               "E0：告诉读者「这台机器能答什么」是第一步"),
+    Registered("README.md", "--ks-synthetic --set detailed", _assert_synthetic_report, None,
+               "无 GPU 也能跑通全流程（首跑 < 5 分钟的那条路径）"),
+    Registered("skills/kernoscope/SKILL.md", "capabilities --brief", _assert_brief_is_entry_layer,
+               None, "入口层：agent 开工前那一条"),
+    Registered("README.md", "--ks-ledger-mb 234",
+               _assert_per_launch_with_premises, _adapt_calibration,
+               "E4-6：教程第 4 章要用的 per-launch + 账本 + 标定那条命令"),
+    Registered("skills/kernoscope/references/recipes.md", "--ks-window auto",
+               _assert_packet_window_mode, _adapt_calibration,
+               "参考层里 agent 实际照抄的那条（--packet - + 窗口模式）"),
+    Registered("README.md", "--strict", _assert_strict_refuses, _adapt_strict,
+               "CI 卡门：请求了不可得的数据必须 exit 2"),
+    Registered("README.md", "--metrics sm__throughput.avg.pct_of_peak_sustained_elapsed",
+               _assert_metrics_not_silently_empty, _adapt_offline,
+               "窄化输出时写错名字不能「看起来成功」（这个计数器在本机拿不到）"),
+    Registered("README.md", "--ks-memtrace", _assert_trace_caliber, _make_trace_argv(None),
+               "E5-4：轨迹口径（合并效率不许 > 100%）"),
+    Registered("skills/kernoscope/SKILL.md", "--selfcheck machine-selfcheck.json",
+               _assert_diff_json, _make_diff_argv(None),
+               "闭环最后一步：对拍给方向与三态"),
+    Registered("README.md", "occupancy --from occupancy-records.txt --write-json",
+               _assert_occupancy_json, _make_occupancy_argv,
+               "Occupancy 的区间重叠法（ncu 计数器之外的那条路）"),
 ]
 
 
@@ -390,18 +645,43 @@ def test_registered_commands_are_executed_verbatim(monkeypatch, tmp_path):
 
     旧门禁的"逐字执行文档命令数 = 0"：三个登记测试的 argv 全是测试现场编的（带
     `--ks-synthetic` 这类文档里没有的开关），所以"文档说的能不能跑"从来没被验证过。
+    第四轮 P2 指出只覆盖 3/31（10%），这一轮扩到读者面那几条 —— 并且**登记表不许过期**。
     """
-    assert len(DOC_VERBATIM) >= 3, "至少登记三条逐字命令"
+    assert len(DOC_VERBATIM) >= 8, "读者面命令至少登记 8 条"
     monkeypatch.chdir(tmp_path)
-    for doc, needle, check in DOC_VERBATIM:
-        text = (ROOT / doc).read_text(encoding="utf-8")
-        assert needle in text, f"{doc} 里已经没有这一行了（登记表过期）：{needle!r}"
-        line = next(l for l in text.splitlines() if needle in l and l.strip().startswith(
-            ("kernoscope", "uv run", "sudo", "CUDA", "$(")))
+    # 离线夹具：NVML 采样序列 + 与窗口自洽的 launch 表（无 GPU 的机器上"拿不到数"是环境
+    # 决定的，不是命令决定的 —— 那样测不出文档对不对）
+    from test_dram import _FakeSampler, _coherent_launches
+
+    monkeypatch.setattr(cli, "Sampler", _FakeSampler)
+    monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
+    for i, reg in enumerate(DOC_VERBATIM):
+        work = tmp_path / f"{i:02d}"          # 每条命令一个目录：`-o rep` 不许互相撞
+        work.mkdir()
+        line = _doc_command_line(reg.doc, reg.needle)
         argv = kernoscope_argv(line)
         assert argv is not None, line
+        argv = [("regex:gemm" if a == "regex:PLACEHOLDER" else a) for a in argv]
+        if reg.adapt is not None:
+            argv = reg.adapt(argv, work)
         rc, out, err = _run(argv)
-        check(rc, out, err)                   # type: ignore[operator]
+        if reg.check.__code__.co_argcount == 4:
+            reg.check(rc, out, err, work)              # type: ignore[operator]
+        else:
+            reg.check(rc, out, err)                    # type: ignore[operator]
+
+
+@needs_git
+def test_every_doc_command_is_either_parsed_or_asserted():
+    """把"覆盖率"写成事实而不是印象：每条命令都过解析器，其中读者面那几条断言结论。"""
+    parsed = 0
+    for doc in DOCS:
+        for _start, block in _fenced_blocks(doc):
+            for line in _logical_lines(block):
+                if kernoscope_argv(line) is not None:
+                    parsed += 1
+    assert parsed >= 30, f"只扫到 {parsed} 条可检命令"
+    assert len(DOC_VERBATIM) < parsed, "登记数不该超过可检命令数（那是重复计数）"
 
 
 # --------------------------------------------------------------------------

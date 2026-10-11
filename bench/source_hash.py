@@ -8,7 +8,8 @@
 
     python bench/source_hash.py          # 16 位 sha256 前缀
 
-覆盖面：`src/**/*.py`、`tools/**/*.py`、`bench/*.py`、`bench/*.sh`、`pyproject.toml`。
+覆盖面：`src/**/*.py`、`tools/**/*.py`、`bench/*.py`、`bench/*.sh`、`bench/**/*.cu|h`、
+`tools/probes/**/*.cu|h|sh|txt`、`pyproject.toml`。
 明确的**不覆盖**：产物目录、测试、文档 —— 它们不影响本次测量的行为。
 """
 
@@ -18,8 +19,12 @@ import hashlib
 import pathlib
 import sys
 
-PATTERNS = ("src/**/*.py", "tools/**/*.py", "bench/*.py", "bench/*.sh")
-EXTRA = ("pyproject.toml",)
+PATTERNS = ("src/**/*.py", "tools/**/*.py", "bench/*.py", "bench/*.sh",
+            # R-69/N4：真正产出被引用数字的**微基准与探针源码**也要覆盖 ——
+            # 账本真值（−4.2% / +12.8%）来自 `bench/ledger_probe.cu`，改它指纹不变就等于没钉。
+            "bench/**/*.cu", "bench/**/*.h", "tools/probes/**/*.cu", "tools/probes/**/*.h",
+            "tools/probes/**/*.sh", "tools/probes/**/*.txt")
+EXTRA = ("pyproject.toml", "bench/run.sh")
 
 
 def source_files(root: pathlib.Path) -> list[pathlib.Path]:

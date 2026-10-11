@@ -729,7 +729,8 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
         "env": env,
         "verdicts": [v.to_dict() for v in verdicts],
         "unmeasured": unmeasured,
-        "refusals": _refusal_index(verdicts, unmeasured_all, capabilities),
+        "refusals": _refusal_index(verdicts, unmeasured_all, capabilities,
+                                   _env_refusals(rep)),
         "next": _next_actions(verdicts, unmeasured),
         "cost": cost,
     }
@@ -739,7 +740,7 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
         packet["verdicts_more"] = verdicts_more
     if getattr(rep, "meta", {}).get("synthetic"):
         packet["synthetic"] = True
-    for d in (getattr(rep, "meta", {}) or {}).get("environment_refusals", []) or []:
+    for d in _env_refusals(rep):
         packet.setdefault("environment_refusals", []).append(
             {"code": d.get("code"), "message": _clip(str(d.get("message", "")), 120)})
     if report_path:
@@ -757,7 +758,8 @@ def enforce_budget(packet: dict[str, Any],
     下面 `steps` 里的顺序**就是**实际顺序（这条注释与实现逐字一致，改一处就改两处）：
 
         未测到的例子 > 判词的指标名 > 下一步指针 > 未测到归组数 > 成立的前提 >
-        remedy 命令 > 处置文本 > 判词条数 > 判词 facts > 拒绝条目数
+        remedy 命令 > 处置文本 > 判词条数 > 判词 facts > 拒绝条目数 > 判词硬上限 >
+        环境降级诊断的 message > 环境降级诊断条目数
 
     每一步都只删"能从完整报告里再取回来"的东西，并把步骤名写进 `cost.trimmed` ——
     读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。最后一级丢掉的
@@ -802,11 +804,27 @@ def enforce_budget(packet: dict[str, Any],
         refs = packet.get("refusals") or {}
         if len(refs) <= REFUSAL_KEEP:
             return
-        keep = sorted(refs)[:REFUSAL_KEEP]
-        dropped = [c for c in sorted(refs) if c not in set(keep)]
+        # R-65/N2：**先保被引用的**。旧实现按字母序留 8 条，于是 `unmeasured`（另按 3 组
+        # 截断）引用的 code 可能整条消失，又不在 `refusals_omitted` 里 —— 一屏会印
+        # "还有 N 个 `no_occupancy_probe`"却不给办法，而受限环境正是命中它的场景
+        # （47 个构造场景里 47 个都有悬空 code）。
+        cited = _cited_codes(packet)
+        keep = [c for c in sorted(refs) if c in cited][:REFUSAL_KEEP]
+        for c in sorted(refs):
+            if len(keep) >= REFUSAL_KEEP:
+                break
+            if c not in keep:
+                keep.append(c)
+        keep_set = set(keep)
+        dropped = [c for c in sorted(refs) if c not in keep_set]
         packet["refusals"] = {c: refs[c] for c in keep}
-        omitted: dict[str, Any] = {"count": len(dropped), "codes": dropped[:REFUSAL_LIST_CODES]}
-        if len(dropped) > REFUSAL_LIST_CODES:
+        # 丢掉的名字**先列被引用的**（否则不变量在列表截断时会破），再列其余的
+        ordered = ([c for c in dropped if c in cited] + [c for c in dropped if c not in cited])
+        # 上限自适应：被丢掉的**被引用** code 必须全部列出来（不变量优先于字节），
+        # 其余名字才允许只留计数。真实被引用集合很小（未测组 ≤3 + 判词 + 环境缺件）。
+        limit = max(REFUSAL_LIST_CODES, len([c for c in dropped if c in cited]))
+        omitted: dict[str, Any] = {"count": len(dropped), "codes": ordered[:limit]}
+        if len(dropped) > limit:
             omitted["codes_truncated"] = True
         packet["refusals_omitted"] = omitted
 
@@ -818,6 +836,26 @@ def enforce_budget(packet: dict[str, Any],
         """
         for r in (packet.get("refusals") or {}).values():
             r.pop("action", None)
+
+    def _trim_environment_messages() -> None:
+        """环境降级诊断的 message 最先丢（code 与 remedy 才是机器契约）。"""
+        for e in packet.get("environment_refusals") or []:
+            e.pop("message", None)
+
+    def _cap_environment_entries() -> None:
+        """R-70/D9：`environment_refusals` 此前**完全不参与预算**（30 条 × 120 字 → 7012 B
+        仍带 `over_budget=True` 发出）。现在只留前几条，丢掉的 code 列进
+        `environment_refusals_more`（它们的 remedy 仍在 `refusals` 表里，所以照样查得到）。
+        """
+        env = packet.get("environment_refusals") or []
+        if len(env) <= ENVIRONMENT_KEEP:
+            return
+        dropped = [e.get("code") for e in env[ENVIRONMENT_KEEP:] if e.get("code")]
+        packet["environment_refusals"] = env[:ENVIRONMENT_KEEP]
+        packet["environment_refusals_more"] = {"count": len(env) - ENVIRONMENT_KEEP,
+                                               "codes": dropped[:REFUSAL_LIST_CODES]}
+        if len(dropped) > REFUSAL_LIST_CODES:
+            packet["environment_refusals_more"]["codes_truncated"] = True
 
     def _cap_verdicts_hard() -> None:
         packet["verdicts"] = (packet.get("verdicts") or [])[:VERDICT_KEEP_HARD]
@@ -840,6 +878,9 @@ def enforce_budget(packet: dict[str, Any],
         ("refusal_entries", _cap_refusal_entries),
         ("refusal_action_text", _drop_refusal_action_text),
         ("verdicts_hard_cap", _cap_verdicts_hard),
+        # 环境降级诊断：message 先丢，再限条目数（R-70）
+        ("environment_messages", _trim_environment_messages),
+        ("environment_entries", _cap_environment_entries),
     ]
     for name, fn in steps:
         fn()
@@ -855,6 +896,7 @@ def enforce_budget(packet: dict[str, Any],
 
 REFUSAL_ACTION_LIMIT = 72     # 截短后的处置文本上限（完整版在报告与参考层里）
 REFUSAL_KEEP = 8              # 最多保留几条拒绝条目（丢掉的名字列进 refusals_omitted）
+ENVIRONMENT_KEEP = 4          # 最多保留几条环境降级诊断（其余 code 列进 *_more）
 REFUSAL_LIST_CODES = 4        # refusals_omitted 里最多列几个 code（再多就只给计数）
 VERDICT_KEEP_HARD = 4         # 最后一级：判词只留最关键的四条
 
@@ -917,9 +959,45 @@ def _refusal_entry(code: str, severity: str, rem: Remedy) -> dict[str, Any]:
     return {k: v for k, v in e.items() if v not in ("", None)}
 
 
+def _cited_codes(packet: dict[str, Any]) -> set[str]:
+    """包里**被引用到**的拒绝码：判词、未测项、下一步、环境拒绝。
+
+    不变量（R-65）：这个集合里的每个 code 都必须能在 `refusals` 或
+    `refusals_omitted.codes` 里查到 —— 否则读者看到"还有 N 个某 code"，却查不到处置。
+    """
+    cited: set[str] = set()
+    for v in packet.get("verdicts") or []:
+        code = ((v.get("refusal") or {}) or {}).get("code")
+        if code:
+            cited.add(code)
+    for g in packet.get("unmeasured") or []:
+        if g.get("code"):
+            cited.add(g["code"])
+    for n in packet.get("next") or []:
+        if n.get("code"):
+            cited.add(n["code"])
+    for e in packet.get("environment_refusals") or []:
+        if e.get("code"):
+            cited.add(e["code"])
+    for c in (packet.get("environment_refusals_more") or {}).get("codes") or []:
+        cited.add(c)
+    return cited
+
+
+def _env_refusals(rep: Any) -> list[dict[str, Any]]:
+    """报告里的降级诊断（缺 nsys / 缺 NVBit / 缺标定…）—— 它们也必须进拒绝表。"""
+    return list((getattr(rep, "meta", {}) or {}).get("environment_refusals", []) or [])
+
+
 def _refusal_index(verdicts: Sequence[Verdict], unmeasured: Sequence[dict[str, Any]],
-                   capabilities: Any = None) -> dict[str, dict[str, Any]]:
-    """按 code 归一的拒绝表（`{code: {...}}`）：文本、remedy、代价只存一份。"""
+                   capabilities: Any = None,
+                   environment_refusals: Sequence[dict[str, Any]] | None = None
+                   ) -> dict[str, dict[str, Any]]:
+    """按 code 归一的拒绝表（`{code: {...}}`）：文本、remedy、代价只存一份。
+
+    `environment_refusals` 也要进来（R-65）：顶层那个数组的 code 曾经**从不**进表，
+    于是"缺 nsys"这类被引用到的 code 在包里查不到处置（结构性的悬空）。
+    """
     index: dict[str, dict[str, Any]] = {}
     for v in verdicts:
         if v.refusal is None:
@@ -946,6 +1024,15 @@ def _refusal_index(verdicts: Sequence[Verdict], unmeasured: Sequence[dict[str, A
             if not index.get(code):
                 index[code] = _refusal_entry(code, a.refusal.severity,
                                              a.refusal.remedy_or_default)
+    for d in environment_refusals or []:
+        code = d.get("code")
+        if not code or index.get(code):
+            continue
+        try:
+            rc = RefusalCode(code)
+        except ValueError:
+            rc = RefusalCode.INTERNAL_UNKNOWN
+        index[code] = _refusal_entry(code, "blocking", default_remedy(rc))
     return index
 
 
@@ -1215,7 +1302,22 @@ def render_onepage(packet: dict[str, Any], width: int = 96) -> str:
     if not cost.get("selftest_band"):
         bits.append("无本机误差带（跑 kernoscope selftest 后 diff 才有 MDD）")
     if cost.get("trimmed"):
+        # R-70/D10：只说"裁了哪一步"不够 —— 读者要知道**少了什么**。所以把三个
+        # "*_more" 的计数与 id 一起印出来（它们本来就是为这个存在的机器契约字段）。
         bits.append("包已按尺寸预算裁剪（" + ", ".join(cost["trimmed"]) + "）")
+    more = packet.get("verdicts_more") or {}
+    if more:
+        bits.append(f"判词超上限少 {more.get('count')} 条（{', '.join(more.get('ids') or [])}）")
+    omitted = packet.get("refusals_omitted") or {}
+    if omitted:
+        codes = ", ".join(omitted.get("codes") or [])
+        bits.append(f"拒绝条目省了 {omitted.get('count')} 条"
+                    + (f"（{codes}{'…' if omitted.get('codes_truncated') else ''}）"
+                       if codes else ""))
+    un_more = packet.get("unmeasured_more") or {}
+    if un_more:
+        bits.append(f"未测项合并了 {un_more.get('groups')} 组"
+                    f"（共 {un_more.get('metrics')} 个指标）")
     out.append("")
     out.append("本次代价：" + " · ".join(str(b) for b in bits))
     if cost.get("report_path") or False:

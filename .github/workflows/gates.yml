@@ -5,6 +5,9 @@ name: gates
 #
 # 只跑不需要 GPU 的部分：pytest 里依赖真机/nsys/ncu 的用例自带 skip，
 # `bench/run.sh` **不在这里跑**（它要 GPU，由 `bench/artifacts/` 的登记表记录每次运行）。
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -20,6 +23,6 @@ jobs:
           fetch-depth: 0          # 门禁里有几处用 `git ls-files`（文档扫描、脱敏检查）
       - uses: astral-sh/setup-uv@v5
       - name: Install
-        run: uv sync
+        run: uv sync --locked
       - name: Gates
         run: uv run python tools/dev_index.py --gates

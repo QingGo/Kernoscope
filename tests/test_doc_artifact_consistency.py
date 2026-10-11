@@ -55,7 +55,11 @@ def test_newest_artifact_pins_revision_and_tool_version():
         f"{art.name}: manifest 必须记修订号，不能是 n/a（R-40）"
     assert man.get("revision_source") not in (None, "", "none"), \
         f"{art.name}: 必须记下修订号是从哪来的（env/git/file）"
-    assert man.get("revision_dirty") in ("yes", "no", "unknown")
+    # R-71/P4：最新产物必须钉住"有没有未提交改动"。旧门禁允许 `unknown`，于是两份
+    # `unknown` 的产物永远不可能让它变红 —— 那不是"允许"，是"没人守"。
+    assert man.get("revision_dirty") in ("yes", "no"), (
+        f"最新产物的 revision_dirty={man.get('revision_dirty')!r}：要么钉住（yes/no），"
+        f"要么别把它当现行证据（在登记表里标「不可钉住」）")
     assert man.get("kernoscope", "").startswith("kernoscope ") or man.get("kernoscope") not in ("", None)
     assert f"revision: {man['revision']}" in env
     assert f"revision_source: {man['revision_source']}" in env
@@ -353,10 +357,15 @@ def test_source_hash_pins_the_code_that_ran(tmp_path):
     (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     (root / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
     (root / "bench" / "s.sh").write_text("echo hi\n", encoding="utf-8")
+    (root / "bench" / "probe.cu").write_text("__global__ void k() {}\n", encoding="utf-8")
     before = mod.source_hash(root)
     # 源码改了 → 指纹必须变
     (root / "src" / "a.py").write_text("x = 2\n", encoding="utf-8")
     assert mod.source_hash(root) != before
+    # 探针源码（.cu）改了 → 指纹必须变（账本真值就是它算出来的）
+    before_cu = mod.source_hash(root)
+    (root / "bench" / "probe.cu").write_text("__global__ void k() { /* v2 */ }\n", encoding="utf-8")
+    assert mod.source_hash(root) != before_cu
     # 文档/产物变了 → 指纹不变（它们不影响测量行为）
     after_src = mod.source_hash(root)
     (root / "README.md").write_text("hello\n", encoding="utf-8")
@@ -680,3 +689,24 @@ def test_every_sweep_row_is_documented():
             else:
                 bad.append(f"{r.get('target_s')}s 的 {key}={num}（README 里没有）")
     assert not bad, "时长扫描的行没被文档覆盖：\n  - " + "\n  - ".join(bad)
+
+
+def test_artifacts_without_a_pinned_revision_are_marked_unpinnable():
+    """R-71：钉不住修订号／脏状态的产物，登记表必须明说"不可钉住"，门禁不许替它背书。"""
+    rows = _registry_rows()
+    bad: list[str] = []
+    for art in _artifact_dirs():
+        env = art / "environment.txt"
+        if not env.exists():
+            continue
+        text = env.read_text(encoding="utf-8")
+        rev = re.search(r"^revision: (\S+)", text, re.M)
+        dirty = re.search(r"^revision_dirty: (\S+)", text, re.M)
+        loose = (rev is None or rev.group(1) in ("n/a", "none")
+                 or dirty is None or dirty.group(1) == "unknown")
+        if loose:
+            row = rows.get(art.name, "")
+            if not any(k in row for k in ("不可钉住", "不能当现行", "未留存", "钉不住")):
+                bad.append(f"{art.name}: revision={rev.group(1) if rev else None} "
+                           f"dirty={dirty.group(1) if dirty else None}，但登记表没说明它钉不住")
+    assert not bad, "\n  - ".join(bad)
