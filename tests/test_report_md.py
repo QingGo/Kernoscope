@@ -22,6 +22,8 @@ import re
 
 import pytest
 
+from kernoscope import __version__
+
 from kernoscope.packet import build
 from kernoscope.provenance import Metric, Section
 from kernoscope.refusals import RefusalCode
@@ -239,7 +241,7 @@ def test_header_block_exists_and_names_the_caliber():
                   "**Caliber/metric-name caveats:**"):
         assert label in head, f"头部块缺少 {label}"
     assert "RTX 4090" in head and "128 SM" in head and "sm_89" in head
-    assert "kernoscope 0.2.0" in head
+    assert f"kernoscope {__version__}" in head
     # 口径说明必须点名自有前缀与 ncu 导入前缀 —— 否则读者会跨机器比较模型量
     for token in ("meas__", "est__", "model__", "ks__", "ncu__"):
         assert token in head, f"口径说明没有点明 {token}"

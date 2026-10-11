@@ -5,14 +5,9 @@
 
 ## Unreleased
 
-（下一版的改动写在这里。小改动只升末位：0.2.1 → 0.2.2 → …；只有 schema 变更或破坏性接口变更才动中位。）
-
-## 0.2.1 —— 2026-10-12（补丁级：真机验证与修复）
-
-**已发布（PyPI）**：由 tag `v0.2.1` 触发 CI 以 Trusted Publisher（OIDC，零密钥）上传，
-并**首次带 attestation（PEP 740）**（0.2.0 用的是 `uv publish`，那条路不生成 attestation）。
-本版内容：处方接进 over_peak 传播链、NVBit occupancy 探针的真机验证结论（标签保留）、
-demo（四幕 + 与 ncu 的 CLI/产物兼容）、以及一批只在真机才暴露的一屏文案与判词修复。
+（下一版计划：处方传播链、NVBit 探针真机结论、demo、真机文案修复已在此。**发布 0.2.1 前需要一份
+**由当前版本产生**的 `bench/artifacts/` 产物**：`bench/run.sh --quick` 会写出 ~1.3 GB 原始文件，
+必须先按仓库规矩裁剪/登记再入库 —— `test_doc_artifact_consistency` 会拦住旧版本产物。）
 
 第五轮验收报告（`study/mimo-rl-study/Kernoscope验收报告-第五轮.md`，基线 `01f650b`）的修复。
 **其中若干条会改变外部消费者看到的东西**，逐条列在下面。
