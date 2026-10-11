@@ -23,6 +23,7 @@ Kernoscope 的形态是「**探测 → 选最高可用层 → 采集 → 每个�
 | 加一次 bench 产物 / 改公开数字 | `bench/run.sh` | `bench/artifacts/README.md` | `tools/gen_calibration_excerpt.py`；门禁 `sanitize` | `tests/test_doc_artifact_consistency.py` / `tests/test_repo_hygiene.py` | §⑥（2.0 KB） |
 | 加/改一个判词或决策包字段 | `src/kernoscope/packet.py` | `CHANGELOG.md` | `tools/gen_agent_refs.py` / `eval/make_tasks.py` | `tests/test_packet.py` / `tests/test_agent_surface.py` / `tests/test_eval_harness.py` | §⑧（2.3 KB） |
 | 改 agent 入口层（常驻那部分） | `AGENTS.md` | `llms.txt` / `skills/kernoscope/SKILL.md` | — | `tests/test_agent_surface.py` | §⑧（2.3 KB） |
+| 加/改一条「不做」或它的前提 | `NON-GOALS.md` | `README.md` | — | `tests/test_non_goals.py` | §①（2.9 KB） |
 | 加/改一个子命令或开关 | `src/kernoscope/cli.py` | `README.md` / `CHANGELOG.md` | — | `tests/test_cli.py` / `tests/test_flag_suggestions.py` / `tests/test_documented_commands.py` | §⑧（2.3 KB） |
 | 加一条门禁 / 改这份索引本身 | `tools/dev_index.py` | `tests/test_dev_index.py` | — | `tests/test_dev_index.py` | §⑧（2.3 KB） |
 

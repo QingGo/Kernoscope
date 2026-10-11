@@ -43,6 +43,7 @@ EXPECTED_REGEN = {
     "artifact": {"tools/gen_calibration_excerpt.py"},
     "verdict": {"tools/gen_agent_refs.py", "eval/make_tasks.py"},
     "entry": set(),
+    "nongoal": set(),
     "cli": set(),
     "index": set(),
 }
