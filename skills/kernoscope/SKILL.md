@@ -35,6 +35,9 @@ kernoscope capabilities --brief
 # ② 测一次，拿决策包（判词 + 前提 + 结构化拒绝 + 代价；<4 KB）
 kernoscope --packet - -- python bench_loop.py
 
+# ②' 动手前先看它会做什么（起哪些进程/写哪些文件/读哪些输入；只打印，不执行）
+kernoscope --plan -o rep -- python bench_loop.py
+
 # ③ 建立本机误差带与 MDD（一次即可；之后所有比较都复用这个文件）
 kernoscope selftest --out machine-selfcheck.json
 
@@ -57,6 +60,9 @@ kernoscope diff before.json after.json --selfcheck machine-selfcheck.json --json
 4. 引用数字必须带出处与误差带：`estimated`（代理/模型）不得当作实测；
    `exact` 只用于与 ncu 同源的量（kernel 时长、launch 配置、cubin 静态属性）。
 5. 缺依赖不是失败：`capabilities --brief` 的 `next` 告诉你缺什么、补上能多答哪些问题、要多少代价。
+6. **有副作用前先 `--plan`**：它会列出这次调用会起哪些进程、写哪些文件、读哪些输入（含第三方
+   软件 nsys/cuobjdump）。`--plan` 本身不执行任何东西；`--plan-json` 给 agent 读（每条操作带
+   8 项 `effects` 与 4 项推导出来的 `annotations`）。我们用你自己的权限跑你给的命令，不注入代码。
 
 ## 参考层（按需读，别默认全读）
 

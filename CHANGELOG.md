@@ -123,6 +123,23 @@
   口径决策规则（有 NVBit 走轨迹、否则走代理）跟着路由一起输出，避免 agent 自己猜。
 - `route` **只输出计划，不跑任何测量**（有测试守着它的实现里不出现采集调用）。
 
+### 副作用账与 `--plan`（A2）
+
+- 新增 **`--plan` / `--plan-json`**：只打印这次调用会做什么（起哪些进程、跑哪条命令、写哪些
+  文件、读哪些输入、哪些是第三方软件、是否需要你点头），**不执行任何东西、不写任何文件**。
+  `--plan-json` 里每条操作带 8 项 `effects` 与 4 项由 effects **纯推导**的 annotations。
+- 新增 `effects.OPERATIONS`（9 个操作）+ `effects.effects_for()`：任何会起进程/写文件/联网的
+  动作必须在表里登记，**查不到就抛 `UndeclaredEffect`**（副作用纪律进类型系统，不进文档）。
+- **行为修正（由"--plan 声明 vs 实际观察"的对账测试抓出）**：
+  ① 计划曾漏声明 doctor 的能力探测（`nvidia-smi --query-gpu` 与各工具的 `<tool> --version`）
+  —— 连 `--ks-synthetic` 都会跑，现在登记为 `probe_env`；
+  ② `-o out/rep.json`（父目录不存在）过去抛裸 `FileNotFoundError`，采集几分钟后白费，
+  现在自动创建输出目录并记一行 note；
+  ③ 计划里写的输出文件名与实际不一致（写 `out/rep.json` vs 实际 `out/rep.ksreport.json`），
+  现在两处用同一套规则算。
+- 测试用 PATH 上的记录桩做**声明 vs 观察**对账：计划说会起 nsys 就必须起、说这条运行不采集
+  就不许出现 `nsys profile`、计划列出的文件必须真的出现。
+
 ### 单位成本（C1）
 
 - 新增主命令行开关：`--ks-tokens <每步 token 数>`、`--ks-price-per-kwh <电价>`、

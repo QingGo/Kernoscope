@@ -198,6 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="价格单位标签（默认 CNY；我们只做标签，不做汇率换算）")
     k.add_argument("--strict", action="store_true",
                    help="请求了不可得数据时 exit 2（CI 卡门）；空转选项也视为错误")
+    k.add_argument("--plan", action="store_true",
+                   help="只打印**执行计划**（会起哪些进程、跑哪条命令、写哪些文件、读哪些输入、"
+                        "哪些是第三方软件），不执行任何东西、不写文件；配合 --plan-json 给 agent")
+    k.add_argument("--plan-json", action="store_true",
+                   help="计划以 JSON 输出（机器读；含每个操作的 8 项 effects 与 4 项 annotations）")
 
     p.add_argument("program", nargs=argparse.REMAINDER, help="-- 之后是要 profile 的命令")
     return p
@@ -429,6 +434,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         logged.append(msg)
         if not args.quiet:
             print(msg, file=sys.stderr)
+
+    # ---------- 执行计划（A2）：只打印，不执行 ----------
+    # 放在**所有采集之前**：`--plan` 的承诺是"没有任何副作用"，所以它必须在第一行采集
+    # 之前就返回 —— 写在这里而不是 main 的开头，是因为要等 parse_args 完成（计划由参数决定）。
+    if args.plan or args.plan_json:
+        from .effects import plan_for, render_plan
+
+        plan = plan_for(args, argv)
+        if args.plan_json:
+            print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            print(render_plan(plan))
+        return 0
 
     # ---------- 显示开关的诚实性（B6：不允许"接受但静默忽略"）----------
     if args.print_metric_name == "base":
@@ -1160,6 +1178,22 @@ def _collect_metric_names(rep: Report) -> set[str]:
     return {m.name for k in rep.kernels for s in k.sections for m in s.metrics}
 
 
+def _ensure_parent(path: str, logged: list[str] | None = None) -> None:
+    """输出文件的父目录不存在就建出来。
+
+    A2 的"声明 vs 观察"对账测试抓到的：`-o out/rep.json`（out 不存在）会让
+    `.write_text()` 抛 FileNotFoundError 裸 traceback，而计划里明明写着"会写这个文件"。
+    一个 profiler 因为目录不存在就崩掉、且崩在写报告这一步（几分钟的采集白费），
+    比它多建一个目录糟得多。
+    """
+    parent = Path(path).parent
+    if str(parent) in ("", ".") or parent.exists():
+        return
+    parent.mkdir(parents=True, exist_ok=True)
+    if logged is not None:
+        logged.append(f"note: 输出目录不存在，已创建 {parent}/")
+
+
 def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list[str],
           packet_ctx: dict[str, Any] | None = None) -> int:
     if compat_mode and not args.quiet:
@@ -1175,6 +1209,7 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         if base.endswith(".json"):
             base = base[:-len(".json")]
         json_path = base + ".ksreport.json"
+        _ensure_parent(json_path, logged)
         p = Path(json_path)
         if p.exists() and not args.force_overwrite:
             print(f"error: {json_path} exists (pass -f to overwrite)", file=sys.stderr)
@@ -1183,9 +1218,11 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         rep.meta["out_json"] = json_path
         if getattr(args, "launch_csv", False):
             lp = base + ".launches.csv"
+            _ensure_parent(lp, logged)
             Path(lp).write_text(render_launch_csv(rep))
             rep.meta["out_launch_csv"] = lp
         perfetto_path = args.ks_perfetto or (base + ".perfetto.json")
+        _ensure_parent(perfetto_path, logged)
         q = Path(perfetto_path)
         if q.exists() and not args.force_overwrite:
             print(f"error: {perfetto_path} exists (pass -f to overwrite)", file=sys.stderr)
@@ -1193,6 +1230,7 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
         q.write_text(render_perfetto(rep))
         rep.meta["out_perfetto"] = perfetto_path
     elif args.ks_perfetto:
+        _ensure_parent(args.ks_perfetto, logged)
         Path(args.ks_perfetto).write_text(render_perfetto(rep))
         rep.meta["out_perfetto"] = args.ks_perfetto
 

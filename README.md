@@ -456,6 +456,38 @@ kernoscope --set basic --ks-memtrace memtrace-official.txt -k regex:<kernel> -o 
 
 ---
 
+## 动手之前：`--plan` 说清会发生什么
+
+profiler 的副作用不平凡：它会**跑你的命令**、启动 `nsys`/`cuobjdump`、在临时目录写中间产物、
+在你的目录写报告。所以先看计划再决定：
+
+```bash
+$ kernoscope --plan -o rep -- python serve.py
+执行计划（`--plan`：只打印，不执行；没有跑你的命令、没有采集、没有写文件）
+------------------------------------------------------------------------------------------
+1. 探测本机环境（设备型号、驱动、工具链在哪）（第三方软件）  [起进程]
+     目标：nvidia-smi --query-gpu=name,driver_version,…
+     说明：只读探测：设备查询 ＋对找到的每个工具跑一次 `<tool> --version`…
+2. 后台采样设备级读数（NVML：能耗/功率/显存忙碌/时钟）  [会话内状态]
+3. 把你的被测命令跑起来  [会话内状态、写文件、起进程]
+     目标：python serve.py
+4. 用 nsys 采集 kernel 级活动（CUPTI，不需要计数器权限）（第三方软件）  [写文件、起进程]
+5. 把报告/包/表格写到你要的路径  [写文件、可能覆盖]
+     会写：rep.ksreport.json；rep.perfetto.json；rep.case/（manifest.json / …）
+```
+
+- `--plan-json` 给 agent：每条操作带 8 项 `effects`（`mutates_target` / `writes_filesystem` /
+  `launches_process` / `accesses_network` / `may_discard_data` / …）与 4 项**纯推导**的
+  annotations（`read_only_hint` / `destructive_hint` / `idempotent_hint` / `open_world_hint`）。
+- 每个操作都必须有 effects 声明，**缺了就抛**（不是文档里提一句）；测试还会用 PATH 上的记录桩
+  把"实际起了哪些子进程"记下来与计划对照 —— 这条对账第一次跑就抓到三个真缺陷
+  （漏声明 doctor 的 `nvidia-smi`/`cuobjdump --version` 探测、输出目录不存在时裸 traceback、
+  计划里的输出文件名与实际写的不一致）。
+- 我们**不注入**任何代码到被测进程：NVBit 插桩由 `tools/probes/nvbit_memtrace/collect.sh`
+  在你调用它时执行，本工具只读它产出的轨迹文件。静态分析（`--ks-cubin`）**不执行**被测二进制。
+
+---
+
 ## 单位成本：每百万 token 多少钱（不需要计数器）
 
 优化算子是为了**降本**。所以除了"快了多少毫秒"，本工具直接给钱的维度：
