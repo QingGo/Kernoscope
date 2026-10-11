@@ -520,18 +520,29 @@ def test_cli_rejects_bad_ledger_range(monkeypatch, capsys):
 
 
 def test_metrics_filter_never_silently_produces_an_empty_report(monkeypatch, capsys):
-    """R-39 的负样本：--metrics 一个都不匹配时不能给出"看起来成功"的空报告。"""
+    """R-39 的负样本：--metrics 请求一个我们给不出的名字时，不能给出"看起来成功"的空报告。
+
+    D4① 之后契约升级：`dram__bytes.sum` 这类**已知的 ncu 名字**会被当成"发现键"，
+    得到替代口径的行 + 一句说明（原来的规则没松：数值仍然只出现在自有命名空间里）。
+    真正查不到的名字仍然走"一个都不存在"的负样本路径（见下一条）。"""
     monkeypatch.setattr(cli, "Sampler", _FakeSampler)
     monkeypatch.setattr(cli, "load_synthetic", _coherent_launches)
     rc = cli.main(["--ks-synthetic", "--metrics", "dram__bytes.sum", "-k", "regex:gemm"])
     cap = capsys.readouterr()
     assert rc == 0, "宽松模式仍应成功（要能继续跑），但必须给出解释"
-    assert "一个都不存在" in cap.err
+    assert "替代口径 est__dram_bytes_total" in cap.err
     assert "dram__bytes.sum" in cap.err
-    # --strict 下同一件事必须是失败（与 B7-c 一致）
+    # --strict 下同一件事仍是失败（我们给不出 ncu 名下那个数），但要说清替代口径叫什么
     rc2 = cli.main(["--ks-synthetic", "--strict", "--metrics", "dram__bytes.sum",
                     "-k", "regex:gemm"])
-    assert rc2 == 2
+    cap2 = capsys.readouterr()
+    assert rc2 == 2 and "est__dram_bytes_total" in cap2.err
+
+    # 真正查不到的名字：仍然是"一个都不存在"的负样本
+    rc3 = cli.main(["--ks-synthetic", "--metrics", "totally_made_up__metric",
+                    "-k", "regex:gemm"])
+    cap3 = capsys.readouterr()
+    assert rc3 == 0 and "一个都不存在" in cap3.err
 
 
 def test_coverage_premise_is_n_a_when_nothing_was_sampled(monkeypatch, capsys, tmp_path):

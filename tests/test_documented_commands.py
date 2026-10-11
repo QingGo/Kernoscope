@@ -739,7 +739,14 @@ def test_documented_strict_command_refuses_when_data_is_missing(capsys):
 
 
 def test_documented_metrics_command_is_not_silently_empty(capsys):
-    """README 教人用 --metrics 窄化输出；写错名字不能得到"看起来成功"的空报告。"""
-    rc, _out, err = _run(["--ks-synthetic", "--metrics", "dram__bytes.sum", "-k", "regex:gemm"])
+    """README 教人用 --metrics 窄化输出；写错名字不能得到"看起来成功"的空报告。
+
+    `dram__bytes.sum` 是**已知的 ncu 名字**：D4① 之后它会解析成替代口径并给出说明；
+    随机名字仍然走"一个都不存在"。两种都不允许静默。"""
+    rc, out, err = _run(["--ks-synthetic", "--metrics", "dram__bytes.sum",
+                         "-k", "regex:gemm"])
     assert rc == 0
-    assert "一个都不存在" in err
+    assert "替代口径 est__dram_bytes_total" in err and "est__dram_bytes_total" in out
+    rc2, _out2, err2 = _run(["--ks-synthetic", "--metrics", "totally_made_up__metric",
+                             "-k", "regex:gemm"])
+    assert rc2 == 0 and "一个都不存在" in err2

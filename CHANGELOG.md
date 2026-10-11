@@ -112,6 +112,7 @@
 |---|---|---|
 | `capabilities` | `--json` / `--brief` / `--probe` / `--out <f>` / `--quiet` | 参考层 JSON / 入口层（<1.2 KB，带下一层字节价格）/ 实测探测 / 写文件 / 静音 |
 | `selftest` | `-o, --out <f>` / `--json` / `--size-mb` / `--duration` / `--runs` / `--dtype` / `--only` / `--cross-process` / `--quick` / `--strict` / `--quiet` | 纯 torch 的已知答案自检：写 `--ks-selfcheck` 用的文件（**不是** `--ks-calibration`，见 `PEAK_CAVEAT`）；`--cross-process` 把跨进程复测算进 MDD |
+| `gate` | `--packet <f>` / `--report <f>` / `--require ID[=STATUS]` / `--require-actionable ID` / `--forbid-code CODE` / `--max-metric NAME=V` / `--min-metric NAME=V` / `--json` | **CI 门禁**：判词状态、可依据性、禁止的拒绝码、指标阈值；只读已产出的包与报告（不跑测量）。退出码 0=通过 1=不通过 2=用法错误；一条规则都没给时**失败**（门禁不许凭空绿灯） |
 | `skill` | `--apply` / `--target <dir>` / `--client {claude,agents}` / `--json` / `--source <dir>` | 把 skill 装到 agent 的 skill 目录：默认只打印计划；备份（保留第一份）、原子写、写后回读校验、失败逆序回滚、内容相同即幂等 |
 | `route` | `--list` / `--json` / `--probe` | **先路由再动手**：把一条问题（中文口语也行）转成「走哪条口径 + 命令 + 期望输出 + **会被拒的条件**」；只输出计划，不跑测量；匹配不上就说匹配不上（不许硬套） |
 | `diff` | `--selfcheck <f>` / `--json` / `--fail-on {none,regressed,change}` / `--strict` / `--quiet` | 误差带对拍；**`--fail-on` 是唯一能拿去卡 CI 退出码的开关**（`regressed`/`change` 命中即非零退出） |
@@ -123,6 +124,22 @@
   `--json` 是给 agent 的真源），文档只是视图；匹配不上会明说"不要硬套"。
   口径决策规则（有 NVBit 走轨迹、否则走代理）跟着路由一起输出，避免 agent 自己猜。
 - `route` **只输出计划，不跑任何测量**（有测试守着它的实现里不出现采集调用）。
+
+### CI 门禁与 ncu 名字（C4/D4）
+
+- 新增子命令 **`kernoscope gate`**：`--require <id>[=ok|soft|refused]`、
+  `--require-actionable <id>`、`--forbid-code <code>`、`--max-metric NAME=VALUE`、
+  `--min-metric NAME=VALUE`、`--json`。判据全落在**可编程的东西**上（状态、拒绝码、
+  `actionable`、指标值+出处）；`n/a` 的指标一律算不通过（"没有数"不是"没超阈值"）；
+  一条规则都没给时**失败**，因为门禁凭空通过是它最坏的失败模式。退出码 0/1/2。
+- **D4① 名字是发现键**：`--metrics dram__bytes.sum` 这类 ncu 计数器名不再得到
+  "指标不存在"，而是解析成替代口径（`est__dram_bytes_total`）并打印说明；`--strict`
+  下仍然失败（我们确实给不出 ncu 名下那个数），但错误信息里会写明**替代口径叫什么**。
+  映射表里标为"给不出"的（如动态 Tensor Core 利用率、warp stall 细分）说清为什么。
+  原来的硬规则一秒没松：数值仍然只出现在 `ks__`/`est__`/`meas__` 名下。
+- **D4② 兼容导出**：`--export-name-map <path>`（`.json`/`.csv`）写一份
+  "ncu 名 → 我们给什么 / 为什么给不出"的对照表；它是**声明**，不是数据替换。
+  映射表是代码（`ncu_names.NCU_DISCOVERY_MAP`），文档只是视图。
 
 ### 处方：先改哪里、能省多少钱（C2）
 

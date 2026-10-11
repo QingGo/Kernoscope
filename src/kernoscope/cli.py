@@ -195,6 +195,9 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-idle-power-w", type=float, default=None,
                    help="空闲功耗(W)：分摊到 kernel 前先把非计算能耗扣掉（不给则不扣，"
                         "空闲占比高时归因会偏大）")
+    k.add_argument("--export-name-map", default=None, metavar="PATH",
+                   help="写一份 ncu 名 → 我们给什么（或为什么给不出）的对照表（.json/.csv），"
+                        "供下游脚本翻译；它是**声明**，不是数据替换")
     k.add_argument("--ks-currency", default="CNY",
                    help="价格单位标签（默认 CNY；我们只做标签，不做汇率换算）")
     k.add_argument("--strict", action="store_true",
@@ -393,7 +396,7 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
 # --------------------------------------------------------------------------
 SUBCOMMANDS: tuple[str, ...] = (
     "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff", "route",
-    "skill")
+    "skill", "gate")
 
 
 def subcommand_parser(name: str) -> Any:
@@ -407,6 +410,7 @@ def subcommand_parser(name: str) -> Any:
     from .capabilities_cmd import build_parser as capabilities_parser
     from .diff_cmd import build_parser as diff_parser
     from .doctor import build_parser as doctor_parser
+    from .gate_cmd import build_parser as gate_parser
     from .issue_cmd import build_parser as issue_parser
     from .memtrace_cmd import build_parser as memtrace_parser
     from .occupancy_cmd import build_parser as occupancy_parser
@@ -417,7 +421,8 @@ def subcommand_parser(name: str) -> Any:
     return {"doctor": doctor_parser, "occupancy": occupancy_parser,
             "memtrace": memtrace_parser, "issue": issue_parser,
             "capabilities": capabilities_parser, "selftest": selftest_parser,
-            "diff": diff_parser, "route": route_parser, "skill": skill_parser}[name]()
+            "diff": diff_parser, "route": route_parser, "skill": skill_parser,
+            "gate": gate_parser}[name]()
 
 
 def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
@@ -428,6 +433,7 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     from .issue_cmd import issue_main
     from .memtrace_cmd import memtrace_main
     from .occupancy_cmd import occupancy_main
+    from .gate_cmd import gate_main
     from .route_cmd import route_main
     from .selftest import selftest_main
     from .skill_cmd import skill_main
@@ -435,7 +441,7 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     return {"doctor": doctor_main, "occupancy": occupancy_main, "memtrace": memtrace_main,
             "issue": issue_main, "capabilities": capabilities_main,
             "selftest": selftest_main, "diff": diff_main, "route": route_main,
-            "skill": skill_main}
+            "skill": skill_main, "gate": gate_main}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -975,11 +981,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     log(f"warn: [{_k.name}] {_m.note}")
 
     # ---------- R-39：--metrics 一个都没匹配上时不能静默成功 ----------
+    # D4①：能映射到替代口径的请求名**不算"没匹配上"**（值会以替代口径的名字出现，
+    # 前述 note 已经说明了这一点）；只有真正查不到的名字才报警。
+    from .ncu_names import resolve as resolve_requested_name
+
     requested_metrics = [n for v in (args.metrics or []) for n in v.split(",") if n.strip()]
     if requested_metrics:
         produced = _collect_metric_names(rep)
-        missing = [n for n in requested_metrics if n not in produced]
-        if len(missing) == len(requested_metrics):
+
+        def _has_substitute(n: str) -> bool:
+            d = resolve_requested_name(n)
+            return bool(d is not None and d.ours)
+
+        missing = [n for n in requested_metrics
+                   if n not in produced and not _has_substitute(n)]
+        if missing and len(missing) == len(requested_metrics):
             log(f"warn: --metrics 请求的 {len(missing)} 个指标在本报告里一个都不存在"
                 f"（{', '.join(missing)}）—— 因此报告里不会有任何指标行。"
                 f"这可能是名字写错，也可能是需要硬件计数器（本机拿不到）；"
@@ -1437,6 +1453,9 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
     unavailable = rep.unavailable_metrics()
     unavailable_names = {m.name for m in unavailable}
     reason_by_name = {m.name: m.reason for m in unavailable}
+    from .ncu_names import explain as explain_ncu_name
+    from .ncu_names import resolve as resolve_ncu_name
+
     for name in requested:
         if name in unavailable_names:
             problems.append(f"requested metric is unavailable: {name} - "
@@ -1445,7 +1464,14 @@ def _strict_problems(rep: Report, args: argparse.Namespace, used_noop: list[str]
             problems.append(f"requested metric needs hardware counters: {name} - "
                             f"{KNOWN_COUNTER_METRICS[name]}")
         elif name not in _collect_metric_names(rep):
-            problems.append(f"requested metric not found: {name}")
+            # D4①：能映射到替代口径的名字，错误信息里必须写出**替代口径叫什么**；
+            # 映射表里标了"给不出"的（kind=none）也要说清为什么。
+            disc = resolve_ncu_name(name)
+            if disc is not None:
+                problems.append(f"requested metric cannot be produced under that name: "
+                                f"{explain_ncu_name(name)}")
+            else:
+                problems.append(f"requested metric not found: {name}")
     # 3) 数据驱动的门禁（R-43）：一个 section 只有在**真的没产出任何数据**时才算问题。
     #    从前这里只看名字：即使 --ks-instr-hist 已经把 est__issue_slot_utilization_pct
     #    算出来了，`--section SchedulerStats --strict` 仍然返回 2 —— 门禁在拦自己的成果。
@@ -1550,7 +1576,23 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
               "(symlinked as 'ncu'); data sources differ from NVIDIA Nsight Compute.",
               file=sys.stderr)
 
+    # D4①：`--metrics dram__bytes.sum` 这类**计数器名**是发现键 —— 它不该得到一句
+    # "指标不存在"，而应拿到替代口径。展开在这里做（渲染用），原始请求名保留给
+    # `--strict` 报告"你请求的是计数器，我们给的是替代口径"。
+    from .ncu_names import resolve as resolve_ncu_name
+
     metrics = [n for v in (args.metrics or []) for n in v.split(",") if n.strip()]
+    expanded: list[str] = []
+    for name in metrics:
+        d = resolve_ncu_name(name)
+        if d is not None and d.ours and d.ours not in expanded:
+            expanded.append(d.ours)
+            if d.ours != name:
+                print(f"==PROF== note: --metrics {name} → 替代口径 {d.ours}"
+                      f"（{d.caliber}）；数值不会挂在 {name} 名下", file=sys.stderr)
+        elif d is None and name not in expanded:
+            expanded.append(name)
+    metrics = expanded
 
     # 落盘
     if args.export:
@@ -1631,6 +1673,16 @@ def _emit(rep: Report, args: argparse.Namespace, compat_mode: bool, logged: list
             json.dumps(rep.meta["ncu_truth"], ensure_ascii=False, indent=2), encoding="utf-8")
         rep.meta["out_ncu_truth"] = truth_path
         print(f"==PROF== 真值对拍: {truth_path}", file=sys.stderr)
+
+    # ---------- D4②：ncu 名字对照表（声明，不是数据替换）----------
+    if getattr(args, "export_name_map", None):
+        from .ncu_names import render_name_map
+
+        fmt = "csv" if str(args.export_name_map).lower().endswith(".csv") else "json"
+        _ensure_parent(str(args.export_name_map), logged)
+        Path(str(args.export_name_map)).write_text(render_name_map(fmt), encoding="utf-8")
+        rep.meta["out_name_map"] = str(args.export_name_map)
+        print(f"==PROF== ncu 名字对照表: {args.export_name_map}（{fmt}）", file=sys.stderr)
 
     # ---------- I3：人读的 per-kernel 报告（Markdown）----------
     if getattr(args, "report_md", None):

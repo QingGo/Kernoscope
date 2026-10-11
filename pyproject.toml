@@ -55,6 +55,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/kernoscope"]
 
+# skill 必须随包发布：`kernoscope skill --apply` 是**装了包的用户**唯一能自己接上 agent 的路，
+# 而它在源码 checkout 之外找不到 skills/ 就等于没有这个功能（I4）。
+[tool.hatch.build.targets.wheel.force-include]
+"skills/kernoscope" = "kernoscope/skills/kernoscope"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # 不设 addopts：曾经写的是 "-q"，于是 `uv run pytest -q` 变成 `-qq`，汇总行被吞掉 ——
