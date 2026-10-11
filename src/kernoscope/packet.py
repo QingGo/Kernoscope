@@ -1236,7 +1236,14 @@ def _owner_key_for(rep: Any, owner: Any) -> str:
 
 
 def _propagate_over_peak(verdicts: list[Verdict]) -> None:
-    """`over_peak` 成立 ⇒ 由它算出来的 roofline 判词不能当依据（R-59/D18）。
+    """`over_peak` 成立 ⇒ 由它算出来的**结论**都不能当依据：roofline 的达成率、处方的"能省多少"。
+
+    处方为什么也在内（demo 真机跑出来的缺口）：处方的区间是"实测达成值 vs 本机实测峰值"的差 ——
+    峰值口径本身不成立（实测超过它）时，那个差就是拿一个假分母算出来的。真机实测出现过
+    `over_peak` 因 `calibration_caliber_mismatch` 被拒、而同一份包里
+    `[ok] …（保守可省 87.9%~上界 93.5%）；合计可省 1.9462 CNY/h` 照旧发布 —— 读者会拿它去做决定。
+    
+    R-59/D18 的原话是"由它算出来的结论不能当依据"；X-14 只接到了 roofline，这一条补上处方。
 
     真机包实测：`roofline status=soft actionable=True value=24041.6 %` 与
     `over_peak status=refused` **并存** —— 按 v1.1 自己定的规矩（"读包的人用 actionable
@@ -1244,8 +1251,26 @@ def _propagate_over_peak(verdicts: list[Verdict]) -> None:
     `ledger_verdict` 早就会继承 per-launch 的拒绝（同一个模式），roofline 漏了。
     """
     op = next((v for v in verdicts if v.id == "over_peak"), None)
+    if op is None or op.status != REFUSED:
+        return
+
+    # ---- 处方：同一峰值口径算出来的"能省多少"也不成立 ----
+    # 只动**钱那一级**（`saving_estimate`）；按实测时长排序的 `saving_estimate_share` 与峰值无关，
+    # 它照旧可依据（"先看哪条"不需要分母）。
+    save = next((v for v in verdicts if v.id == "saving_estimate"), None)
+    if save is not None and save.status != REFUSED:
+        if save.value is not None:
+            save.facts = {**save.facts, "uncitable_value": save.value}
+        save.status = REFUSED
+        save.value = None
+        save.refusal = Refusal(
+            RefusalCode.CALIBRATION_CALIBER_MISMATCH,
+            "本机峰值口径不成立（over_peak：实测超过校准峰值）⇒ 由它算出的可省区间与金额"
+            "不可依据；先核对标定口径（dtype/尺寸）与工作量输入（--ks-gemm/--ks-flops）")
+        save.next = ("先核对标定口径与工作量输入，再重算能省多少；"
+                     "要看「先改哪条」仍可用时长占比那一条（它不需要峰值）")
     roof = next((v for v in verdicts if v.id == "roofline"), None)
-    if op is None or op.status != REFUSED or roof is None or roof.status == REFUSED:
+    if roof is None or roof.status == REFUSED:
         return
     # V-6：只有当超峰与 roofline 属于**同一个 kernel** 时才传播。身份用 `owner_key`
     # （未截断名，**不是** facts 里那个 48 字显示串 —— 见 Verdict.owner_key 的注释）；
@@ -1278,6 +1303,7 @@ def _propagate_over_peak(verdicts: list[Verdict]) -> None:
     # 与拒绝一致的动作，否则同一行里一边说"不成立"一边说"已达"。
     roof.next = ("先核对标定口径（dtype/尺寸）与工作量输入（--ks-gemm/--ks-flops），"
                  "再谈优化方向")
+
 
 
 def _downgrade_broken_premises(verdicts: list[Verdict]) -> None:

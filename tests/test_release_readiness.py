@@ -78,7 +78,7 @@ def _shell_files() -> list[pathlib.Path]:
 def _shell_code_lines(path: pathlib.Path) -> list[tuple[int, str]]:
     """`(行号, 行)`：跳过注释行与 **heredoc 正文**。
 
-    heredoc（`<<'PY'` / `<<EOF`）里的内容 bash 一个字都不展开，所以里面的反引号、
+    带引号分隔符的 heredoc（`<<'PY'`）内容 bash 不展开所以跳过；**不带引号的**（`<<EOF`）会展开，照样要查，所以里面的反引号、
     `$VAR（` 都是普通文本 —— 我的第一版门禁把 `setup-check.sh` 里嵌的 Python 当成 bash 判了，
     那正是"门禁自己的假阳性"。这里按起止标记跳过正文。
     """
@@ -86,14 +86,17 @@ def _shell_code_lines(path: pathlib.Path) -> list[tuple[int, str]]:
 
     out: list[tuple[int, str]] = []
     heredoc: str | None = None
+    heredoc_quoted = True          # 带引号的分隔符 ⇒ 正文不做任何展开，可以跳过
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if heredoc is not None:
             if line.strip() == heredoc:
                 heredoc = None
+            elif not heredoc_quoted:
+                out.append((n, line))   # 未加引号的 heredoc：正文会被展开，必须照查
             continue
-        m = _re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        m = _re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
         if m:
-            heredoc = m.group(1)
+            heredoc, heredoc_quoted = m.group(2), bool(m.group(1))
         if not line.lstrip().startswith("#"):
             out.append((n, line))
     return out

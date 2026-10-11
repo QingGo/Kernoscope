@@ -18,7 +18,13 @@
 # 直接把本目录拷进 $NVBIT_PATH/tools/ 再 cmake，等价于官方示例工具的构建流程。
 
 NVBIT_PATH ?= $(HOME)/nvbit_release_x86_64
+#: 传给 NVBit CMake 助手的**裸架构数字**（`89`，不是 `sm_89`）。
+#: 真机实测（AutoDL 4090 / CUDA 13 / NVBit 1.8.1）：写 `sm_89` 会被拼成
+#: `compute_sm_89`，nvcc 直接 `Unsupported gpu architecture 'compute_sm_89'` 失败；
+#: 裸数字才得到 `compute_89/sm_89`。memtrace 的 README 早记过这条，本工具此前没照做。
 ARCH ?= native
+# 允许 `ARCH=sm_89` 这种更符合直觉的写法：这里统一剥成裸数字再交给助手
+NVCC_ARCH := $(patsubst sm_%,%,$(ARCH))
 TOOL := ks_occupancy
 WORK := $(NVBIT_PATH)/tools/$(TOOL)
 SO := $(TOOL).so
@@ -31,7 +37,7 @@ $(SO): CMakeLists.txt inject_funcs.cu occupancy.cu ks_occ_common.h
 	rm -rf "$(WORK)"
 	mkdir -p "$(WORK)"
 	cp CMakeLists.txt inject_funcs.cu occupancy.cu ks_occ_common.h "$(WORK)/"
-	cd "$(WORK)" && cmake -B build -DNVBIT_TOOL_CUDA_ARCHITECTURES=$(ARCH) >/dev/null
+	cd "$(WORK)" && cmake -B build -DNVBIT_TOOL_CUDA_ARCHITECTURES=$(NVCC_ARCH) >/dev/null
 	cd "$(WORK)" && cmake --build build -j
 	cp "$(WORK)/build/$(SO)" ./$(SO)
 

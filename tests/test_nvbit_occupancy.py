@@ -345,7 +345,11 @@ def test_makefile_respects_nvbit_path_and_arch():
     # 依赖列表必须包含全部源码（少一个就会出现"改了源码却用了旧产物"的假绿）
     for src in ("CMakeLists.txt", "inject_funcs.cu", "occupancy.cu", "ks_occ_common.h"):
         assert src in text, f"Makefile 的依赖/拷贝列表里少了 {src}"
-    assert "NVBIT_TOOL_CUDA_ARCHITECTURES=$(ARCH)" in text, (
+    # 架构必须按 ARCH 构建，而且**必须是裸数字**：真机实测（AutoDL/CUDA 13/NVBit 1.8.1）
+    # 传 `sm_89` 会被助手拼成 `compute_sm_89`，nvcc 直接 `Unsupported gpu architecture`。
+    assert "NVCC_ARCH := $(patsubst sm_%,%,$(ARCH))" in text, \
+        "Makefile 必须把 `sm_89` 这种写法剥成裸数字（否则 nvcc 报 compute_sm_89）"
+    assert "-DNVBIT_TOOL_CUDA_ARCHITECTURES=$(NVCC_ARCH)" in text, (
         "注入代码必须按 ARCH 构建（架构不匹配是「编好了但跑不出记录」的常见原因）")
 
 

@@ -848,6 +848,38 @@ uv 缺席 → note: 门禁改用 /root/miniconda3/bin/python3（CI 仍用 `uv ru
   处方仍给出区间与金额 —— 按本仓库纪律（守卫不成立 ⇒ 由它算出来的结论不可依据），处方应当
   一起作废。与 X-14（传播到 roofline）同一条链，但还没覆盖到处方。
 
+### 真机验证 NVBit occupancy 探针：构建通过、注入未生效（标签保留）
+
+一次完整的真机尝试（AutoDL 4090 / CUDA 13.0 / 驱动 580），结论与**精确失败位置**已写进
+`tools/probes/nvbit_occupancy/README.md`：
+
+- 前置此前没写：NVBit 1.8.1 的 CMake 助手要求 **CMake ≥3.29**（容器 3.22.1 ⇒ 编不过；
+  `pip install 'cmake>=3.29'` 后可编）。
+- **架构变量必须传裸数字**（`89`；写 `sm_89` 会被拼成 `compute_sm_89`，nvcc 直接拒绝）——
+  memtrace 的 README 早记过这条，本工具此前没照做，Makefile 已改成自动剥 `sm_` 前缀。
+- 构建两条路都成功：v1.8.1 + CMake 助手；以及按官方老 Makefile 用 v1.7.7.3 手工编
+  （`-Xptxas -astoolspatch --keep-device-functions` + `core/libnvbit.a`）。
+- **运行两条路都失败在同一个点**：`KS_OCC_DEBUG_CALLS=1` 显示**注入调用执行 0 次**（目标 kernel
+  被正确选中：`demo_kernel(float*, int, float)`、`launches=1`），覆盖率纪律因此正确拒绝写文件。
+- 对照组说明这不是"NVBit 在这台机不能用"：同一台机上仓库钉住的 memtrace 组合（v1.7.7.3 + 老
+  Makefile）**能出轨迹**。所以问题在本工具的注入约定（最可能是老布局缺 `tool_func/*.fatbin` +
+  `bin2c` 的 device-function 打包）。**"未在真机验证"标签保留**，并附上了三条下一步。
+
+### 处方也接进 over_peak 的传播链（demo 真机跑出来的缺口）
+
+`over_peak` 因 `calibration_caliber_mismatch` 被拒（实测超过校准峰值）时，处方曾经照旧发布
+`（保守可省 87.9%~上界 93.5%）；合计可省 1.9462 CNY/h` —— 那个金额是拿一个已被推翻的分母算出来的。
+现在：峰值口径不成立 ⇒ **钱那一级（`saving_estimate`）一起降级为 refused**，原值留在
+`facts.uncitable_value`（拒绝也要留下你拒绝的是什么），而**按实测时长排序**的那一级不受牵连
+（它不需要峰值分母）。设备级属性 ⇒ 不依赖 roofline 是否存在、也不依赖归属是否匹配。
+
+### demo 增加"与 ncu 的兼容性"一幕（CLI + 产物）
+
+第五幕：① `argv[0]` 为 `ncu` 时进入**兼容模式**（README §4.1 的 `ln -s` 做法，demo 里用等价
+shim 复现），于是 `ncu --set basic -- <命令>` 这种写法直接可用；② 导出 **`.ncu-rep`** 并打印
+`<path>.ATTRIBUTION.txt` 的署名（哪些表是同源真值、哪些是替代口径），读者能看见"兼容性不是
+假装"—— 我们写的是合法 `.ncu-rep`，但每个量的出处写在署名里。
+
 ## 0.2.0
 
 **已发布（PyPI）**：`2026-10-11` 由 tag `v0.2.0` 触发 CI 以 **Trusted Publisher（OIDC，零密钥）**

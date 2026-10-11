@@ -1429,3 +1429,36 @@ def test_phrase_for_positions_without_a_count_does_not_print_none():
               "provenance": "exact", "facts": {"money": "unavailable"}}
     text2 = phrase_verdict(second, {})
     assert "None" not in text2 and text2.strip(), text2
+
+
+def test_over_peak_poisoning_also_invalidates_the_money_prescription():
+    """处方（能省多少）与 roofline 共用同一个"本机实测峰值"分母：分母不成立 ⇒ 两者都不成立。
+
+    真机证据（demo 第一次在 AutoDL 4090 上跑 `--scene gemm`）：同一份包里
+    `over_peak=refused(calibration_caliber_mismatch)`（实测超过校准峰值）与
+    `[ok] …（保守可省 87.9%~上界 93.5%）；合计可省 1.9462 CNY/h` 并存 —— 读者会拿那个金额去做决定。
+    X-14 的传播链当时只接到了 roofline，这一条把处方也接上（**设备级**属性：任何一行超峰都说明
+    这个分母可疑，所以不依赖 roofline 是否存在、也不依赖归属是否匹配）。
+    """
+    rep = _two_kernel_report(cheap_over_peak=True, top_over_peak=False)
+    rep.meta["prescription"] = {
+        "currency": "CNY",
+        "ranked": [{"kernel": "top_kernel", "resource": "dram_bandwidth",
+                    "confidence": "measured", "pct_lo": 10.0, "pct_hi": 20.0,
+                    "per_hour": 1.5, "per_mtok": None, "basis": "b",
+                    "refusal": None, "money_refusal": None}],
+        "total_per_hour": 1.5, "total_per_mtok": None, "refusal": None,
+        "money_refusal": None, "notes": []}
+    p = build(rep)
+    by = {v["id"]: v for v in p["verdicts"]}
+    assert by["over_peak"]["status"] == "refused"
+    save = by.get("saving_estimate")
+    assert save is not None, [v["id"] for v in p["verdicts"]]
+    assert save["status"] == "refused", save
+    assert save.get("value") is None, "被推翻的金额不许留在 value 里"
+    assert (save.get("facts") or {}).get("uncitable_value") is not None, \
+        "原值要留在 facts 里可查（拒绝也要留下你拒绝的是什么）"
+    # 整份包里不该再有任何以"钱/小时"为单位的结论（峰值口径作废 ⇒ 金额口径整体作废）
+    assert not [v for v in p["verdicts"] if v.get("unit") == "CNY/h"], p["verdicts"]
+    # 而**按实测时长排序**的那一级（`saving_estimate_share`，不需要峰值分母）不受牵连 ——
+    # 它与二级互斥（有 prescription 时走二级），所以这里只钉住"它的前提与峰值无关"这条设计。

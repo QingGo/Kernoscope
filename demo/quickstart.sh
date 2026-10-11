@@ -235,6 +235,45 @@ print(f"  · 本次测到 {cost.get('measured_metrics', '?')} 项指标；"
 PY
 done
 
+# =====================================================================
+# 第五幕：与 ncu 的兼容性 —— CLI 与产物
+# =====================================================================
+head1 "第五幕：与 ncu 的兼容性（CLI 与产物）"
+mkdir -p "$OUT/bin"
+# ⚠️ heredoc 的分隔符**必须带引号**：不带引号时 bash 会对正文做命令替换与变量展开 ——
+# 正文里写 `` `argv[0]` `` 这种说明文字会被真的当命令执行（真机实测：`argv[0]: command not found`）。
+# 所以正文里不做任何展开，源码树路径改成**运行时**从环境变量读。
+export KS_DEMO_SRC="${ROOT}/src"
+cat > "$OUT/bin/ncu" <<'PYEOF'
+#!/usr/bin/env python
+"""把 Kernoscope 当成 ncu 用（等价于 README §4.1 的 `ln -s $(which kernoscope) ~/bin/ncu`）。
+
+兼容模式按 argv[0] 的基名判断是不是 ncu —— 所以 shim 里显式把它设成 "ncu"。
+源码树路径由 KS_DEMO_SRC 传入（避免在 heredoc 里做展开）。
+"""
+import os
+import sys
+
+sys.path.insert(0, os.environ["KS_DEMO_SRC"])
+sys.argv[0] = "ncu"
+from kernoscope.cli import main
+
+raise SystemExit(main())
+PYEOF
+chmod +x "$OUT/bin/ncu"
+say "  ① CLI 兼容：ncu 风格调用（argv[0]=ncu 自动进兼容模式；未知开关会明确报错）"
+"$OUT/bin/ncu" --set basic --screen off -- "$PY" "${ROOT}/demo/workloads/${SCENES[0]}.py" \
+  >"$OUT/ncu-compat.out" 2>"$OUT/ncu-compat.err"
+say "     rc=$? ；报告字节=$(wc -c <"$OUT/ncu-compat.out" | tr -d ' ')"
+grep -iE "兼容|ncu" "$OUT/ncu-compat.err" | head -2 | sed 's/^/     /'
+say "  ② 产物兼容：导出合法 .ncu-rep + 署名（哪些表是同源真值、哪些是替代口径）"
+KS_RUN --ks-calibration "$OUT/machine-profile.json" --export-ncu-rep "$OUT/rep.ncu-rep" \
+       --screen off -- "$PY" "${ROOT}/demo/workloads/${SCENES[0]}.py" >/dev/null 2>"$OUT/export.err"
+say "     rc=$? ；.ncu-rep=$(wc -c <"$OUT/rep.ncu-rep" 2>/dev/null | tr -d ' ') B"
+head -8 "$OUT/rep.ncu-rep.ATTRIBUTION.txt" 2>/dev/null | sed 's/^/     /'
+say "     提醒：我们写的是**合法** .ncu-rep，但每个量的出处写在署名里 —— 同源真值走 ncu 名下，"
+say "           替代口径走 ks__/est__/meas__，绝不占用 ncu 的指标名。"
+
 head1 "怎么改"
 say "  · 换价格：--price-per-hour 2.5（元/小时）或 --kwh 0.8（元/kWh）"
 say "  · 换规模/时长：DEMO_SECONDS=5 DEMO_BATCH=16 DEMO_SEQ=1024 bash demo/quickstart.sh"

@@ -12,6 +12,23 @@
 
 本工具的接口是「把被测程序跑一遍」，被测 kernel 一个字符都不改。
 
+## 真机验证结果（2026-10-12，AutoDL 4090 / CUDA 13.0 V13.0.88 / 驱动 580.105.08）
+
+**结论：构建通过，注入未生效 —— 本环境尚不可用。**"未在真机验证"这个标签**保留**，并且现在
+有精确的失败位置，不再是"没试过"：
+
+| 步骤 | 实测结果 |
+|---|---|
+| 前置 | NVBit 1.8.1 的 CMake 助手要求 **CMake ≥3.29**（容器自带 3.22.1 ⇒ 报错；`pip install 'cmake>=3.29'` 后 4.4.4 可编）。**README 此前没写这条前置** |
+| 架构变量 | 传 `sm_89` ⇒ NVBit 助手拼出 `compute_sm_89`，nvcc 报 `Unsupported gpu architecture` ⇒ **必须传裸数字 `89`**（Makefile 已自动剥离 `sm_` 前缀） |
+| 构建 | ✅ 成功：v1.8.1 + CMake（`ks_occupancy.so`，resolve 能从实物读出版本 `1.8.1`）；也按官方老 Makefile 用 **v1.7.7.3** 手工编过一份（`-Xptxas -astoolspatch --keep-device-functions` + `core/libnvbit.a`） |
+| 运行 | ❌ **注入调用执行 0 次**（`KS_OCC_DEBUG_CALLS=1`）：两个版本都一样。工具确实选中了目标 kernel（`kernel=demo_kernel(float*, int, float)`、`launches=1`），但设备侧一次都没跑 ⇒ 覆盖率纪律正确拒绝，**没有写出任何记录文件** |
+| 对照组 | 同一台机上，仓库钉住的 memtrace 组合（v1.7.7.3 + 老 Makefile）**是能出轨迹的**（第六/七轮真机 A/B：6 条 `MEMTRACE` 行）⇒ 问题不在"NVBit 能否在这台机工作"，而在**本工具的注入约定**（最可能是老布局里 `tool_func/*.fatbin` + `bin2c` 那一步：mem_trace 用它把设备函数嵌进 `.so`，本工具只有 CMake 助手那条路） |
+
+**下一步（要让它可用，按代价从小到大）**：① 打开 `NVBIT_DEBUG`/NVBit 自身的日志，确认注入请求有没有到达
+设备侧；② 按 mem_trace 的老布局补齐 device-function 打包（`tool_func/` + `bin2c`）再试 v1.7.7.3；
+③ 换 NVBit 版本/构建重做上面整张表（版本号不是可用性凭据）。
+
 ## 它测什么
 
 | 量 | 口径 | 与 ncu 的关系 |
