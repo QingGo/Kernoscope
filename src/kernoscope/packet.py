@@ -43,7 +43,7 @@ PACKET_SCHEMA_VERSION = 1
 # v1.1（追加式，向后兼容）：加 `actionable` 与 `schema_revision`。主版本不动是因为
 # **读 v1.0 包的代码仍然能读 v1.1**：新字段是"多给一条已经能推出来的结论"，不是改语义。
 # 改了语义才升 PACKET_SCHEMA_VERSION（那时 `from_dict` 要按版本分支，并写进 CHANGELOG）。
-PACKET_SCHEMA_REVISION = "1.1"
+PACKET_SCHEMA_REVISION = "1.2"
 PACKET_SIZE_BUDGET_BYTES = 4096          # 默认包的尺寸预算（测试守着，防止再长成 150 MB）
 UNMEASURED_EXAMPLES_PER_CODE = 2
 MAX_UNMEASURED_GROUPS = 6                 # 归组之后仍然只默认给前 6 组
@@ -287,7 +287,7 @@ def _verdict_dram_total(rep: Any) -> Verdict | None:
         return None
     return Verdict(
         id="dram_bytes", question="DRAM 搬了多少字节 / 是不是 DRAM bound", status=SOFT,
-        facts={"mb": round(nbytes / 1e6, 1), "source_unit": str(m.unit or "B")},
+        facts={"mb": round(nbytes / 1e6, 1)},
         value=round(nbytes, 1), unit="B",
         provenance=m.provenance.value, premises=premises,
         metrics=("est__dram_bytes_total", "ks__sampler_window_coverage_pct"),
@@ -314,7 +314,7 @@ def _verdict_per_launch(rep: Any) -> Verdict | None:
     if nbytes is None:
         return None
     bias = metric_value(rep, "ks__attribution_bias_estimate_pct")
-    facts: dict[str, Any] = {"mb": round(nbytes / 1e6, 2), "source_unit": str(m.unit or "B")}
+    facts: dict[str, Any] = {"mb": round(nbytes / 1e6, 2)}
     if bias:
         facts["bias_pct"] = round(float(bias))
     return Verdict(
@@ -343,7 +343,7 @@ def _verdict_trace(rep: Any) -> Verdict | None:
         return None
     return Verdict(
         id="dram_bytes_trace", question="DRAM 字节的第二条口径（访存轨迹）", status=SOFT,
-        facts={"mb": round(nbytes / 1e6, 2), "source_unit": str(m.unit or "B")},
+        facts={"mb": round(nbytes / 1e6, 2)},
         value=round(nbytes, 1), unit="B",
         provenance=m.provenance.value, premises=premises,
         metrics=("est__dram_bytes_per_launch_trace",),
@@ -599,6 +599,32 @@ def protocol_hash(rep: Any, extra: dict[str, Any] | None = None) -> str:
 # --------------------------------------------------------------------------
 # 组包
 # --------------------------------------------------------------------------
+def _propagate_over_peak(verdicts: list[Verdict]) -> None:
+    """`over_peak` 成立 ⇒ 由它算出来的 roofline 判词不能当依据（R-59/D18）。
+
+    真机包实测：`roofline status=soft actionable=True value=24041.6 %` 与
+    `over_peak status=refused` **并存** —— 按 v1.1 自己定的规矩（"读包的人用 actionable
+    判断可依据性"），那个物理不可能的达成率是"可依据"的，`diff` 还会拿它报 improved。
+    `ledger_verdict` 早就会继承 per-launch 的拒绝（同一个模式），roofline 漏了。
+    """
+    op = next((v for v in verdicts if v.id == "over_peak"), None)
+    roof = next((v for v in verdicts if v.id == "roofline"), None)
+    if op is None or op.status != REFUSED or roof is None or roof.status == REFUSED:
+        return
+    if roof.value is not None:
+        roof.facts = {**roof.facts, "uncitable_value": roof.value}
+    roof.status = REFUSED
+    roof.value = None
+    roof.refusal = Refusal(
+        RefusalCode.CALIBRATION_CALIBER_MISMATCH,
+        "达成值超过本机实测峰值（物理上不可能）⇒ roofline 的达成率不成立；"
+        "先核对标定口径（dtype/尺寸）与 --ks-gemm/--ks-flops 的工作量，再谈优化方向")
+    # 旧 hint 是"已达 roofline 91.2%…"（在没被推翻时是对的）；被推翻后必须换成
+    # 与拒绝一致的动作，否则同一行里一边说"不成立"一边说"已达"。
+    roof.next = ("先核对标定口径（dtype/尺寸）与工作量输入（--ks-gemm/--ks-flops），"
+                 "再谈优化方向")
+
+
 def _downgrade_broken_premises(verdicts: list[Verdict]) -> None:
     """前提不成立的判词**必须**变成 refused（外部评测暴露的漏洞，见下）。
 
@@ -631,8 +657,15 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
           basis: str = "", cost_extra: dict[str, Any] | None = None,
           report_path: str = "") -> dict[str, Any]:
     """由 Report 组出决策包（不读文件、不跑命令，纯函数便于测试）。"""
-    verdicts = [v for fn in BUILDERS if (v := fn(rep)) is not None][:MAX_VERDICTS]
+    verdicts_all = [v for fn in BUILDERS if (v := fn(rep)) is not None]
+    verdicts = verdicts_all[:MAX_VERDICTS]
+    # R-53/D10：上限截断必须**留痕** —— 否则读者（人或 agent）不知道包里少了一条，
+    # 而 `cost.trimmed` 只记预算裁剪、记不到这一步（它在预算裁剪之前就发生了）。
+    verdicts_more = ({"count": len(verdicts_all) - MAX_VERDICTS,
+                      "ids": [v.id for v in verdicts_all[MAX_VERDICTS:]]}
+                     if len(verdicts_all) > MAX_VERDICTS else None)
     _downgrade_broken_premises(verdicts)
+    _propagate_over_peak(verdicts)
 
     band = ((selfcheck or {}).get("band") or {}).get("dram_bytes_pct")
     mdd_dram = ((selfcheck or {}).get("mdd") or {}).get("dram_bytes_pct")
@@ -702,6 +735,8 @@ def build(rep: Any, *, capabilities: Any = None, selfcheck: dict[str, Any] | Non
     }
     if unmeasured_more:
         packet["unmeasured_more"] = unmeasured_more
+    if verdicts_more:
+        packet["verdicts_more"] = verdicts_more
     if getattr(rep, "meta", {}).get("synthetic"):
         packet["synthetic"] = True
     for d in (getattr(rep, "meta", {}) or {}).get("environment_refusals", []) or []:
@@ -717,13 +752,16 @@ def enforce_budget(packet: dict[str, Any],
                    limit: int = PACKET_SIZE_BUDGET_BYTES) -> list[str]:
     """把包压进尺寸预算，并如实记录**裁掉了什么**（返回被裁剪的步骤名）。
 
-    尺寸是 C 的一部分，所以它是一条**硬**约束：不管报告里有多少判词与拒绝，
-    默认包都不许超过预算。做法是有序降级（先去掉最能"再生"的东西）：
+    尺寸是 A 的一部分，所以它是一条**硬**约束：不管报告里有多少判词与拒绝，
+    默认包都不许超过预算。做法是有序降级（先去掉最能"再生"的东西）；
+    下面 `steps` 里的顺序**就是**实际顺序（这条注释与实现逐字一致，改一处就改两处）：
 
-        例子 > 归组数 > 下一步条数 > 判词指标名 > remedy 命令 > 非失败前提 > 判词条数
+        未测到的例子 > 判词的指标名 > 下一步指针 > 未测到归组数 > 成立的前提 >
+        remedy 命令 > 处置文本 > 判词条数 > 判词 facts > 拒绝条目数
 
     每一步都只删"能从完整报告里再取回来"的东西，并把步骤名写进 `cost.trimmed` ——
-    读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。
+    读者（人或 agent）因此知道包是摘要，而不是以为这就是全部。最后一级丢掉的
+    拒绝 code 会列在 `refusals_omitted` 里，所以"少了什么"也是可查的。
     """
     trimmed: list[str] = []
     # `cost.trimmed` 自己也是包的一部分，所以先放好空列表再量，之后每应用一步就把它
@@ -744,6 +782,46 @@ def enforce_budget(packet: dict[str, Any],
             if len(ps) > 1:
                 v["premises"] = [p for p in ps if not p.get("ok")] or ps[:1]
 
+    def _shorten_refusal_actions() -> None:
+        """把每条处置文本截短：保留 code 与"往哪走"的骨架。
+
+        完整处置在报告的 refusals 表与参考层文档里（agent 需要细看时按 code 去查）。
+        """
+        for r in (packet.get("refusals") or {}).values():
+            a = r.get("action")
+            if isinstance(a, str) and len(a) > REFUSAL_ACTION_LIMIT:
+                r["action"] = a[:REFUSAL_ACTION_LIMIT - 1] + "…"
+
+    def _cap_refusal_entries() -> None:
+        """只保留前几条拒绝条目，**把丢掉的 code 列出来**（列不全时明确标出）。
+
+        为什么可以丢条目但不许悄悄丢：读者仍然知道"曾经有哪些 code"与"还差几个"
+        （`refusals_omitted`），以及完整处置在哪 —— 这比让整包超预算
+        （agent 按 <4 KB 规划就失效）要好。
+        """
+        refs = packet.get("refusals") or {}
+        if len(refs) <= REFUSAL_KEEP:
+            return
+        keep = sorted(refs)[:REFUSAL_KEEP]
+        dropped = [c for c in sorted(refs) if c not in set(keep)]
+        packet["refusals"] = {c: refs[c] for c in keep}
+        omitted: dict[str, Any] = {"count": len(dropped), "codes": dropped[:REFUSAL_LIST_CODES]}
+        if len(dropped) > REFUSAL_LIST_CODES:
+            omitted["codes_truncated"] = True
+        packet["refusals_omitted"] = omitted
+
+    def _drop_refusal_action_text() -> None:
+        """最后一级：保留条目骨架（code / 代价），丢掉处置散文。
+
+        处置的完整文本在报告的 refusals 表与参考层文档里（`remedy.sh <code>` 一条命令就能
+        查到），所以包里留 code + 代价即可 —— 读者仍然知道"这类拒绝该怎么办、要花多少"。
+        """
+        for r in (packet.get("refusals") or {}).values():
+            r.pop("action", None)
+
+    def _cap_verdicts_hard() -> None:
+        packet["verdicts"] = (packet.get("verdicts") or [])[:VERDICT_KEEP_HARD]
+
     steps = [
         ("unmeasured_examples", lambda: [g.pop("examples", None) for g in packet["unmeasured"]]),
         ("verdict_metrics", lambda: [v.pop("metrics", None) for v in packet["verdicts"]]),
@@ -752,8 +830,16 @@ def enforce_budget(packet: dict[str, Any],
         ("passing_premises", _drop_passing_premises),
         ("remedy_commands",
          lambda: [r.pop("cmd", None) for r in (packet.get("refusals") or {}).values()]),
+        # R-52：上面几步只删了 refusal 的 `cmd` 子字段，**条目本身不参与裁剪** —— 受限环境
+        # 天然产生十几个 code，包会常态化突破预算（实测 45 个 code → 8883 B）。
+        # 所以再加两级：先把每条处置文本截短（code 与"怎么办"的骨架保留），
+        # 最后才丢条目、并把丢掉的 **code 列出来**（读者知道少了什么、去哪看）。
+        ("refusal_actions", _shorten_refusal_actions),
         ("verdicts", lambda: _cap_list(packet, "verdicts", 6)),
         ("facts", lambda: [v.pop("facts", None) for v in packet["verdicts"]]),
+        ("refusal_entries", _cap_refusal_entries),
+        ("refusal_action_text", _drop_refusal_action_text),
+        ("verdicts_hard_cap", _cap_verdicts_hard),
     ]
     for name, fn in steps:
         fn()
@@ -765,6 +851,12 @@ def enforce_budget(packet: dict[str, Any],
         # 不去改 `packet_bytes` 那个数 —— 它必须等于真实字节数（有测试守）。
         packet["cost"]["over_budget"] = True
     return list(packet["cost"]["trimmed"])
+
+
+REFUSAL_ACTION_LIMIT = 72     # 截短后的处置文本上限（完整版在报告与参考层里）
+REFUSAL_KEEP = 8              # 最多保留几条拒绝条目（丢掉的名字列进 refusals_omitted）
+REFUSAL_LIST_CODES = 4        # refusals_omitted 里最多列几个 code（再多就只给计数）
+VERDICT_KEEP_HARD = 4         # 最后一级：判词只留最关键的四条
 
 
 def _cap_list(packet: dict[str, Any], key: str, n: int) -> None:

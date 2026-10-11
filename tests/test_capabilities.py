@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from kernoscope.capabilities_cmd import capabilities_main
 from kernoscope.capabilities import (CHECKS, QUESTIONS, TIERS, Env, evaluate, probe,
                                      render_matrix)
 from kernoscope.refusals import RefusalCode
@@ -260,16 +261,24 @@ def test_brief_has_no_prose_fields():
         assert set(item) <= {"code", "unlocks", "cost_kind", "cost_s", "cmd"}
 
 
-def test_brief_labels_the_price_of_the_next_layer():
-    """渐进披露带价格标签：入口层必须说清下一层多大、里面有什么。"""
+def test_brief_labels_the_price_of_the_next_layer(capsys):
+    """渐进披露带价格标签：入口层必须说清下一层多大、里面有什么。
+
+    R-54/D11：这个数必须等于**它自己命名的那个命令的真实输出字节数**。旧实现两边
+    各写一份 `json.dumps`（标签用紧凑、命令用缩进），于是标签写 19152 B 而命令实际
+    输出 25805 B（低估 35%），而测试用同一个紧凑公式自证，永远抓不到。
+    """
     import json
 
-    r = evaluate(_env(has_memtrace=True))
-    b = r.brief()
+    # 两条命令都经 CLI 跑（同一个 probe ⇒ 同一台机器的同一份报告），
+    # 然后用**真实输出的字节数**去比标签 —— 不重算任何公式。
+    assert capabilities_main(["--brief"]) == 0
+    b = json.loads(capsys.readouterr().out)
     nl = b["next_layer"]
-    real = len(json.dumps(r.to_dict(), ensure_ascii=False,
-                          separators=(",", ":")).encode("utf-8"))
-    assert nl["bytes"] == real
+    assert nl["command"] == "kernoscope capabilities --json"
+    assert capabilities_main(["--json"]) == 0
+    out = capsys.readouterr().out
+    assert nl["bytes"] == len(out.encode("utf-8")), (nl["bytes"], len(out))
     assert nl["bytes"] > len(json.dumps(b, ensure_ascii=False,
                                        separators=(",", ":")).encode("utf-8")) * 5
     assert "remedies" in nl["contains"]

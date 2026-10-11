@@ -34,6 +34,13 @@ from .backends.nvml import Sampler
 from .refusals import Refusal, RefusalCode
 
 SELFTEST_SCHEMA_VERSION = 1
+
+# R-57/D14：selftest 的 matmul 峰值是**单一尺寸**的采样读数，只能用在带宽侧 roofline 与
+# 本机误差带上；**不能**当 --ks-calibration 用（真机实测它比多尺寸 sweep 低 ~17%，
+# 拿它当标定会把正常结果推过 100%）。要标定请跑 tools/machine-profile.py。
+PEAK_CAVEAT = ("selftest 的 matmul 峰值来自**单一尺寸**的采样，只用于本机误差带与带宽侧 "
+               "roofline；**不要当 --ks-calibration** —— 要标定请跑 tools/machine-profile.py"
+               "（多尺寸 sweep + 累加口径扫描）")
 DEFAULT_SIZE_MB = 256
 DEFAULT_DURATION_S = 2.0
 DEFAULT_RUNS = 3
@@ -147,12 +154,15 @@ class SelftestResult:
                 out.append(f"  适用范围：{m['caveat']}")
         if self.peaks:
             out.append("")
-            out.append("顺带量到的本机峰值（可直接当 --ks-calibration 用）："
+            out.append("顺带量到的本机峰值（copy 侧可当 --ks-calibration 的带宽输入；matmul 侧见下方适用范围）："
                        f"copy {self.peaks.get('copy_gbs', 0):.0f} GB/s"
                        + (f" · read {self.peaks.get('read_gbs', 0):.0f} GB/s"
                           if self.peaks.get("read_gbs") else "")
                        + (f" · matmul {self.peaks.get('matmul_tflops', 0):.1f} TFLOP/s"
+                          f"（单一尺寸 {self.peaks.get('matmul_dim', '?')}）"
                           if self.peaks.get("matmul_tflops") else ""))
+            if self.peaks.get("matmul_tflops"):
+                out.append(f"  ⚠ {PEAK_CAVEAT}")
         for n in self.notes:
             out.append(f"注：{n}")
         return "\n".join(out)
@@ -185,11 +195,17 @@ class SelftestResult:
             d["measured_matmul_tflops"] = {
                 "torch.bfloat16" if self.dtype == "bf16" else f"torch.{self.dtype}": {
                     "tflops": self.peaks["matmul_tflops"],
+                    # R-57/D14：峰值必须带**尺寸**（单一尺寸的采样读数不能冒充"可达上限"）
+                    "size": self.peaks.get("matmul_dim"),
                     "acc_caliber": "default",
                     "precision_settings": "torch.matmul 默认（selftest 未做累加口径扫描）",
-                    "method": "torch.matmul（selftest）",
+                    "method": f"torch.matmul（selftest，单一尺寸 {self.peaks.get('matmul_dim')}）",
                 }
             }
+            d["peak_caveat"] = PEAK_CAVEAT
+            if self.peaks.get("matmul_dim"):
+                d["peak_caveat"] = (f"{PEAK_CAVEAT}（本次 matmul 尺寸 {self.peaks['matmul_dim']}，"
+                                    f"只有这一个尺寸）")
         if self.refusal is not None:
             d["refusal"] = self.refusal.to_dict()
         return d
@@ -371,6 +387,7 @@ def run_selftest(size_mb: int = DEFAULT_SIZE_MB, duration_s: float = DEFAULT_DUR
                     w.analytic_bytes_per_iter * w.iters / max(w.duration_s, 1e-9)
                     / max(w.mem_util_pct / 100.0, 1e-6) for w in got) / 1e9, 1)
         res.peaks["matmul_tflops"] = round(_measure_matmul_tflops(torch, a, b, c, mm), 2)
+        res.peaks["matmul_dim"] = mm[0]      # 单一尺寸：要写进产物，否则读者不知道这个峰值的口径
 
     _fill_band_and_mdd(res, extra_runs=_cross_process_samples(res, cross_process, only))
     res.ok = True
@@ -481,8 +498,13 @@ def _fill_band_and_mdd(res: SelftestResult,
                         f"NVML 1 个百分点分辨率下限, 本机误差带半宽, "
                         f"实测漂移下限 {MDD_FLOOR_DRAM_PCT:g}%)")
     res.mdd["floor_pct"] = MDD_FLOOR_DRAM_PCT
-    res.mdd["floor_evidence"] = ("同协议两次运行实测相差 4.7%（bench 产物 "
-                                 "diff-same-protocol）；时长扫描同负载 ≈5 个百分点")
+    # R-57/D15：证据必须指向**真的含这个数字的地方**。旧文案说"bench 产物
+    # diff-same-protocol 实测相差 4.7%"，而那份产物里是 −3.6%/3.6%；4.65 其实是本次
+    # 自测自己的 run_to_run_sd_pct。所以现在直接引用本产物自己的字段。
+    res.mdd["floor_evidence"] = (
+        f"本次自测的 run-to-run SD = {sd:.2f}%（唯一来源：本产物的 run_to_run_sd_pct）；"
+        f"{MDD_FLOOR_DRAM_PCT:g}% 是保守下限常量（MDD_FLOOR_DRAM_PCT），"
+        f"用来兜住「SD 恰好很小」的那次自测")
     res.mdd["run_to_run_sd_pct"] = round(sd, 2)
     res.mdd["resolution_floor_pct"] = round(floor, 2)
     res.mdd["band_half_width_pct"] = round(half_band, 2)

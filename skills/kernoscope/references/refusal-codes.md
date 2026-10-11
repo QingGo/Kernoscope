@@ -2,11 +2,11 @@
 
 # 拒绝码（`refusal.code`）参考
 
-每条 `n/a` 都带一个闭集 code + 观测值 + 门槛 + 可执行 remedy（含代价）。
+每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；47 个 code 里 29 个带可直接执行的命令、18 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
 **硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，
 或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。
 
-共 46 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
+共 47 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
 
 | code | 什么意思 | 怎么办 | 命令 | 代价 |
 |---|---|---|---|---|
@@ -44,6 +44,7 @@
 | `trace_unavailable` | 访存轨迹给不出字节数 | 轨迹口径给不出字节时，改用 NVML 代理口径（--ks-calibration + --ks-window auto）或检查轨迹是否覆盖了被匹配的 kernel |  | ≈20s |
 | `trace_too_many_accesses` | 访问数超过分析上限 | 提高 --ks-max-accesses（内存换精度），或缩小被追踪 kernel 的迭代数：超上限时我们拒绝给一个偏小的字节数 | `kernoscope --ks-max-accesses 20000000 --ks-memtrace t.txt ...` | 需人工 |
 | `ledger_basis_unavailable` | 账本对拍口径不成立 | 换对拍口径：--ks-ledger-total-mb 走整窗口，--ks-ledger-mb 走 per-launch（后者要求窗口主导性达标） | `kernoscope --ks-ledger-total-mb 512 -- python bench_loop.py` | ≈0 |
+| `zero_baseline` | 基线为 0，相对误差带不适用 | 基线是 0 时相对差无定义（除以 0），所以不能用相对误差带判「变了多少」。要么给出一个非零基线，要么按绝对差值自行判断 —— 我们只把绝对差值报出来，不下方向 |  | 需人工 |
 | `no_calibration` | 缺少本机实测峰值（未标定） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它） | `kernoscope selftest --out machine-profile.json` | ≈60s |
 | `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致 | `python tools/machine-profile.py --quick` | ≈5min |
 | `no_workload` | 没有给工作量（FLOPs/bytes） | 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes | `kernoscope --ks-gemm 4096,4096,4096 -- python app.py` | ≈0 |

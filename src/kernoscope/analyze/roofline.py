@@ -189,7 +189,33 @@ class SpeedOfLight:
     #   · 标定与本次运行不在同一状态（时钟/功耗受限、冷启动、MIG、别的进程抢卡）
     # 教程用「162.3 TFLOPS ≈ 98% fp16 峰值」做裁决；若峰值被取成 145.7，同一份数据
     # 就变成 114% —— 一个物理上不可能的结论被当成裁决依据，正是这里要拦住的东西。
-    PEAK_EXCEED_TOLERANCE_PCT = 2.0     # 容差：标定本身有 3~4% 口径差，2% 内只提示
+    PEAK_EXCEED_TOLERANCE_PCT = 2.0     # 容差：标定本身有 3~4% 口径差，2% 内给**提示**（不报红灯）
+
+    @property
+    def near_peak(self) -> bool:
+        """100% < 达成值 ≤ 100%+容差：超过标称峰值但还在标定自身口径差之内。
+
+        这一段**不是**红灯（可能是口径差），但绝不能静默：101% 与 95% 的读数长得一样，
+        而前者已经物理上说不通（D20）。所以它要出一句提示，让读者去核对标定与工作量。
+        """
+        if not self.peaks.compute_tflops and not self.peaks.bandwidth_gbs:
+            return False
+        return (not self.over_peak
+                and (self.pct_compute > 100.0 or self.pct_memory > 100.0))
+
+    def near_peak_note(self) -> str:
+        """容忍带内的提示（与红灯同一套措辞口径，但明确说"先别当达标证据"）。"""
+        if not self.near_peak:
+            return ""
+        which = []
+        if self.pct_compute > 100.0:
+            which.append(f"算力 {self.achieved_tflops:.1f} TFLOPS = 标定峰值的 {self.pct_compute:.1f}%")
+        if self.pct_memory > 100.0:
+            which.append(f"带宽 {self.achieved_gbs:.1f} GB/s = 标定峰值的 {self.pct_memory:.1f}%")
+        return ("达成值达到/略超过标定峰值（在标定自身 "
+                f"{self.PEAK_EXCEED_TOLERANCE_PCT:.0f}% 口径差之内）：" + "；".join(which)
+                + "。这不一定是「达标」：先核对峰值口径（dtype/尺寸）与工作量输入，"
+                  "再拿它当结论。")
 
     @property
     def over_peak(self) -> bool:

@@ -18,12 +18,12 @@ import json
 
 import pytest
 
-from kernoscope.diff_cmd import (IMPROVED, INCOMPARABLE, INDISTINGUISHABLE, REGRESSED,
+from kernoscope.diff_cmd import (IMPROVED, INCOMPARABLE, INDISTINGUISHABLE, NOT_JUDGED, REGRESSED,
                                  diff_packets, diff_main)
 from kernoscope.refusals import RefusalCode
 from kernoscope.report import DeviceInfo, KernelReport, Report
 from kernoscope.packet import build
-from kernoscope.selftest import SelftestResult, WorkloadRun, run_selftest
+from kernoscope.selftest import SELFTEST_SCHEMA_VERSION, SelftestResult, WorkloadRun, run_selftest
 
 
 # --------------------------------------------------------------------------
@@ -176,7 +176,7 @@ def test_torch_dtype_names_are_mapped_correctly():
 def test_selftest_schema_fields():
     res = _filled([_run("copy", 1.0)])
     d = res.to_dict()
-    assert d["schema_version"] == 1 and d["tool"] == "kernoscope"
+    assert d["schema_version"] == SELFTEST_SCHEMA_VERSION and d["tool"] == "kernoscope"
     assert d["protocol"]["workloads"] == ["copy", "read", "write", "matmul"]
 
 
@@ -329,7 +329,7 @@ def test_directionless_verdicts_go_to_not_judged():
 
 def test_json_output_is_machine_readable():
     d = diff_packets(_packet(), _packet(dram_mb=600.0)).to_dict()
-    assert d["schema_version"] == 1
+    assert d["schema_version"] == 2
     assert set(d["summary"]) >= {IMPROVED, REGRESSED, INDISTINGUISHABLE, INCOMPARABLE}
     assert all("status" in c for c in d["comparisons"])
 
@@ -397,3 +397,72 @@ def test_diff_accepts_full_reports_too(capsys, tmp_path):
     rc = diff_main([str(path), str(path), "--json"])
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["protocol"]["same"] is True
+
+
+# --------------------------------------------------------------------------
+# R-58 / D16,D17：判据是"相对差 vs 相对误差带"；0 基线不能算成没变化
+# --------------------------------------------------------------------------
+def _with_verdict(p: dict, vid: str, value, unit: str, mdd: float | None = None) -> dict:
+    p["verdicts"] = [v for v in p["verdicts"] if v["id"] != vid]
+    v = {"id": vid, "status": "soft", "value": value, "unit": unit,
+         "provenance": "estimated", "facts": {}}
+    if mdd is not None:
+        v["mdd"] = mdd
+    p["verdicts"].append(v)
+    return p
+
+
+def test_percent_metric_uses_relative_band_not_percentage_points():
+    """D16：roofline 20% → 15% 是**相对退化 25%**，不能被判成噪声。
+
+    旧实现让 `%` 单位的判词拿**百分点**（5）去比**相对**误差带（14%）—— 于是真实的
+    25% 退化被判成 indistinguishable。MDD 里的每个键量的都是相对离散度，所以判据必须
+    一律是相对差。
+    """
+    a = _with_verdict(_packet(), "roofline", 20.0, "%", mdd=14.0)
+    b = _with_verdict(_packet(), "roofline", 15.0, "%", mdd=14.0)
+    r = diff_packets(a, b)
+    c = next(x for x in r.comparisons if x.id == "roofline")
+    assert c.delta_pct == pytest.approx(-25.0)
+    assert c.status == REGRESSED, (c.status, c.note)
+    assert "相对差" in c.note
+    # 反向：相对差小于 MDD 才是噪声
+    a2 = _with_verdict(_packet(), "roofline", 20.0, "%", mdd=14.0)
+    b2 = _with_verdict(_packet(), "roofline", 19.0, "%", mdd=14.0)   # 相对 −5%
+    c2 = next(x for x in diff_packets(a2, b2).comparisons if x.id == "roofline")
+    assert c2.status == INDISTINGUISHABLE
+
+
+def test_zero_baseline_is_not_reported_as_no_change():
+    """D17：0 → 500 MB 是"相对差无定义"，不是"没变化"。
+
+    旧实现 `delta_pct=None` 被折成 magnitude=0.0，于是判 indistinguishable 并印出
+    「差值 0.00 在 MDD 5.0% 之内」—— 自相矛盾（差值是 5e8）。
+    """
+    a = _with_verdict(_packet(dram_mb=None), "dram_bytes", 0.0, "B", mdd=5.0)
+    b = _with_verdict(_packet(dram_mb=None), "dram_bytes", 500e6, "B", mdd=5.0)
+    r = diff_packets(a, b)
+    c = next(x for x in r.comparisons if x.id == "dram_bytes")
+    assert c.status == INCOMPARABLE
+    assert c.refusal is not None and c.refusal.code is RefusalCode.ZERO_BASELINE
+    assert "绝对差值" in c.refusal.message and "5e+08" in c.refusal.message
+    # 两侧都是 0 仍然算"没变化"
+    z1 = _with_verdict(_packet(dram_mb=None), "dram_bytes", 0.0, "B", mdd=5.0)
+    z2 = _with_verdict(_packet(dram_mb=None), "dram_bytes", 0.0, "B", mdd=5.0)
+    cz = next(x for x in diff_packets(z1, z2).comparisons if x.id == "dram_bytes")
+    assert cz.status == INDISTINGUISHABLE
+
+
+def test_not_judged_has_its_own_status_and_is_counted():
+    """D25：只给差值、不下方向的项必须是独立状态，且计入 summary。"""
+    a, b = _packet(), _packet()
+    r = diff_packets(a, b)
+    assert r.not_judged, "ledger_verdict 没有价值方向，应当在 not_judged 里"
+    assert all(c.status == NOT_JUDGED for c in r.not_judged)
+    counts = r.counts()
+    assert counts[NOT_JUDGED] == len(r.not_judged)
+    # 机器按 status 数出来的总数必须等于 summary 各格之和
+    by_status = [c["status"] for c in r.to_dict()["comparisons"]] + \
+                [c["status"] for c in r.to_dict()["not_judged"]]
+    assert len(by_status) == sum(counts.values())
+    assert set(by_status) <= set(counts)

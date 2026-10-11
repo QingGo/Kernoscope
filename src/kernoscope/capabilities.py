@@ -279,7 +279,16 @@ class CapabilityReport:
             "weak": [a.question.id for a in self.answers if a.state == STATE_DEGRADED],
             "cannot_answer": [a.question.id for a in self.answers
                               if a.state == STATE_REFUSED],
-            "blocked_by": sorted({d["code"] for d in self.next_actions()}),
+            # R-55/D23：`blocked_by` 要列**全部**被拒的 code —— 包括那些"本机走不通"
+            # （cost_kind=unavailable）的。旧实现从 next_actions() 派生，而那个函数有意跳过
+            # 走不通的补救，于是 `blocked_by` 悄悄少一个 code（真机：4 个被拒 code、只列 3 个），
+            # 读者按它规划就会漏掉一个前提。
+            "blocked_by": sorted({a.refusal.code.value for a in self.answers
+                                  if a.state == STATE_REFUSED and a.refusal is not None}),
+            "blocked_by_unavailable": sorted({a.refusal.code.value for a in self.answers
+                                              if a.state == STATE_REFUSED and a.refusal is not None
+                                              and a.refusal.remedy_or_default.cost_kind
+                                              == "unavailable"}),
             "next": [{"code": d["code"], "unlocks": len(d["unlocks"]),
                       "cost_kind": d["cost_kind"], "cost_s": d["cost_s"],
                       "cmd": d["command"]}
@@ -288,8 +297,8 @@ class CapabilityReport:
             # 而不是靠猜。这个数是它自己算出来的，不是文档里抄的。
             "next_layer": {
                 "command": "kernoscope capabilities --json",
-                "bytes": len(json.dumps(self.to_dict(), ensure_ascii=False,
-                                        separators=(",", ":")).encode("utf-8")),
+                # 价格标签 = **它自己命名的那个命令**的真实输出字节数（同一渲染器）
+                "bytes": len(render_json(self).encode("utf-8")),
                 "contains": ["refusal_reasons", "remedies", "premises", "per_question_state"],
             },
         }
@@ -494,6 +503,15 @@ CHECKS: Checks = {
     "pipe_utilization": _q_pipe_utilization,
     "nvlink": _q_nvlink,
 }
+
+
+def render_json(report: "CapabilitiesReport") -> str:
+    """`kernoscope capabilities --json` 的**唯一**渲染器（缩进 + 结尾换行）。
+
+    价格标签与真实输出必须同源：各写一份 `json.dumps(...)` 的话，缩进/分隔符一变，
+    标签就悄悄低估（真事：标签写 19152 B，命令实际输出 25805 B，差 35%）。
+    """
+    return json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
 
 
 def evaluate(env: Env, note: str = "") -> CapabilityReport:

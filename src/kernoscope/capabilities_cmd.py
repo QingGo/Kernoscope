@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from .capabilities import CAPABILITIES_SCHEMA_VERSION, probe
+from .capabilities import CAPABILITIES_SCHEMA_VERSION, probe, render_json
 from .refusals import RefusalCode
 
 
@@ -44,19 +44,20 @@ def capabilities_main(argv: list[str]) -> int:
         # 机器优先：紧凑 JSON，不缩进（缩进只是把字节花在空白上）
         print(json.dumps(report.brief(), ensure_ascii=False, separators=(",", ":")))
         if args.out:
-            Path(args.out).write_text(
-                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n")
+            Path(args.out).write_text(render_json(report))
             if not args.quiet:
                 print(f"wrote {args.out}", file=sys.stderr)
         return 0
     if args.json or args.out:
-        blob = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+        blob = render_json(report)
         if args.out:
-            Path(args.out).write_text(blob + "\n")
+            Path(args.out).write_text(blob)
             if not args.quiet:
                 print(f"wrote {args.out}", file=sys.stderr)
         if args.json:
-            print(blob)
+            # 不要再用 print 追加换行：`render_json` 已经以换行结尾，多一个字节
+            # 就会让价格标签比真实输出少 1 B（它是端到端测出来的）。
+            sys.stdout.write(blob)
     else:
         print(report.render())
     # 能力清单本身永远是成功：它回答的是「现在能做什么」，不是「有没有做成某件事」。

@@ -90,8 +90,16 @@ def _cost_text(rem) -> str:
 
 
 def render_refusal_codes() -> str:
+    with_cmd = sum(1 for c in RefusalCode
+                   if DEFAULT_REMEDIES.get(c) and DEFAULT_REMEDIES[c].command)
+    no_cmd = len(list(RefusalCode)) - with_cmd
     out = [HEADER, "# 拒绝码（`refusal.code`）参考\n",
-           "每条 `n/a` 都带一个闭集 code + 观测值 + 门槛 + 可执行 remedy（含代价）。",
+           # 这句以前写成"每条 n/a 都带观测值 + 门槛 + 可执行 remedy"—— 实测 41 行 n/a 里
+           # threshold 非空 0/41、16 个 code 没有默认命令。散文按实测（且现算）写，不夸大。
+           f"每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；"
+           f"{len(RefusalCode)} 个 code 里 {with_cmd} 个带可直接执行的命令、"
+           f"{no_cmd} 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。"
+           "观测值与门槛只有在**该前提本身可观测**时才给。",
            "**硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，",
            "或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。\n",
            f"共 {len(RefusalCode)} 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。\n",

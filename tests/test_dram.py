@@ -728,3 +728,91 @@ def test_share_too_low_remedy_no_longer_sells_shrinking_the_window():
         assert bad not in rem.command, f"command 里还在推荐 {bad} 缩窗口"
         assert bad not in r.message, f"拒绝文案里还在推荐 {bad} 缩窗口"
     assert "--ks-memtrace" in rem.action and "--ks-ledger-total-mb" in rem.action
+
+
+# --------------------------------------------------------------------------
+# R-47 的真机教训：nsys 的 launch 时间戳是**会话相对**的，不是 monotonic
+# --------------------------------------------------------------------------
+def _session_relative_run(session_offset: float = 2.67, seconds: float = 30.0,
+                          launches: int = 600, dt: float = 0.2, idle_s: float = 5.0):
+    """真机形态：采样从 monotonic 的 t=1000 开始，先空转 idle_s，再跑 seconds 秒紧循环；
+    launch 时间戳是**nsys 会话相对**的（第一次 launch ≈ session_offset 秒）。"""
+    base = 1000.0
+    n_idle = int(idle_s / dt)
+    n_busy = int(seconds / dt)
+    samples = [DeviceSample(t=base + i * dt, mem_util_pct=0.0, sm_util_pct=0.0,
+                            sm_clock_mhz=210.0, power_w=60.0) for i in range(n_idle)]
+    samples += [DeviceSample(t=base + (n_idle + i) * dt, mem_util_pct=95.0, sm_util_pct=99.0,
+                             sm_clock_mhz=2500.0, power_w=300.0) for i in range(n_busy)]
+    step = seconds / launches
+    spans = [(session_offset + i * step, session_offset + (i + 1) * step)
+             for i in range(launches)]
+    return samples, spans, base
+
+
+def test_session_relative_launch_clock_is_derived_not_assumed():
+    """真机实测：CUPTI/nsys 的 start_ns 相对 profiling 会话起点（首次 launch ≈2.67 s），
+    而采样 t 是 time.monotonic()。直接相减会把整段 launch 表判成"窗外"，于是要么给错
+    要么全部拒绝。这里必须**推导**偏移（用窗口内忙碌段当锚点）并**自检速率比**。
+    """
+    samples, spans, base = _session_relative_run()
+    est = estimate(samples, peak_gbs=900.0, window_s=35.0, launches=600,
+                   window_mode="auto", launch_spans=spans,
+                   matched_kernel_ns=int(30.0e9))
+    assert est.launch_clock_aligned is True, est.refusal_for("est__dram_bytes_per_launch").message
+    assert est.bytes_per_launch is not None
+    # 锚点 = 窗口内第一个忙碌采样点；launch 表起点是会话相对 2.67 s ⇒ 偏移约等于
+    # (base + idle_s) − session_offset
+    assert est.launch_align_offset_s == pytest.approx(base + 5.0 - 2.67, abs=0.25)
+    assert est.launch_align_slope == pytest.approx(1.0, abs=0.02)
+    # 紧循环、launch 铺满整段 ⇒ 分母应当接近全部 600 个
+    assert est.launches_in_window == pytest.approx(600.0, rel=0.03)
+    assert est.attributable
+    # 分母的分辨率（offset ±1 采样周期）要报出来，且必须**包住**中点估计、且很小
+    assert est.launches_in_window_range is not None
+    lo, hi = est.launches_in_window_range
+    assert lo <= est.launches_in_window <= hi
+    assert 100.0 * (hi - lo) / est.launches_in_window < 3.0, (lo, hi)
+
+
+def test_session_relative_clock_with_cut_window_still_agrees():
+    """同一负载、会话相对的时钟、窗口被裁 —— per-launch 仍必须与不裁时一致。"""
+    samples, spans, _ = _session_relative_run(seconds=30.0, launches=600)
+    full = estimate(samples, peak_gbs=900.0, window_s=35.0, launches=600,
+                    window_mode="auto", launch_spans=spans, matched_kernel_ns=int(30.0e9))
+    # 采样从 base 开始、忙碌段是 [base+5, base+35]；warmup 25 s ⇒ 窗口只剩最后 10 s
+    cut = estimate(samples, peak_gbs=900.0, window_s=35.0, launches=600, warmup_s=25.0,
+                   window_mode="auto", launch_spans=spans, matched_kernel_ns=int(10.0e9))
+    assert full.attributable and cut.attributable
+    assert cut.launches_in_window == pytest.approx(200.0, rel=0.08)
+    assert cut.bytes_per_launch == pytest.approx(full.bytes_per_launch, rel=0.08)
+
+
+def test_clock_rate_mismatch_is_refused():
+    """两个时钟速率不一致（模拟被缩放的时间戳）⇒ 必须拒绝，并点名速率比。"""
+    samples, spans, _ = _session_relative_run(seconds=30.0, launches=600)
+    # 把 launch 表压缩到一半长度：等于"launch 时钟跑得比采样时钟慢一倍"
+    lo = spans[0][0]
+    squeezed = [(lo + (a - lo) * 0.5, lo + (b - lo) * 0.5) for a, b in spans]
+    est = estimate(samples, peak_gbs=900.0, window_s=35.0, launches=600,
+                   window_mode="auto", launch_spans=squeezed,
+                   matched_kernel_ns=int(30.0e9))
+    assert est.launch_clock_aligned is False
+    assert est.bytes_per_launch is None
+    r = est.refusal_for("est__dram_bytes_per_launch")
+    assert r.code is RefusalCode.WINDOW_LAUNCH_UNALIGNED
+    assert "速率比" in r.message
+    assert r.observed["launch_align_slope"] == pytest.approx(2.0, rel=0.05)
+    assert r.threshold == {"launch_align_slope": 1.0}
+
+
+def test_mixed_window_still_reports_share_too_low_first():
+    """D1 的验收不能回归：混合窗口（份额不足）的主 code 仍必须是 share_too_low。"""
+    samples, spans, _ = _session_relative_run(seconds=30.0, launches=600)
+    est = estimate(samples, peak_gbs=900.0, window_s=35.0, launches=600,
+                   window_mode="auto", launch_spans=spans,
+                   matched_kernel_ns=int(12.0e9), other_kernels_ns=int(18.0e9),
+                   other_kernel_count=3)
+    r = est.refusal_for("est__dram_bytes_per_launch")
+    assert r.code is RefusalCode.SHARE_TOO_LOW, r.code
+    assert "份额" in r.message

@@ -5,7 +5,7 @@
   "material": {
     "packet": {
       "schema_version": 1,
-      "schema_revision": "1.1",
+      "schema_revision": "1.2",
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {

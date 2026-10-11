@@ -99,6 +99,10 @@ class DramEstimate:
     sample_t0: float | None = None          # 采样覆盖的边界（裁窗口**之前**）
     sample_t1: float | None = None
     launch_clock_aligned: bool | None = None  # None=没给 launch 时间戳；False=两个时钟对不上
+    launch_align_offset_s: float | None = None   # 推导出的偏移（采样时钟 − launch 时钟）
+    launch_align_slope: float | None = None      # 两个时钟的速率比（自检：接近 1 才可信）
+    launches_in_window_range: tuple[float, float] | None = None  # offset ±1 采样周期的计数区间
+    launch_spans_mapped: list[tuple[float, float]] | None = None  # 对齐到采样时钟后的区间（内部用）
     window_bias_pct: float | None = None    # 100×(window_used_s/window_s − 1)，可算的偏差估计
     # ---- R-46：窗口主导性（per-launch 归因的第二个前提）----
     # 被匹配 kernel 的 GPU 时间（ns，来自 CUPTI 的逐 launch 时长求和）。
@@ -350,12 +354,21 @@ class DramEstimate:
                 + (f"；把稳态循环延长到约 {need:.0f} 秒，或加 --ks-window auto" if need else ""),
                 observed={"coverage_pct": round(self.window_coverage_pct, 1)},
                 threshold={"min_pct": DUTY_WEAK}))
-        # R-47：分母不可信时**先**说这一条 —— 它才是"窗口被裁过"的那种情况的真正原因，
-        # 否则读者会以为把窗口调一下就能拿到数（那正是 SHARE_TOO_LOW 旧文案的坑）。
+        share = self.matched_kernel_kernel_share_pct
+        if self.reliable and (share is None or share < SHARE_STRONG):
+            out.append(self._share_refusal())
+            return out
+        # 份额成立、但分母不可信：这才是"窗口被裁过"那种情况的真正原因。放在份额之后，
+        # 是因为混合窗口下份额才是主因（D1 的验收要的正是 share_too_low），
+        # 而"缩窗口改不动份额"这件事已写进 SHARE_TOO_LOW 的处方里。
         if self.reliable and self.launches > 0 and self.bytes_per_launch is None:
-            why = ("没有 launch 时间戳（拿不到逐 launch 的起止时间）"
-                   if self.launch_clock_aligned is None
-                   else "launch 时间戳与采样时钟对不上（CUPTI 与 NVML 不在同一时钟域）")
+            if self.launch_clock_aligned is None:
+                why = "没有 launch 时间戳（拿不到逐 launch 的起止时间）"
+            elif self.launch_align_slope is not None and not 0.9 <= self.launch_align_slope <= 1.1:
+                why = (f"launch 时间戳与采样时钟的**速率比 {self.launch_align_slope:.3f}**"
+                       f"（应当≈1）：两者不同源或被缩放，不能相除")
+            else:
+                why = "launch 时间戳与采样时钟对不上，且无法用忙碌段推出偏移"
             bias = self.window_bias_pct
             est_bias = (f"按窗口长度粗算，这个数字本来会偏小约 {abs(bias):.0f}%；"
                         if bias not in (None, 0.0) else "")
@@ -368,11 +381,10 @@ class DramEstimate:
                 observed={"launches_total": self.launches_total,
                           "launches_in_window": None,
                           "window_used_s": round(self.window_used_s, 2),
-                          "window_bias_pct": (round(bias, 1) if bias is not None else None)},
-                threshold={"launches_in_window": 1}))
-        share = self.matched_kernel_kernel_share_pct
-        if self.reliable and (share is None or share < SHARE_STRONG):
-            out.append(self._share_refusal())
+                          "window_bias_pct": (round(bias, 1) if bias is not None else None),
+                          "launch_align_slope": (round(self.launch_align_slope, 4)
+                                                 if self.launch_align_slope is not None else None)},
+                threshold={"launch_align_slope": 1.0}))
         return out
 
     def refusal_for(self, name: str, basis: str = "auto") -> Refusal:
@@ -672,33 +684,12 @@ def _fmt_launches(n: float | None) -> str:
     return f"{n:.0f}" if abs(n - round(n)) < 1e-6 else f"{n:.2f}"
 
 
-def _launches_in_window(spans: Sequence[tuple[float, float]] | None,
-                        t0: float | None, t1: float | None,
-                        sample_t0: float | None, sample_t1: float | None,
-                        tol: float) -> tuple[float | None, bool | None]:
-    """窗口内的**等效 launch 数**（按时间重叠加权）与"两个时钟对得上吗"。
+def _count_in_window(spans: Sequence[tuple[float, float]], t0: float, t1: float) -> float:
+    """窗口内的**等效 launch 数**：跨边界的 launch 只算落在窗口里的那一段。
 
-    返回 `(count, aligned)`：
-
-    * `count=None` ⇒ 分母不可信，per-launch 必须拒绝（R-47 / `window_launch_unaligned`）。
-      两种情形：没有 launch 时间戳；或**有**时间戳但和采样时钟对不上。
-    * 跨窗口边界的 launch 只算它落在窗口里的那一段（`(hi-lo)/(b-a)`）—— 因为分子
-      （窗口内字节）也就是那一段的字节。落在窗口外的整段算 0。
-    * `aligned` 的判断：匹配到的 launch 必须都落在采样覆盖范围 `[sample_t0-tol, sample_t1+tol]`
-      内，且至少有一个与采样范围相交。采样器与 CUPTI 在 Linux 上同为 CLOCK_MONOTONIC，
-      这里不"假设"它们对得上，而是**当场核对**：对不上（偏移通常以小时计）就拒绝，
-      而不是把两个时钟域的数字相除。
+    为什么按重叠加权而不是"数落在窗口里的 launch 个数"：分子的积分就是窗口那一段的字节，
+    所以分母也应当是窗口那一段对应的 launch 数（跨边界的一半就是半个 launch）。
     """
-    if not spans:
-        return None, None
-    if t0 is None or t1 is None or sample_t0 is None or sample_t1 is None:
-        return None, None
-    lo_ok, hi_ok = sample_t0 - tol, sample_t1 + tol
-    aligned = all(lo_ok <= a and b <= hi_ok for a, b in spans)
-    if aligned and not any(b >= sample_t0 and a <= sample_t1 for a, b in spans):
-        aligned = False
-    if not aligned:
-        return None, False
     total = 0.0
     for a, b in spans:
         if b <= a:                       # 零长度（坏数据）：按起点判
@@ -708,7 +699,55 @@ def _launches_in_window(spans: Sequence[tuple[float, float]] | None,
         lo, hi = max(a, t0), min(b, t1)
         if hi > lo:
             total += (hi - lo) / (b - a)
-    return total, True
+    return total
+
+
+def _launches_in_window(spans: Sequence[tuple[float, float]] | None,
+                        t0: float | None, t1: float | None,
+                        sample_t0: float | None, sample_t1: float | None,
+                        busy_lo: float | None, busy_hi: float | None, tol: float
+                        ) -> tuple[float | None, bool | None, float | None, float | None,
+                                   list[tuple[float, float]] | None]:
+    """窗口内的等效 launch 数 + 对齐的自检信息。返回 `(count, aligned, offset_s, slope)`。
+
+    为什么不能假设"launch 时间戳与采样同域"：**真机实测**（4090 + nsys 2025.3）里
+    `CUPTI_ACTIVITY_KIND_KERNEL.start` 是**相对 profiling 会话起点**的（第一次 launch ≈ 2.67 s），
+    而 `DeviceSample.t` 是 `time.monotonic()`（开机秒）—— 两者相差一个未知常数。直接相减
+    会把整段 launch 表判成"在采样窗外"，于是要么给错、要么全部拒绝。
+
+    所以这里**推导**偏移，再**自检**：
+
+    1. 若 launch 表本来就落在采样覆盖范围内 ⇒ 它已经在同一时钟域（有些 nsys 版本/导入路径
+       给的是绝对时间），直接用；
+    2. 否则用"窗口内的忙碌段"当锚点：忙碌采样点与这些 launch 覆盖的是**同一段物理时间**，
+       于是 `offset = busy_lo − launch_lo`（误差 ≤ 1 个采样周期）；
+    3. **速率必须一致**：`slope = (busy 长度) / (launch 表长度)` 必须落在 [0.9, 1.1]。
+       两个时钟若不同源或有一方被缩放，这一条会失败 —— 那就拒绝，而不是把两个域相除。
+
+    采样周期带来的 offset 不确定度由调用方按 `±1 周期` 额外算一次计数（见 `estimate`），
+    作为分母的分辨率报出去。
+    """
+    if not spans:
+        return None, None, None, None, None
+    if t0 is None or t1 is None or sample_t0 is None or sample_t1 is None:
+        return None, None, None, None
+    lo_ok, hi_ok = sample_t0 - tol, sample_t1 + tol
+    if all(lo_ok <= a and b <= hi_ok for a, b in spans):
+        if not any(b >= sample_t0 and a <= sample_t1 for a, b in spans):
+            return None, False, None, None, None
+        return _count_in_window(spans, t0, t1), True, 0.0, 1.0, list(spans)
+    if busy_lo is None or busy_hi is None or busy_hi - busy_lo <= 0:
+        return None, False, None, None, None
+    l_lo = min(a for a, _ in spans)
+    l_hi = max(b for _, b in spans)
+    if l_hi - l_lo <= 0:
+        return None, False, None, None, None
+    slope = (busy_hi - busy_lo) / (l_hi - l_lo)
+    if not 0.9 <= slope <= 1.1:
+        return None, False, None, slope, None
+    offset = busy_lo - l_lo
+    mapped = [(busy_lo + (a - l_lo) * slope, busy_lo + (b - l_lo) * slope) for a, b in spans]
+    return _count_in_window(mapped, t0, t1), True, offset, slope, mapped
 
 
 def estimate(samples: Sequence, peak_gbs: float, window_s: float,
@@ -749,6 +788,10 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     if not samples:
         est.notes.append("没有采样点：NVML 采样被关闭或不可用")
         return est
+    # 对齐 launch 时间戳要用的锚点必须是**整段**采样里的忙碌段（不能取被裁后的窗口：
+    # --ks-warmup 会把窗口裁短，而 launch 表仍是整段，两者长度不可比 —— R-47 真机教训）。
+    raw_busy_ts = [float(s.t) for s in samples
+                   if float(s.sm_util_pct) >= BUSY_SM_UTIL or float(s.mem_util_pct) >= BUSY_MEM_UTIL]
 
     # ---- 采样间隔：相邻时间戳差分；首点沿用中位间隔 ----
     deltas: list[float] = []
@@ -810,15 +853,34 @@ def estimate(samples: Sequence, peak_gbs: float, window_s: float,
     est.window_busy_segments = _busy_segments(samples)
     est.bytes_total = busy_time * peak_gbs * 1e9
     est.throughput_pct_of_peak = est.mem_util_pct_mean
+    # 整段采样里"忙碌"的起止：把 launch 时间戳对齐到采样时钟的锚点（R-47）。
+    # 忙碌 = 有 kernel 在跑，所以它与（整段运行的）launch 表覆盖同一段物理时间。
+    busy_lo = raw_busy_ts[0] if raw_busy_ts else None
+    busy_hi = (raw_busy_ts[-1] + default_dt) if raw_busy_ts else None
     # 可算的偏差估计：窗口被裁掉多少，per-launch 就会等比偏小多少（R-47 要报这个数）
     if window_s and window_s > 0:
         est.window_bias_pct = 100.0 * (total_time / window_s - 1.0)
     if window_cut:
         # 分母必须落在窗口内。窗口内的等效 launch 数按时间重叠加权（跨边界的 launch
         # 只算它落在窗口里的那一段），否则分子是窗口内字节、分母是整段 launch 数。
-        est.launches_in_window, est.launch_clock_aligned = _launches_in_window(
+        tol_s = max(5.0 * default_dt, 1.0)
+        (est.launches_in_window, est.launch_clock_aligned,
+         est.launch_align_offset_s, est.launch_align_slope, mapped_spans) = _launches_in_window(
             launch_spans, est.window_t0, est.window_t1,
-            sample_t0, sample_t1, tol=max(5.0 * default_dt, 1.0))
+            sample_t0, sample_t1, busy_lo, busy_hi, tol=tol_s)
+        est.launch_spans_mapped = mapped_spans
+        if est.launches_in_window is not None and est.launches_in_window > 0:
+            est.bytes_per_launch = est.bytes_total / est.launches_in_window
+            # 分母的分辨率：锚点（首个忙碌采样点）的精度是 ±1 个采样周期，
+            # 据此把整个对齐后的 launch 表左右各挪一周期，给出计数的区间。
+            if mapped_spans:
+                def _shifted(d: float) -> list[tuple[float, float]]:
+                    return [(a + d, b + d) for a, b in mapped_spans]
+
+                a = _count_in_window(_shifted(-default_dt), est.window_t0, est.window_t1)
+                b = _count_in_window(_shifted(+default_dt), est.window_t0, est.window_t1)
+                # 区间必须**包住**中点估计（偏移挪前/挪后各算一次，谁大谁小取决于窗口边界）
+                est.launches_in_window_range = (round(min(a, b), 2), round(max(a, b), 2))
         if est.launches_in_window is not None and est.launches_in_window > 0:
             est.bytes_per_launch = est.bytes_total / est.launches_in_window
     elif launches > 0:
@@ -874,12 +936,19 @@ def to_metrics(est: DramEstimate, basis: str = "auto") -> list[tuple[str, float 
                 "NVML memory-busy time × measured peak bandwidth（对应 ncu dram__bytes.sum）",
                 note, f"{est.mem_util_resolution_pct:.0f} %"))
     basis_used = est.resolve_basis(basis)
-    # R-47：分母也要能被读者复核 —— 说明它来自哪个窗口、窗口比整段短多少。
-    denom_note = ""
+    # R-47：分母也要能被读者复核 —— 来自哪个窗口、偏移/速率推定、以及它的分辨率。
+    denom_bits: list[str] = []
     if est.window_bias_pct not in (None, 0.0):
-        denom_note = (f"；分母 = 窗口内等效 launch 数 {_fmt_launches(est.launches_in_window)}"
-                      f"（整段运行匹配到 {est.launches_total} 个；窗口 {est.window_used_s:.1f} s，"
-                      f"比整段短 {abs(est.window_bias_pct):.0f}%）")
+        denom_bits.append(f"分母 = 窗口内等效 launch 数 {_fmt_launches(est.launches_in_window)}"
+                          f"（整段运行匹配到 {est.launches_total} 个；窗口 {est.window_used_s:.1f} s，"
+                          f"比整段短 {abs(est.window_bias_pct):.0f}%）")
+    if est.launches_in_window_range:
+        denom_bits.append("offset ±1 采样周期下的计数区间 "
+                          f"{est.launches_in_window_range[0]:g}…{est.launches_in_window_range[1]:g}")
+    if est.launch_align_offset_s:
+        denom_bits.append(f"launch 时间戳与采样时钟的推导偏移 {est.launch_align_offset_s:+.1f} s、"
+                          f"速率比 {est.launch_align_slope:.3f}")
+    denom_note = ("；" + "；".join(denom_bits)) if denom_bits else ""
     out.append(("est__dram_bytes_per_launch",
                 round(est.bytes_per_launch / 1e6, 2)
                 if (est.bytes_per_launch is not None and est.attributable) else None, "MB",

@@ -9,7 +9,12 @@
 `argv[0]` 为 `ncu` 时自动进入兼容模式（供 `ln -s kernoscope ncu` 使用）。
 
 退出码：
-  0 正常；2 --strict 下请求了不可得的数据（供 CI 卡门）；1 运行错误。
+  0 正常；2 --strict 下**请求面**拿不到数据（供 CI 卡门）；1 运行错误。
+
+  `--strict` 覆盖的请求面：空转的 ncu 开关、`--metrics` 请求了不可得的指标、
+  `--set`/`--section` 请求了计数器 section、`--ks-ledger-*` 请求了账本对拍、以及环境缺件（降级跑）。
+  **不覆盖**：低覆盖率导致 DRAM 代理口径不可用（那是"测量条件"不是"请求面"）。
+  要卡"DRAM 数字必须在"，请同时给 `--ks-ledger-mb`（或 --set full）。
 """
 
 from __future__ import annotations
@@ -345,38 +350,34 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
 # --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
+SUBCOMMANDS: tuple[str, ...] = (
+    "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff")
+
+
+def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
+    """子命令名 → 入口函数（延迟导入：`kernoscope --help` 不该拉起 torch/nsys 那套）。"""
+    from .capabilities_cmd import capabilities_main
+    from .diff_cmd import diff_main
+    from .doctor import doctor_main
+    from .issue_cmd import issue_main
+    from .memtrace_cmd import memtrace_main
+    from .occupancy_cmd import occupancy_main
+    from .selftest import selftest_main
+
+    return {"doctor": doctor_main, "occupancy": occupancy_main, "memtrace": memtrace_main,
+            "issue": issue_main, "capabilities": capabilities_main,
+            "selftest": selftest_main, "diff": diff_main}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # 子命令（不属于 ncu 兼容面）
-    if argv and argv[0] == "doctor":
-        from .doctor import doctor_main
-
-        return doctor_main(argv[1:])
-    if argv and argv[0] == "occupancy":
-        from .occupancy_cmd import occupancy_main
-
-        return occupancy_main(argv[1:])
-    if argv and argv[0] == "memtrace":
-        from .memtrace_cmd import memtrace_main
-
-        return memtrace_main(argv[1:])
-    if argv and argv[0] == "issue":
-        from .issue_cmd import issue_main
-
-        return issue_main(argv[1:])
-    if argv and argv[0] == "capabilities":
-        from .capabilities_cmd import capabilities_main
-
-        return capabilities_main(argv[1:])
-    if argv and argv[0] == "selftest":
-        from .selftest import selftest_main
-
-        return selftest_main(argv[1:])
-    if argv and argv[0] == "diff":
-        from .diff_cmd import diff_main
-
-        return diff_main(argv[1:])
+    # 子命令（不属于 ncu 兼容面）：**名字只有这一处**。文档命令门禁、--help、
+    # 以及"哪些子命令存在"的检查都从这里读 —— 两处各写一份，新加一个子命令就会漏检
+    # （真事：校验器只认 doctor/occupancy/memtrace/issue，`capabilities --brief` 这类
+    #  合法命令反而被它判成不存在）。
+    if argv and argv[0] in SUBCOMMANDS:
+        return _SUBCOMMAND_ENTRY()[argv[0]](argv[1:])
 
     args = build_parser().parse_args(argv)
     compat_mode = os.path.basename(sys.argv[0] or "") == "ncu"
@@ -825,10 +826,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{', '.join(used_noop)} (our data source has no counter/replay passes)")
 
     # ---------- R-38：达成值超过标定峰值 → 显式红灯 ----------
+    # D20：100%~102% 这一档**不是**红灯（标定自身有 3~4% 口径差），但也绝不能静默 ——
+    # 101% 与 95% 在报告里长得一样，而前者已经物理上说不通。所以这里对容忍带也给 warn。
     for _k in rep.kernels:
         for _s in _k.sections:
             for _m in _s.metrics:
                 if _m.name == "ks__over_peak_warning":
+                    log(f"warn: [{_k.name}] {_m.note}")
+                elif _m.name == "est__pct_of_measured_compute_peak" and _m.note:
                     log(f"warn: [{_k.name}] {_m.note}")
 
     # ---------- R-39：--metrics 一个都没匹配上时不能静默成功 ----------

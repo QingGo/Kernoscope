@@ -66,6 +66,7 @@ class RefusalCode(str, Enum):
     TRACE_UNAVAILABLE = "trace_unavailable"    # 轨迹口径给不出字节
     TRACE_TOO_MANY_ACCESSES = "trace_too_many_accesses"  # 访问数超上限，拒绝给偏小值
     LEDGER_BASIS_UNAVAILABLE = "ledger_basis_unavailable"  # 对拍口径不成立
+    ZERO_BASELINE = "zero_baseline"            # 基线为 0，相对误差带不适用
     NO_CALIBRATION = "no_calibration"          # 缺本机实测峰值
     CALIBRATION_CALIBER_MISMATCH = "calibration_caliber_mismatch"  # 标定口径不可比
     NO_WORKLOAD = "no_workload"                # 没给 FLOPs/bytes，roofline 无输入
@@ -117,6 +118,7 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.TRACE_UNAVAILABLE: "访存轨迹给不出字节数",
     RefusalCode.TRACE_TOO_MANY_ACCESSES: "访问数超过分析上限",
     RefusalCode.LEDGER_BASIS_UNAVAILABLE: "账本对拍口径不成立",
+    RefusalCode.ZERO_BASELINE: "基线为 0，相对误差带不适用",
     RefusalCode.NO_CALIBRATION: "缺少本机实测峰值（未标定）",
     RefusalCode.CALIBRATION_CALIBER_MISMATCH: "标定口径与本次测量不可比",
     RefusalCode.NO_WORKLOAD: "没有给工作量（FLOPs/bytes）",
@@ -305,6 +307,10 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "超上限时我们拒绝给一个偏小的字节数",
         command="kernoscope --ks-max-accesses 20000000 --ks-memtrace t.txt ...",
         cost_kind="manual", then_answers=("dram_bytes_trace",)),
+    RefusalCode.ZERO_BASELINE: Remedy(
+        "基线是 0 时相对差无定义（除以 0），所以不能用相对误差带判「变了多少」。"
+        "要么给出一个非零基线，要么按绝对差值自行判断 —— 我们只把绝对差值报出来，不下方向",
+        cost_kind="manual"),
     RefusalCode.LEDGER_BASIS_UNAVAILABLE: Remedy(
         "换对拍口径：--ks-ledger-total-mb 走整窗口，--ks-ledger-mb 走 per-launch"
         "（后者要求窗口主导性达标）",

@@ -27,6 +27,8 @@ from kernoscope.packet import (MAX_VERDICTS, OK, PACKET_SCHEMA_VERSION,
                               render_onepage)
 from kernoscope.diff_cmd import diff_packets
 from kernoscope.provenance import Metric, Provenance, Section, fmt_bytes, to_bytes
+from kernoscope.packet import BUILDERS
+from kernoscope.refusals import DEFAULT_REMEDIES
 from kernoscope.refusals import RefusalCode
 from kernoscope.report import DeviceInfo, KernelLaunch, KernelReport, Report
 
@@ -126,6 +128,64 @@ def test_packet_bytes_matches_actual_serialization():
 def test_verdicts_are_capped():
     p = build(_rich_report())
     assert len(p["verdicts"]) <= MAX_VERDICTS
+
+
+def _report_with_all_verdicts() -> Report:
+    """让 11 条 builder 全部触发（instrument 齐全的机器就是这样）。"""
+    rep = _rich_report()
+    extra = {"est__bound": "memory", "ks__static_sass_instructions": 4321,
+             "est__roofline_efficiency_pct": 91.2, "est__achieved_gbs": 908.5,
+             "ks__over_peak_warning": 1.0, "ks__static_sass_share_fp": 41.0,
+             "ks__static_sass_share_memory": 33.0, "ks__static_sass_share_control": 12.0,
+             "ks__static_sass_share_int": 14.0}
+    for sec in rep.kernels[0].sections:
+        for i, m in enumerate(sec.metrics):
+            if m.name in extra:
+                sec.metrics[i] = dataclasses.replace(m, value=extra[m.name])
+        if not any(m.name == "ks__over_peak_warning" for m in sec.metrics):
+            sec.add(Metric.derived("ks__over_peak_warning", 1.0, note="achieved > measured peak"))
+    return rep
+
+
+def test_verdict_truncation_leaves_a_trace():
+    """R-53/D10：`MAX_VERDICTS` 截断必须留痕。
+
+    旧实现先 `[:10]` 再进预算裁剪，于是 `cost.trimmed` 从不列 `verdicts`、也没有
+    `verdicts_more` —— 读者（人或 agent）**无从知道**包里少了一条判词。
+    """
+    rep = _report_with_all_verdicts()
+    fired = [v.id for v in (fn(rep) for fn in BUILDERS) if v is not None]
+    assert len(fired) > MAX_VERDICTS, f"这个 fixture 要让 11 条 builder 全触发，实得 {fired}"
+    p = build(rep)
+    assert len(p["verdicts"]) == MAX_VERDICTS
+    more = p.get("verdicts_more")
+    assert more and more["count"] == len(fired) - MAX_VERDICTS
+    assert set(more["ids"]) == set(fired) - {v["id"] for v in p["verdicts"]}
+
+
+def test_refusals_are_trimmable_so_the_budget_holds_in_a_locked_down_env():
+    """R-52/D9：**受限环境天然产生十几个拒绝码**，包预算不能因此被破。
+
+    旧实现只删 refusal 的 `cmd` 子字段，条目本身不参与裁剪：45 个 code 时包 8883 B
+    （预算 4096），而"硬约束"只写在散文里。现在有序降级包含处置文本截短与条目上限，
+    并把丢掉的 code 列进 `refusals_omitted`（列表过长时明确标出）。
+    """
+    codes = [c for c in RefusalCode if c in DEFAULT_REMEDIES][:45]
+    assert len(codes) == 45
+    rep = _rich_report()
+    sec = Section("受限环境下的未测项")
+    for i, c in enumerate(codes):
+        sec.add(Metric.unavailable(f"est__blocked_{i}", "本机拿不到这个数据源", code=c))
+    rep.kernels[0].sections.append(sec)
+    p = build(rep)
+    size = packet_bytes(p)
+    assert size <= PACKET_SIZE_BUDGET_BYTES, f"{size} B 超预算（拒绝条目必须可裁剪）"
+    assert "over_budget" not in p["cost"]
+    assert "refusal_actions" in p["cost"]["trimmed"]
+    omitted = p.get("refusals_omitted") or {}
+    assert omitted.get("count", 0) > 0, "丢掉的 code 必须计数"
+    assert omitted.get("codes"), "至少要列出丢掉的 code（列表过长时标 codes_truncated）"
+    assert len(p["refusals"]) <= 8
 
 
 @pytest.mark.parametrize("limit", [1200, 1800, 2600, 3400, 4096])
@@ -374,7 +434,7 @@ def test_packet_carries_schema_revision_and_actionable():
 
     p = build(_rich_report())
     assert p["schema_version"] == PACKET_SCHEMA_VERSION == 1     # 主版本不动
-    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.1"
+    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.2"
     ids = {v["id"] for v in p["verdicts"]}
     assert ids, "这个报告应当产出判词"
     for v in p["verdicts"]:
@@ -471,7 +531,6 @@ def test_dram_verdict_units_are_bytes_on_a_real_run():
             f"{vid}: 包里 {v['value']} 与产物里的 {val_mb} {unit} 不是同一个量"
         assert v["facts"]["mb"] == pytest.approx(v["value"] / 1e6, rel=1e-6), \
             f"{vid}: value 与 facts.mb 必须同源"
-        assert v["facts"].get("source_unit") == (unit or "B"), f"{vid}: 要留下原单位"
     # 散文（一屏）里印的量级也必须与 value 同源：它由 phrase_verdict 从 facts/value 生成
     text = render_onepage(p)
     for vid in ("dram_bytes", "dram_bytes_per_launch"):
@@ -564,3 +623,31 @@ def test_protocol_payload_has_no_paths_or_timestamps(tmp_path):
     cal = p["protocol"].get("calibration")
     if cal is not None:                      # 暴露与否都可；暴露了就必须是"文件名+内容哈希"
         assert "/" not in cal and ":" in cal
+
+
+def test_over_peak_refusal_propagates_into_roofline():
+    """R-59/D18：`over_peak` 成立时，由它算出的 roofline 判词不能被当成依据。
+
+    真机包实测过：`roofline status=soft actionable=True value=24041.6 %` 与
+    `over_peak status=refused` **并存**。按「只有 actionable=true 能当依据」这条规矩，
+    那个物理不可能的达成率是"可依据"的，diff 还会拿它报 improved。
+    """
+    p = build(_report_with_all_verdicts())
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["status"] == "refused"
+    roof = by_id["roofline"]
+    assert roof["status"] == "refused", roof
+    assert roof.get("actionable") is False
+    assert roof.get("value") is None
+    assert roof["facts"].get("uncitable_value") == 91.2, "原值要留在 facts 里可查"
+    assert roof["refusal"]["code"] == "calibration_caliber_mismatch"
+    from kernoscope.packet import verdict_is_actionable
+    assert verdict_is_actionable(roof) is False
+    text = render_onepage(p)
+    # 一屏要把"怎么办"给出来（按 code 查 remedy），而不是留一句"已达 roofline"
+    assert "不给数字" in text and "标定口径" in text
+    assert "已达 roofline" not in text
+    # 没有 over_peak 时 roofline 必须照旧可依据（别把正常情况也拒了）
+    plain = build(_rich_report())
+    r2 = next(v for v in plain["verdicts"] if v["id"] == "roofline")
+    assert r2["status"] != "refused" and r2.get("actionable") is True

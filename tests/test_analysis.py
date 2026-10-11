@@ -117,7 +117,15 @@ def test_over_peak_is_a_red_flag():
     ok = SpeedOfLight(duration_ns=951_000.0, flops=flops, bytes_=bytes_, peaks=peaks)
     assert not ok.over_peak and ok.over_peak_note() == ""
 
-    # 容差内的轻微超出（标定口径本身有 3~4% 差异）只算提示边界，不报红灯
+    # 容差内的轻微超出（标定口径本身有 3~4% 差异）**不报红灯，但必须给提示**（D20）
     mild = SpeedOfLight(duration_ns=928_000.0, flops=flops, bytes_=bytes_, peaks=peaks)
     assert 100.0 <= mild.pct_compute <= 102.0 + 1e-6
     assert not mild.over_peak
+    assert mild.near_peak, "101% 已经物理上说不通，不能和 95% 长得一模一样"
+    near = mild.near_peak_note()
+    assert near and "口径差" in near and "达标" in near
+    assert mild.over_peak_note() == ""
+    # 正常情况连提示都不该有
+    assert not ok.near_peak and ok.near_peak_note() == ""
+    # 红灯时不再重复出提示（避免同一件事说两遍）
+    assert sol.over_peak and not sol.near_peak and sol.near_peak_note() == ""

@@ -407,7 +407,8 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                                        note=opt.workload_note))
                 s.add(Metric.estimated("est__pct_of_measured_compute_peak", round(sol.pct_compute, 1),
                                        "%", source=f"{peak_src} {opt.peaks.compute_tflops:.1f} TFLOP/s "
-                                                   f"({opt.peaks.dtype_key})"))
+                                                   f"({opt.peaks.dtype_key})",
+                                       note=sol.near_peak_note()))
                 s.add(Metric.estimated("est__roofline_ideal_ns", round(max(sol.ideal_ns_compute,
                                                                            sol.ideal_ns_memory), 1),
                                        "ns", source="roofline with measured peaks"))

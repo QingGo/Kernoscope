@@ -1,6 +1,6 @@
 <!-- 由 tools/gen_agent_refs.py 生成；改动请改代码后重跑，不要手改本文件 -->
 
-# 判词（`verdicts[]`）参考 · 决策包 schema rev 1.1
+# 判词（`verdicts[]`）参考 · 决策包 schema rev 1.2
 
 决策包里每条判词有 `id` / `status` / `actionable` / `facts` / `premises`（可选 `refusal` / `band` / `mdd` / `next`）。
 **硬规则：只有 `actionable=true` 的判词能当行动依据**（v1.0 的包没有这个字段，

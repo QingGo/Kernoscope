@@ -5,7 +5,7 @@
   "material": {
     "packet": {
       "schema_version": 1,
-      "schema_revision": "1.1",
+      "schema_revision": "1.2",
       "tool": "kernoscope",
       "tool_version": "0.2.0",
       "protocol": {
@@ -61,8 +61,7 @@
           "status": "soft",
           "actionable": true,
           "facts": {
-            "mb": 50000.0,
-            "source_unit": "MB"
+            "mb": 50000.0
           },
           "value": 50000000000.0,
           "unit": "B",
@@ -90,7 +89,6 @@
           "actionable": true,
           "facts": {
             "mb": 25.0,
-            "source_unit": "MB",
             "bias_pct": 1
           },
           "value": 25000000.0,
@@ -204,11 +202,11 @@
           "verdict_metrics",
           "next_pointers"
         ],
-        "packet_bytes": 3876
+        "packet_bytes": 3838
       }
     },
     "files": {
-      "onepage.txt": "Kernoscope 0.2.0 · 协议 debfbea867f9 · 层 3 (instrumented)\n------------------------------------------------------------------------------------------------\n[ok  ] 最耗时的是 vectorized_copy_kernel（54.4 ms / 2000 次，占 kernel 时间 100.0%），进程内 kernel 时间合计 54.4 ms  (54.4 ms, exact)\n        前提 该 kernel 占全部 kernel 时间的比例：100.0%\n        前提 kernel 时间占进程 wall 的比例：90.7%\n        下一步：用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词\n[soft] 整窗口 DRAM 约 50 GB（代理口径：NVML 显存忙碌 × 本机实测峰值）  (50000000000.0 B, estimated)\n        前提 窗口是否被被测负载主导：97.1%（门槛 50.0%）→ 满足\n        前提 参与积分的窗口内显存忙碌均值：96.8%\n        下一步：与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期\n[soft] 每次 launch 约 25 MB（代理口径）；归因上偏估计 +1%  (25000000.0 B, estimated)\n        前提 窗口是否被被测负载主导：97.1%（门槛 80.0%）→ 满足\n        前提 被匹配 kernel 是否占窗口 kernel 时间 ≥95%：99.1%（门槛 95.0%）→ 满足\n        下一步：改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进\n[soft] 与账本相差 -1.2%（同口径对拍）  (-1.2 %, derived)\n        下一步：误差超出本机误差带才值得继续优化；否则先改测量口径\n[ok  ] 理论上界 50.0%；实测达到 46.9%；限制因素 registers  (46.9 %, measured)\n        下一步：实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy\n[soft] 判定为 memory bound；离 roofline 3.3%；达成带宽 919.0 GB/s  (96.7 %, estimated)\n        下一步：已达 roofline 96.7%：先核对工作量/账本输入（--ks-gemm/--ks-flops）是否正确；若要再进一步，只能减少总字节（算子融合 / 提高 L2 复用）\n\n没测到什么（共 3 个指标，按原因归组）：\n  - 3 个 counters_denied（硬件计数器被权限/驱动策略拒绝）；怎么办：计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…\n  - 本机缺件 no_instr_hist（没有提供指令直方图）；怎么办：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发…\n  - 本机缺件 no_memtrace（没有提供访存轨迹文件）；怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…\n  - 本机缺件 no_occupancy_probe（没跑 occupancy 探针）；怎么办：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…\n  - 本机缺件 no_static_input（没有提供 cubin/.so）；怎么办：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…\n\n本次代价：wall 0.06s · 包 3876B · 2000 次 launch · 无本机误差带（跑 kernoscope selftest 后 diff 才有 MDD） · 包已按尺寸预算裁剪（unmeasured_examples, verdict_metrics, next_pointers）\n"
+      "onepage.txt": "Kernoscope 0.2.0 · 协议 debfbea867f9 · 层 3 (instrumented)\n------------------------------------------------------------------------------------------------\n[ok  ] 最耗时的是 vectorized_copy_kernel（54.4 ms / 2000 次，占 kernel 时间 100.0%），进程内 kernel 时间合计 54.4 ms  (54.4 ms, exact)\n        前提 该 kernel 占全部 kernel 时间的比例：100.0%\n        前提 kernel 时间占进程 wall 的比例：90.7%\n        下一步：用 -k 只选这个 kernel 再跑一次，拿到它的 DRAM/occupancy/roofline 判词\n[soft] 整窗口 DRAM 约 50 GB（代理口径：NVML 显存忙碌 × 本机实测峰值）  (50000000000.0 B, estimated)\n        前提 窗口是否被被测负载主导：97.1%（门槛 50.0%）→ 满足\n        前提 参与积分的窗口内显存忙碌均值：96.8%\n        下一步：与你的账本对拍（--ks-ledger-total-mb）确认这个量级是否符合预期\n[soft] 每次 launch 约 25 MB（代理口径）；归因上偏估计 +1%  (25000000.0 B, estimated)\n        前提 窗口是否被被测负载主导：97.1%（门槛 80.0%）→ 满足\n        前提 被匹配 kernel 是否占窗口 kernel 时间 ≥95%：99.1%（门槛 95.0%）→ 满足\n        下一步：改一次 kernel 再跑 diff：差值小于 MDD 就是噪声，不要当成改进\n[soft] 与账本相差 -1.2%（同口径对拍）  (-1.2 %, derived)\n        下一步：误差超出本机误差带才值得继续优化；否则先改测量口径\n[ok  ] 理论上界 50.0%；实测达到 46.9%；限制因素 registers  (46.9 %, measured)\n        下一步：实测远低于理论上界时查 tail effect / 小 grid；接近上界时别再调 occupancy\n[soft] 判定为 memory bound；离 roofline 3.3%；达成带宽 919.0 GB/s  (96.7 %, estimated)\n        下一步：已达 roofline 96.7%：先核对工作量/账本输入（--ks-gemm/--ks-flops）是否正确；若要再进一步，只能减少总字节（算子融合 / 提高 L2 复用）\n\n没测到什么（共 3 个指标，按原因归组）：\n  - 3 个 counters_denied（硬件计数器被权限/驱动策略拒绝）；怎么办：计数器是 host-wide 的，容器内无法突破（不要用 sudo/setuid 试）；换…\n  - 本机缺件 no_instr_hist（没有提供指令直方图）；怎么办：加 --ks-instr-hist <opcode_hist.txt>：给出动态指令数与发…\n  - 本机缺件 no_memtrace（没有提供访存轨迹文件）；怎么办：加 --ks-memtrace <trace>：轨迹口径只测被追踪的 kernel，不受窗…\n  - 本机缺件 no_occupancy_probe（没跑 occupancy 探针）；怎么办：跑 occupancy 探针并把 JSON 用 --ks-achieved-occupan…\n  - 本机缺件 no_static_input（没有提供 cubin/.so）；怎么办：用 --ks-cubin <cubin/.so> 指向被测二进制；没有它就没有寄存器/共享…\n\n本次代价：wall 0.06s · 包 3838B · 2000 次 launch · 无本机误差带（跑 kernoscope selftest 后 diff 才有 MDD） · 包已按尺寸预算裁剪（unmeasured_examples, verdict_metrics, next_pointers）\n"
     }
   },
   "truth": {

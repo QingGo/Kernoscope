@@ -26,10 +26,12 @@ from typing import Any
 from .packet import load_packet
 from .refusals import Refusal, RefusalCode
 
-DIFF_SCHEMA_VERSION = 1
+DIFF_SCHEMA_VERSION = 2
 
-IMPROVED, REGRESSED, INDISTINGUISHABLE, INCOMPARABLE = (
-    "improved", "regressed", "indistinguishable", "incomparable")
+IMPROVED, REGRESSED, INDISTINGUISHABLE, INCOMPARABLE, NOT_JUDGED = (
+    "improved", "regressed", "indistinguishable", "incomparable", "not_judged")
+# v2：`not_judged`（只给差值、不下方向判词）从前被序列化成 `incomparable`，与"协议不同/
+# 一侧缺失"混在同一个 token 里，机器消费者按 status 计数必然对不上（D25）。现在它是独立状态。
 
 # 方向：只对"高好还是低好"有共识的判词下 improved/regressed 判词。
 # 没有共识的一律进 not_judged —— 不替用户决定价值方向。
@@ -101,9 +103,12 @@ class DiffResult:
         return not self.protocol_diffs
 
     def counts(self) -> dict[str, int]:
-        c = {IMPROVED: 0, REGRESSED: 0, INDISTINGUISHABLE: 0, INCOMPARABLE: 0}
+        """按 status 计数 —— 与机器看到的一致：`not_judged` 也是独立一格，不再并入 incomparable。"""
+        c = {IMPROVED: 0, REGRESSED: 0, INDISTINGUISHABLE: 0, INCOMPARABLE: 0, NOT_JUDGED: 0}
         for x in self.comparisons:
             c[x.status] = c.get(x.status, 0) + 1
+        for x in self.not_judged:
+            c[NOT_JUDGED] = c.get(NOT_JUDGED, 0) + 1
         return c
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,6 +278,8 @@ def diff_packets(pa: dict[str, Any], pb: dict[str, Any], *,
             res.comparisons.append(c)
             continue
         if direction is None:
+            c.status = NOT_JUDGED
+            c.note = "这个量没有公认的价值方向（高好还是低好），所以只给差值、不下判词"
             res.not_judged.append(c)
             continue
         if c.mdd is None:
@@ -280,16 +287,28 @@ def diff_packets(pa: dict[str, Any], pb: dict[str, Any], *,
                                 "没有这个指标的 MDD：分不出噪声与真差别")
             res.comparisons.append(c)
             continue
-        # 同单位比较：百分比类判词直接用差值（百分点），其余用相对差
-        magnitude = (abs(c.delta) if c.unit == "%" else
-                     abs(c.delta_pct if c.delta_pct is not None else 0.0))
+        # 判据一律是**相对差 vs 相对误差带**：MDD 里的每个键（dram_bytes_pct /
+        # kernel_time_pct）量的都是相对离散度。旧实现让 `%` 单位的判词拿**百分点**去比
+        # 相对带 —— roofline 20%→15%（真实退化 25%）被判成噪声（D16）。
+        if c.a == 0 and c.b != 0:
+            # 相对差无定义：基线是 0 时不能用相对误差带。旧实现把 magnitude 当成 0，
+            # 于是「0 → 500 MB」被判成"没变化"（D17）。
+            c.refusal = Refusal(RefusalCode.ZERO_BASELINE,
+                                f"基线为 0，相对误差带不适用：只能报绝对差值 "
+                                f"（{c.delta:+.6g}{(' ' + c.unit) if c.unit else ''}）")
+            c.status = INCOMPARABLE
+            res.comparisons.append(c)
+            continue
+        magnitude = abs(c.delta_pct if c.delta_pct is not None else 0.0)
         if magnitude <= c.mdd:
             c.status = INDISTINGUISHABLE
-            c.note = f"差值 {magnitude:.2f} 在 MDD {c.mdd}% 之内 ⇒ 这是噪声，不要当成改进"
+            c.note = (f"相对差 {magnitude:.2f}% 在 MDD {c.mdd}% 之内 ⇒ 这是噪声，"
+                      f"不要当成改进")
         else:
             better = (c.delta < 0) if direction == "lower" else (c.delta > 0)
             c.status = IMPROVED if better else REGRESSED
-            c.note = (f"超过 MDD {c.mdd}% ⇒ 方向明确（{direction} is better）")
+            c.note = (f"相对差超过 MDD {c.mdd}%（{magnitude:.2f}%）⇒ 方向明确"
+                      f"（{direction} is better）")
         res.comparisons.append(c)
     if not res.comparable:
         res.notes.append("协议不同时我们拒绝给方向判词：宁可说不可比，也不说一个会误导的「变好了」")
