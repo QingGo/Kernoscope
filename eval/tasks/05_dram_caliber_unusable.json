@@ -321,7 +321,7 @@
         },
         {
           "id": "dram_bytes",
-          "question": "DRAM 搬了多少字节 / 是不是 DRAM bound（NVML 代理口径）",
+          "question": "DRAM 搬了多少字节 / 是不是 DRAM bound（零依赖的 NVML 代理口径；有 NVBit 时首选轨迹口径，精度高 4 个数量级）",
           "state": "available",
           "tier_required": 1,
           "outputs": [
@@ -329,7 +329,7 @@
             "ks__sampler_window_coverage_pct"
           ],
           "how": "",
-          "alternative": "轨迹口径 dram_bytes_trace（只测被追踪的 kernel）"
+          "alternative": "轨迹口径 dram_bytes_trace（地址算术 ~0.001%；需要 NVBit 外挂，采集成本 ∝ 流量）"
         },
         {
           "id": "roofline",
@@ -374,7 +374,7 @@
         },
         {
           "id": "dram_bytes_trace",
-          "question": "DRAM 字节的第二条口径（访存轨迹 + 缓存模型）",
+          "question": "DRAM 字节的**首选**口径（访存轨迹：地址是算术，只有缓存替换是模型）",
           "state": "refused",
           "tier_required": 3,
           "outputs": [
@@ -382,7 +382,7 @@
             "meas__sectors_per_request"
           ],
           "how": "未配置 NVBit（指令级/访存轨迹需要自行编译）",
-          "alternative": "NVML 代理口径 dram_bytes",
+          "alternative": "NVML 代理口径 dram_bytes（零依赖；大 kernel 稳态段够用，小 kernel/常驻 L2 会被拒）",
           "refusal": {
             "code": "nvbit_missing",
             "message": "未配置 NVBit：指令级与访存轨迹口径不可用（NVBit 许可证禁止随本项目分发）",

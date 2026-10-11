@@ -4,8 +4,9 @@ description: >-
   在受限/多租户 GPU 上为 CUDA kernel 优化取证：哪个 kernel 慢、是不是 DRAM bound、离 roofline
   多远、occupancy 上界与实际达到值、发射槽上界与瓶颈方向，每个数字都带出处与误差带，并能对两次
   运行做「真改进 / 真退化 / 分不出来」的判定。当 ncu 报 ERR_NVGPUCTRPERM、只有 nsys 的 kernel
-  时长、或需要可复核的性能证据与回归对比时使用。需要精确 L2/DRAM 字节、缓存命中率或 warp stall
-  周期细分时不要用它（这些会明确报 n/a + 原因 + 替代口径）。
+  时长、或需要可复核的性能证据与回归对比时使用。但**不要**因此放弃 DRAM 字节：
+  有 NVBit 时**不要用它**猜，走轨迹口径（地址算术 ~0.001%，需外挂）；没有时走 NVML
+  代理（±10% 带内，小 kernel/常驻 L2 会被明确拒绝）。只有 warp stall 周期细分拿不到。
   入口命令：kernoscope capabilities --brief → kernoscope --packet - -- <你的命令> →
   kernoscope selftest / kernoscope diff。不要凭印象拼子命令（先看 kernoscope --help）。
 ---
