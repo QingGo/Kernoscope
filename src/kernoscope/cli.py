@@ -481,6 +481,16 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
     meta["nsys_sqlite"] = db
     launches = nsys_backend.parse_kernels(db)
     if not keep and not args.export:
+        # I8 的 NVTX 阶段归因发生在**报告装配**阶段（更晚），而这份 sqlite 马上就要被删掉。
+        # 真机实测（AutoDL 4090 容器）：不带 `-o` 时这条功能 100% 失效，只留一行
+        # `warn: NVTX 阶段归因失败（PhaseError: sqlite not found…）` —— 默认路径正好就是首用路径。
+        # 所以在这里**先算，把结果留在内存里**（`_attach_phases` 优先用它）。
+        try:
+            from .analyze.phases import attribute as _attribute_phases
+
+            meta["_nvtx_attribution"] = _attribute_phases(db)
+        except Exception:                       # noqa: BLE001 —— 归因失败不该拖垮整次运行
+            pass
         shutil.rmtree(os.path.dirname(out_prefix), ignore_errors=True)
         meta.pop("tmpdir", None)
     return launches, meta, rc
@@ -1389,30 +1399,15 @@ def _stderr_log(args: argparse.Namespace, logged: list[str]):
     return log
 
 
-def _attach_phases(rep: Report, args: argparse.Namespace, dev_kr, log) -> None:
-    """I8：从 nsys sqlite 的 NVTX 区间把 kernel 时间分成训练/推理阶段。
+def _attach_phase_section(rep: Report, dev_kr, att) -> None:
+    """把一份 `PhaseAttribution` 变成 `NvtxPhases` section 并挂到设备行上。
 
-    两个诚实点：
-      * **没有 NVTX 数据也要出一行**（n/a + code）："这个阶段没标"与"没测"是两件事，
-        消失的行会让读者以为工具没这个能力（B1）。
-      * 阶段之和**不是划分**（嵌套区间各自计入），这句话写在 basis 里随数字一起走。
+    两条路径共用（内存里的预计算结果 / 现场读 sqlite）—— 渲染逻辑只有一份，才不会出现
+    "带 -o 与不带 -o 看到的阶段表不一样"。
     """
-    from .analyze.phases import attribute as attribute_phases
     from .provenance import Metric, Section
     from .sections import _split_unavailable  # noqa: PLC2701 - 同一仓库内的共享约定
 
-    db = (getattr(args, "ks_sqlite", None) or rep.meta.get("nsys_sqlite")
-          or rep.meta.get("nsys_sqlite_path"))
-    if not db:
-        if getattr(args, "ks_nvtx_phases", False):
-            log("warn: --ks-nvtx-phases 需要 --ks-sqlite/--ks-nsys-rep 指向的 nsys 数据库"
-                "（本次没有 kernel 级数据源，阶段归因无从谈起）")
-        return
-    try:
-        att = attribute_phases(str(db))
-    except Exception as exc:      # 只有输入错误才会抛：文件不存在/不是 sqlite
-        log(f"warn: NVTX 阶段归因失败（{type(exc).__name__}: {exc}）")
-        return
     sec = Section("NvtxPhases")
     for name, value, unit, note in att.to_metrics():
         if value is None:
@@ -1421,7 +1416,7 @@ def _attach_phases(rep: Report, args: argparse.Namespace, dev_kr, log) -> None:
                                        observed={"basis": att.basis[:200]}, severity="degraded"))
         else:
             # 每行的 note 与 section 级 basis 可能不同（逐阶段那几行带"嵌套时不是划分"这类
-            # 只对那一行成立的前提）：相同就省掉重复，不同就必须留 —— 前置纪律是"前提随数字走"。
+            # 只对那一行成立的前提）：相同就省掉重复，不同就必须留 —— 前提随数字走。
             extra = "" if note == att.basis else note
             sec.add(Metric.derived(name, value, unit, source=att.basis, note=extra))
     if sec.metrics:
@@ -1433,12 +1428,47 @@ def _attach_phases(rep: Report, args: argparse.Namespace, dev_kr, log) -> None:
             "phases": [{"name": p.name, "depth": p.depth, "kernel_ms": p.kernel_ms,
                         "share_pct": p.share_pct, "kernels": p.kernels} for p in att.phases],
         }
-        if att.reason:
-            log(f"nvtx: 不给阶段数字（{att.reason}）")
-        else:
-            top = att.phases[0] if att.phases else None
-            log(f"nvtx: {len(att.phases)} 个阶段"
-                + (f"，最重的是「{top.name}」占 kernel 时间 {top.share_pct:.1f}%" if top else ""))
+
+
+def _attach_phases(rep: Report, args: argparse.Namespace, dev_kr, log) -> None:
+    """I8：从 nsys sqlite 的 NVTX 区间把 kernel 时间分成训练/推理阶段。
+
+    两个诚实点：
+      * **没有 NVTX 数据也要出一行**（n/a + code）："这个阶段没标"与"没测"是两件事，
+        消失的行会让读者以为工具没这个能力（B1）。
+      * 阶段之和**不是划分**（嵌套区间各自计入），这句话写在 basis 里随数字一起走。
+    """
+    from .analyze.phases import attribute as attribute_phases
+
+
+    # 无 `-o` 时 sqlite 已被删掉，但 collect() 已经把归因结果留在 meta 里（见那里的注释）。
+    precomputed = rep.meta.pop("_nvtx_attribution", None)
+    db = (getattr(args, "ks_sqlite", None) or rep.meta.get("nsys_sqlite")
+          or rep.meta.get("nsys_sqlite_path"))
+    if precomputed is not None:
+        # 这条路径**不看 db 是否还在**：结果已经在手上
+        try:
+            _attach_phase_section(rep, dev_kr, precomputed)
+        except Exception as exc:                # noqa: BLE001
+            log(f"warn: NVTX 阶段归因失败（{type(exc).__name__}: {exc}）")
+        return
+    if not db:
+        if getattr(args, "ks_nvtx_phases", False):
+            log("warn: --ks-nvtx-phases 需要 --ks-sqlite/--ks-nsys-rep 指向的 nsys 数据库"
+                "（本次没有 kernel 级数据源，阶段归因无从谈起）")
+        return
+    try:
+        att = attribute_phases(str(db))
+    except Exception as exc:      # 只有输入错误才会抛：文件不存在/不是 sqlite
+        log(f"warn: NVTX 阶段归因失败（{type(exc).__name__}: {exc}）")
+        return
+    _attach_phase_section(rep, dev_kr, att)
+    if att.reason:
+        log(f"nvtx: 不给阶段数字（{att.reason}）")
+    else:
+        top = att.phases[0] if att.phases else None
+        log(f"nvtx: {len(att.phases)} 个阶段"
+            + (f"，最重的是「{top.name}」占 kernel 时间 {top.share_pct:.1f}%" if top else ""))
 
 
 def _kernel_metric(kr, name: str) -> float | None:

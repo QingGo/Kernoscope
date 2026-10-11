@@ -386,3 +386,60 @@ def test_empty_kernel_durations_are_not_silently_kernel_activity(tmp_path):
     att = attribute(db)
     assert att.reason.startswith(REASON_NO_KERNELS)
     assert all(m[1] is None for m in att.to_metrics())
+
+
+# ---------------------------------------------------------------------------
+# 真机实测的回归（AutoDL 4090 容器）：不带 `-o` 时 NVTX 归因曾经 100% 失效
+# ---------------------------------------------------------------------------
+def test_phase_attribution_survives_the_temp_sqlite_cleanup(tmp_path, monkeypatch):
+    """`--export` 缺席时临时目录会被删掉，而归因发生在**更晚**的报告装配阶段。
+
+    真机证据（AutoDL 4090 容器，不带 `-o`）：
+        warn: NVTX 阶段归因失败（PhaseError: sqlite not found: /tmp/kernoscope-…/kernoscope_run.sqlite）
+    —— 默认路径（也就是首用路径）上这条功能整个失效，只留一行 warn。现在 `collect()` 在删目录
+    **之前**先把归因算好留在 meta 里，`_attach_phases` 优先用它；渲染逻辑两条路径共用一份。
+    """
+    from kernoscope import cli
+    from kernoscope.backends import nsys as N
+    from kernoscope.report import Report
+
+    # 用与上面成功用例相同的形状（deviceId 0 / stream 7，区间与 kernel 有重叠）
+    db = _write(tmp_path, "run.sqlite",
+                kernels=[(50, 250, 0, 7)],
+                ranges=[_range(0, 100, "closed")])
+    monkeypatch.setattr(N, "find_nsys", lambda: "/usr/local/bin/nsys")
+    monkeypatch.setattr(N, "run_profile", lambda *a, **k: str(tmp_path / "run.nsys-rep"))
+    monkeypatch.setattr(N, "export_sqlite", lambda *a, **k: db)
+    monkeypatch.setattr(N, "parse_kernels", lambda *a, **k: [])
+
+    class _Args:
+        ks_synthetic = False
+        ks_sqlite = None
+        ks_nsys_rep = None
+        export = None                     # ← 关键：没有 -o ⇒ 临时目录会被删
+        ks_keep_intermediate = False
+        target_processes = "all"
+        program = ["true"]
+
+    logged: list[str] = []
+    _, meta, _ = cli.collect(_Args(), logged.append)
+
+    # ① 归因在删目录之前就算好了（否则真机那行 warn 会回来）
+    assert meta.get("_nvtx_attribution") is not None, "没能在清理临时目录之前算出阶段归因"
+    # ② 临时目录确实被清掉了（清理纪律没被破坏）
+    assert "tmpdir" not in meta
+
+    # ③ 装配阶段用它渲染出 NvtxPhases，且**不许**再出现"归因失败"
+    rep = Report()
+    rep.meta.update(meta)
+
+    class _Dev:
+        sections: list = []
+
+    dev = _Dev()
+    cli._attach_phases(rep, _Args(), dev, logged.append)
+    assert [s.name for s in dev.sections] == ["NvtxPhases"], [s.name for s in dev.sections]
+    assert rep.meta["nvtx_phases"]["count"] == 1
+    assert not [m for m in logged if "阶段归因失败" in m], logged
+    # 预计算的结果不许再留在 meta 里（否则会被别的消费者看到一份内部对象）
+    assert "_nvtx_attribution" not in rep.meta

@@ -776,6 +776,33 @@ kernoscope mcp --stdio
   `schema_version`/`schema_revision` 变了、或有破坏性接口变更，才动中位。据此本文档与代码里
   原先写的"0.2.1 起"统一（那只是补丁级改动）。
 
+### 真机实测（AutoDL 4090 容器）：ncu 装了但用不了；修掉一个只在真机暴露的缺陷
+
+**环境**（实测，命令与输出都留在会话里）：RTX 4090 / 驱动 580.105.08 / Nsight Compute **2025.3.1**
+（`/usr/local/cuda/bin/ncu`，**不在 PATH** → `ncu: command not found` 只是路径问题）/
+Nsight Systems 2025.3.1 / `/proc/driver/nvidia/params` 可读且 **`RmProfilingAdminOnly: 1`** /
+容器 `CapEff` 里**没有** `cap_sys_admin`、**没有** `cap_perfmon`。
+
+- **ncu 的每一条度量路径都被拒**：`--set basic`、`--section LaunchStats`、`--section Occupancy`、
+  `--section SpeedOfLight` 全部 `ERR_NVGPUCTRPERM`（rc=1），而负载本身照常跑完。这是"受限 GPU 上
+  ncu 跑不了"这句话的**实测依据**（此前只是从驱动参数推断）。
+- **nsys 完全可用**（不需要计数器权限）：`nsys profile --trace=cuda` 拿到真实 kernel 名与精确时长
+  （cutlass wmma f16 gemm 17242 ns / 3 次等）。
+- **Kernoscope 在这台机上的自报**（从 PyPI 装 0.2.0）：`capabilities --brief` rc=0、**1103 B**、
+  2.5 s，`counter_state = denied`、`can_answer` 六项；`doctor --json` `ok=true`、**找到
+  `/usr/local/cuda/bin/ncu` 并标明 `in_path: false`**、`counter_state_note` 写着
+  「ncu 存在于 …（不在 PATH 上，已按多路径找到），**实测被拒**（ERR_NVGPUCTRPERM，policy）」。
+  一次真实分析（11 s、一屏 3755 B、包 3477 B）：`kernel_time` exact（真实 kernel 名 + 3191 次
+  launch）、反事实视图给出「假设 0.8 CNY/kWh ⇒ 0.3098 CNY/h（conditional/estimated）」、
+  NVML 窗口能耗 931.4 J、roofline/DRAM 老实拒绝。
+- **修掉一个只在真机暴露的缺陷**：不带 `-o` 时临时 sqlite 在**归因之前**就被删掉，于是
+  `NVTX 阶段归因` 在默认路径（= 首用路径）上 100% 失效，只留一行 warn。现在 `collect()` 在删目录
+  **之前**先算好归因留在内存里，渲染逻辑两条路径共用一份（`_attach_phase_section`）。
+- 一个真实世界的安装坑：AutoDL 默认 pip 源是**阿里云镜像**，刚发布的包还没同步 ⇒
+  `pip install kernoscope` 报 "No matching distribution found"，要显式
+  `-i https://pypi.org/simple`（README §2 已加一句）。另外**匿名 `git clone` 公开仓库可用**，
+  即"跟 main"的那条安装路径在真机上成立。
+
 ## 0.2.0
 
 **已发布（PyPI）**：`2026-10-11` 由 tag `v0.2.0` 触发 CI 以 **Trusted Publisher（OIDC，零密钥）**

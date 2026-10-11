@@ -105,6 +105,9 @@ git clone https://github.com/QingGo/Kernoscope && cd Kernoscope
 uv sync && uv run kernoscope --help
 ```
 
+> 国内云容器（AutoDL 等）若默认 pip 源还没同步到最新版，装不到就加官方源：
+> `pip install -U kernoscope -i https://pypi.org/simple`。
+
 依赖：Python ≥ 3.10，**运行时零第三方依赖**。运行需要 `nsys`（随 CUDA ≥ 11.1 提供）与
 `nvidia-smi`；`cuobjdump`（静态资源/SASS）为可选；`pynvml`（能耗/显存忙碌优先走它）
 用 `pip install 'kernoscope[nvml]'` 安装。
