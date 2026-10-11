@@ -21,7 +21,10 @@ tools/probes/nvbit_memtrace/ks-memtrace*.txt
 tools/probes/nvbit_memtrace/build/
 
 # skill 脚本的产物（本机自检文件与一次取证的报告）
-machine-selfcheck.json
+# 只忽略**仓库根**下的这一份：产物目录里的 machine-selfcheck.json 是登记表引用的证据
+# （「现行产物」小节的 MDD 就来自它），必须入库 —— 否则本地有 CI 没有，文档里的数字
+# 在 CI 里无法核对（真事：test_doc_artifact_consistency 只在 CI 红）。
+/machine-selfcheck.json
 ks-evidence/
 
 # bench：编译产物与原始轨迹（体积大、按需重采；分析产物会入库）

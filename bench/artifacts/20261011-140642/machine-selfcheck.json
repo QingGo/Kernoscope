@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "tool": "kernoscope",
+  "tool_version": "0.2.0",
+  "ts": "2026-10-11T14:15:54+0800",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "compute_capability": "8.9",
+  "torch": "2.12.1+cu130",
+  "cuda": "13.0",
+  "protocol": {
+    "dtype": "bf16",
+    "size_mb": 256,
+    "duration_s": 2.0,
+    "runs": 3,
+    "workloads": [
+      "copy",
+      "read",
+      "write",
+      "matmul"
+    ]
+  },
+  "ok": true,
+  "workloads": [
+    {
+      "id": "copy",
+      "analytic_bytes_per_iter": 536870912.0,
+      "measured_bytes_per_iter": 588792252.4876345,
+      "err_pct": 9.67,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.007,
+      "iters": 3440,
+      "kernel_ms": 0.5835
+    },
+    {
+      "id": "copy",
+      "analytic_bytes_per_iter": 536870912.0,
+      "measured_bytes_per_iter": 588731242.1673563,
+      "err_pct": 9.66,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.008,
+      "iters": 3440,
+      "kernel_ms": 0.5837
+    },
+    {
+      "id": "copy",
+      "analytic_bytes_per_iter": 536870912.0,
+      "measured_bytes_per_iter": 588724954.6617789,
+      "err_pct": 9.66,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.008,
+      "iters": 3440,
+      "kernel_ms": 0.5836
+    },
+    {
+      "id": "read",
+      "analytic_bytes_per_iter": 268435456.0,
+      "measured_bytes_per_iter": 289282354.7670769,
+      "err_pct": 7.77,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.003,
+      "iters": 7000,
+      "kernel_ms": 0.2862
+    },
+    {
+      "id": "read",
+      "analytic_bytes_per_iter": 268435456.0,
+      "measured_bytes_per_iter": 289293829.1516894,
+      "err_pct": 7.77,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.003,
+      "iters": 7000,
+      "kernel_ms": 0.2862
+    },
+    {
+      "id": "read",
+      "analytic_bytes_per_iter": 268435456.0,
+      "measured_bytes_per_iter": 289269378.0408955,
+      "err_pct": 7.76,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.003,
+      "iters": 7000,
+      "kernel_ms": 0.2861
+    },
+    {
+      "id": "write",
+      "analytic_bytes_per_iter": 268435456.0,
+      "measured_bytes_per_iter": 283622130.13224524,
+      "err_pct": 5.66,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.001,
+      "iters": 7140,
+      "kernel_ms": 0.2803
+    },
+    {
+      "id": "write",
+      "analytic_bytes_per_iter": 268435456.0,
+      "measured_bytes_per_iter": 283660497.1018739,
+      "err_pct": 5.67,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.001,
+      "iters": 7140,
+      "kernel_ms": 0.2803
+    },
+    {
+      "id": "write",
+      "analytic_bytes_per_iter": 268435456.0,
+      "measured_bytes_per_iter": 283594990.96275747,
+      "err_pct": 5.65,
+      "mem_util_pct": 100.0,
+      "duration_s": 2.001,
+      "iters": 7140,
+      "kernel_ms": 0.2802
+    },
+    {
+      "id": "matmul",
+      "analytic_bytes_per_iter": 805273350.0,
+      "measured_bytes_per_iter": 5025352318.014728,
+      "err_pct": 524.06,
+      "mem_util_pct": 21.0,
+      "duration_s": 2.291,
+      "iters": 100,
+      "kernel_ms": 22.91
+    },
+    {
+      "id": "matmul",
+      "analytic_bytes_per_iter": 805273350.0,
+      "measured_bytes_per_iter": 4638683248.862505,
+      "err_pct": 476.04,
+      "mem_util_pct": 21.0,
+      "duration_s": 2.294,
+      "iters": 100,
+      "kernel_ms": 22.9439
+    },
+    {
+      "id": "matmul",
+      "analytic_bytes_per_iter": 805273350.0,
+      "measured_bytes_per_iter": 4639778626.0728855,
+      "err_pct": 476.17,
+      "mem_util_pct": 21.0,
+      "duration_s": 2.301,
+      "iters": 100,
+      "kernel_ms": 23.0097
+    }
+  ],
+  "band": {
+    "dram_bytes_pct": {
+      "low": 5.7,
+      "high": 9.7,
+      "basis": "copy/read/write 的已知答案偏差并集（DRAM-bound 负载）",
+      "n": 9
+    },
+    "excluded": {
+      "matmul": "compute-bound：显存忙碌只有 20%~40%，「忙碌时间×峰值」口径不适用（偏差可达 +1000%，这不是测量误差而是口径错用）"
+    }
+  },
+  "mdd": {
+    "dram_bytes_pct": 5.0,
+    "basis": "max(3×SD（同负载重复，含跨进程样本）, NVML 1 个百分点分辨率下限, 本机误差带半宽, 实测漂移下限 5%)",
+    "floor_pct": 5.0,
+    "floor_evidence": "本次自测的 run-to-run SD = 0.05%（唯一来源：本产物的 run_to_run_sd_pct）；5% 是保守下限常量（MDD_FLOOR_DRAM_PCT），用来兜住「SD 恰好很小」的那次自测",
+    "run_to_run_sd_pct": 0.05,
+    "resolution_floor_pct": 1.0,
+    "band_half_width_pct": 2.01,
+    "cross_process_samples": {
+      "copy": [
+        9.74,
+        9.73,
+        9.71,
+        9.7
+      ],
+      "read": [
+        7.84,
+        7.87,
+        7.85,
+        7.85
+      ],
+      "write": [
+        5.74,
+        5.72,
+        5.74,
+        5.78
+      ]
+    },
+    "caveat": "MDD 只对测出它的那段机器状态成立：换机器、时钟/温度状态或同机其他租户负载变化后都要重跑 selftest；比较两次运行前先让 GPU 进入稳态",
+    "kernel_time_pct": 0.5
+  },
+  "notes": [
+    "误差带是**本机、本次口径**的测量结果：换机器或换 dtype 都要重跑"
+  ],
+  "measured_dram": {
+    "copy_gbs": 919.9,
+    "read_gbs": 938.1,
+    "write_gbs": 957.8,
+    "copy_method": "kernoscope selftest（饱和循环 + NVML 显存忙碌）"
+  },
+  "measured_matmul_tflops": {
+    "torch.bfloat16": {
+      "tflops": 134.92,
+      "size": 11585,
+      "acc_caliber": "default",
+      "precision_settings": "torch.matmul 默认（selftest 未做累加口径扫描）",
+      "method": "torch.matmul（selftest，单一尺寸 11585）"
+    }
+  },
+  "peak_caveat": "selftest 的 matmul 峰值来自**单一尺寸**的采样，只用于本机误差带与带宽侧 roofline；**不要当 --ks-calibration** —— 要标定请跑 tools/machine-profile.py（多尺寸 sweep + 累加口径扫描）（本次 matmul 尺寸 11585，只有这一个尺寸）"
+}
