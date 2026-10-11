@@ -1363,3 +1363,35 @@ def test_discovery_top_survives_long_cpp_template_kernel_names():
     text = render_onepage(p)
     for n in names:
         assert n in text, f"长模板名没有出现在人视图里：{n!r}"
+
+
+def test_duplicate_kernel_names_do_not_poison_each_others_roofline():
+    """X-18：报告里有两个**同名** kernel 行时，身份不能只看名字。
+
+    旧实现 `owner_key` = kernel 名 ⇒ "超峰在第 1 行、roofline 在第 2 行"被当成同一行，
+    合法的达成率被误拒（方向保守，不会放绿，但结论白丢）。现在同名多行会用序号区分。
+    """
+    rep = _two_kernel_report(cheap_over_peak=True, top_over_peak=False)
+    # 把两行改成同名：第 1 行带超峰、第 2 行有合法 roofline（90%）
+    for k in rep.kernels:
+        k.name = "same_name_kernel"
+    p = build(rep)
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["status"] == "refused", by_id["over_peak"]
+    assert by_id["roofline"]["status"] != "refused", (
+        "同名但不同行的超峰污染了另一行的 roofline（X-18）")
+    assert by_id["roofline"]["actionable"] is True
+
+
+def test_same_row_over_peak_still_poisons_its_own_roofline():
+    """反面对照：超峰与 roofline 在**同一行**时该传播还是必须传播（别把 X-18 修成一律不传播）。"""
+    # 超峰挂**最耗时的那一行**（roofline 也是为它算的）⇒ 两边的身份键必须对上，
+    # 该传播照样传播 —— 修 X-18 不能把它修成"一律不传播"。
+    rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=True)
+    for k in rep.kernels:
+        k.name = "same_name_kernel"
+    p = build(rep)
+    by_id = {v["id"]: v for v in p["verdicts"]}
+    assert by_id["over_peak"]["status"] == "refused"
+    assert by_id["roofline"]["status"] == "refused", by_id["roofline"]
+    assert by_id["roofline"]["actionable"] is False

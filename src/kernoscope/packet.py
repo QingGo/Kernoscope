@@ -528,7 +528,7 @@ def _verdict_roofline(rep: Any) -> Verdict | None:
     return Verdict(
         id="roofline", question="离 roofline 多远、compute 还是 memory bound", status=SOFT,
         facts=facts, value=eff, unit="%", provenance="estimated",
-        owner_key=str(getattr(owner, "name", "") or "") if owner is not None else "",
+        owner_key=_owner_key_for(rep, owner) if owner is not None else "",
         metrics=("est__bound", "est__roofline_efficiency_pct", "est__achieved_gbs"),
         next=nxt, claim="；".join(str(b) for b in bits))
 
@@ -1003,7 +1003,7 @@ def _verdict_over_peak(rep: Any) -> Verdict | None:
         id="over_peak", question="达成值是否超过标定峰值（物理上不可能）", status=REFUSED,
         # V-6：超峰是**某个 kernel** 的事，必须点名，否则会被当成整份报告的结论
         facts={"kernel": _clip(str(getattr(owner, "name", "")), FACT_STR_LIMIT)},
-        owner_key=str(getattr(owner, "name", "") or ""),
+        owner_key=_owner_key_for(rep, owner),
         premises=[Premise("over_peak", 1.0, None, False)],
         refusal=Refusal(RefusalCode.CALIBRATION_CALIBER_MISMATCH,
                         (m.note if m is not None else "") or "achieved > measured peak"),
@@ -1181,6 +1181,27 @@ def _select_verdicts(vs: list[Verdict], n: int) -> tuple[list[Verdict], list[str
     keep = set((priority + rest)[:n])
     return ([v for i, v in enumerate(vs) if i in keep],
             [v.id for i, v in enumerate(vs) if i not in keep])
+
+
+def _owner_key_for(rep: Any, owner: Any) -> str:
+    """一个 kernel 行的**身份键**（未截断名；同名多行时加序号）。
+
+    为什么不能只用名字（第七轮 X-18）：报告里可能出现**两个同名 kernel 行**（导入/合并的报告、
+    或同名但不同实例的记录）。这时"超峰在 A 行、roofline 在 B 行"会被当成同一行 ⇒ 合法的达成率
+    被误拒 —— 方向是保守的（不会放绿），但结论白丢。序号取"同名前第几行"，只要在**同一次
+    build** 里一致就够（`owner_key` 不进包，只用于判词之间对身份）。
+    """
+    name = str(getattr(owner, "name", "") or "")
+    if not name:
+        return ""
+    rows = [r for r in (getattr(rep, "kernels", []) or [])
+            if str(getattr(r, "name", "") or "") == name]
+    if len(rows) <= 1:
+        return name
+    for i, row in enumerate(rows):
+        if row is owner:
+            return f"{name}#{i + 1}"
+    return name
 
 
 def _propagate_over_peak(verdicts: list[Verdict]) -> None:
