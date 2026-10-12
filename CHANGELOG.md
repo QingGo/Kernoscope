@@ -5,6 +5,10 @@
 
 ## Unreleased
 
+（下一版的改动写在这里。小改动只升末位。）
+
+## 0.2.1 —— 2026-10-12（补丁级：真机验证与修复）
+
 ### 发布链自动化（第一步）：`tools/release_bump.py` —— 一处命令、四处同步
 
 0.2.1 发布时踩到的摩擦：版本号在仓库里有**四处**（`pyproject.toml`、`__init__.py` 的
@@ -909,16 +913,6 @@ uv 缺席 → note: 门禁改用 /root/miniconda3/bin/python3（CI 仍用 `uv ru
 shim 复现），于是 `ncu --set basic -- <命令>` 这种写法直接可用；② 导出 **`.ncu-rep`** 并打印
 `<path>.ATTRIBUTION.txt` 的署名（哪些表是同源真值、哪些是替代口径），读者能看见"兼容性不是
 假装"—— 我们写的是合法 `.ncu-rep`，但每个量的出处写在署名里。
-
-（下一版的改动写在这里。小改动只升末位：0.2.1 → 0.2.2 → …；只有 schema 变更或破坏性接口变更才动中位。）
-
-## 0.2.1 —— 2026-10-12（补丁级：真机验证与修复）
-
-**已发布（PyPI）**：由 tag `v0.2.1` 触发 CI 以 Trusted Publisher（OIDC，零密钥）上传，
-并**首次带 attestation（PEP 740）**（0.2.0 用的是 `uv publish`，那条路不生成 attestation）。
-本版登记一份**由 0.2.1 在 4090 上产生**的 `bench/artifacts/` 产物（经 `bench/prune_artifacts.py`
-裁到 KB–MB 级）。内容：处方接进 over_peak 传播链、NVBit occupancy 探针真机结论（标签保留）、
-demo（五幕，含与 ncu 的 CLI/产物兼容）、以及一批只在真机才暴露的一屏文案与判词修复。
 
 ## 0.2.0
 

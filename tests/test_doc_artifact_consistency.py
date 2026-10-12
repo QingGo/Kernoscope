@@ -134,7 +134,11 @@ def test_newest_artifact_pins_revision_and_tool_version():
     # 旧版 environment.txt 用的是 `git:` 这一行；改名之后不许再出现无来源的 n/a
     assert "git: n/a" not in env
 
-    # 工具版本必须与仓库当前的 __version__ 一致：产物比代码旧这件事本身要可见
+    # **B（用户拍板 2026-10-12）**：不再要求"最新产物必须由当前版本产生"。那条规则让**每次
+    # patch 发布**都要一个 GPU 窗口 + 一轮手工文档同步，而它不是"可追"的必要条件：可追要求的是
+    # 这份产物**自述**它是谁（修订、来源、脏状态、脱敏），且**被引用**的数字能在它里面找到
+    # （后者由本文件其它测试逐条对拍）。版本比代码旧只是一个**事实** —— 该被印出来让人判断，
+    # 不该拦住发布；判断陈旧有更便宜的等价物（manifest 里的源码指纹），见 RELEASING.md。
     header = None
     for txt in sorted(art.glob("rep-*.txt")):
         m = re.search(r"==PROF== Kernoscope (\S+)", txt.read_text(encoding="utf-8",
@@ -143,9 +147,9 @@ def test_newest_artifact_pins_revision_and_tool_version():
             header = m.group(1)
             break
     assert header is not None, f"{art.name}: 找不到带版本号的报告头"
-    assert header == __version__, (
-        f"{art.name} 的报告头写 {header}，而仓库当前是 {__version__} —— "
-        f"产物比代码旧，要么重跑 bench，要么别用它当证据")
+    if header != __version__:
+        print(f"note: 最新产物由 {header} 产生、当前代码是 {__version__} —— "
+              f"引用它的数字要不要刷新是**独立任务**，不拦发布")
 
 
 def test_newest_artifact_records_the_sanitize_step():

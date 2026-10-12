@@ -7,9 +7,9 @@
       "schema_version": 1,
       "schema_revision": "1.2",
       "tool": "kernoscope",
-      "tool_version": "0.2.0",
+      "tool_version": "0.2.1",
       "protocol": {
-        "hash": "sha256:043c79d41f632328",
+        "hash": "sha256:83197cd040db37d7",
         "basis": "roofline = 工作量（--ks-gemm 给出的 FLOPs/bytes） ÷ 本机实测峰值",
         "window_mode": "auto",
         "calibration": "machine-profile.json"

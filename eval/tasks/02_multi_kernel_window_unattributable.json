@@ -7,9 +7,9 @@
       "schema_version": 1,
       "schema_revision": "1.2",
       "tool": "kernoscope",
-      "tool_version": "0.2.0",
+      "tool_version": "0.2.1",
       "protocol": {
-        "hash": "sha256:73ff8d061922cf80",
+        "hash": "sha256:6abe3973ef0d0222",
         "basis": "per-launch",
         "window_mode": "auto",
         "calibration": "machine-profile.json"
