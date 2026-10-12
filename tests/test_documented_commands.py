@@ -14,11 +14,11 @@ R-55 的三处修正（旧门禁的声明比能力大得多）：
    子命令表来自 `cli.SUBCOMMANDS`（单一真源），开关集合来自各子命令自己的 `--help`。
 3. **逐字执行 + 断言结论**：以前**0 条**文档命令被真的跑过。现在两件事分开算清楚：
 
-   * **全部**可检命令（当前 65 条）都交给真实解析器 —— 保证"照抄不会因为开关/子命令写错
+   * **全部**可检命令（当前 68 条）都交给真实解析器 —— 保证"照抄不会因为开关/子命令写错
      而失败"；
    * 其中读者面那 **11 条**（医生自检 / 合成首跑 / 入口层 / E4-6 per-launch / 参考层 packet /
      strict 卡门 / metrics / 轨迹口径 / occupancy / diff 对拍）**逐字执行并断言它承诺的
-     结论**（`DOC_VERBATIM`）。比例是 **11/65** —— 不写成"每条命令的结论都被断言"。
+     结论**（`DOC_VERBATIM`）。比例是 **11/68** —— 不写成"每条命令的结论都被断言"。
 
    这两个数字**由测试现算并断言**（`test_prose_counts_match_the_scan` /
    `test_changelog_command_counts_match_the_scan`）：写死在散文里的旧版本漂到过
@@ -1207,7 +1207,7 @@ def test_prose_counts_match_the_scan():
 def test_changelog_command_counts_match_the_scan():
     """R-104/W-9：`CHANGELOG.md` 里的命令计数必须与扫描器现算的值一致。
 
-    旧 CHANGELOG 写"（当前 65 条）… 比例 11/59"，实测是 **56**（读者面 11 条没漂，
+    旧 CHANGELOG 写"（当前 68 条）… 比例 11/59"，实测是 **56**（读者面 11 条没漂，
     分母漂了）。CHANGELOG 不许手改数字 —— 这条给出**可以直接粘贴**的正确句子。
     """
     parsed = _scanned_command_count()

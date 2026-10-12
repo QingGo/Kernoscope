@@ -11,14 +11,14 @@
 
 三条读法：
 
-* 拒绝码是**闭集**（56 个）：见到 `n/a` 先看 `code`，再照 remedy 做 —— 不要猜原因。
+* 拒绝码是**闭集**（58 个）：见到 `n/a` 先看 `code`，再照 remedy 做 —— 不要猜原因。
 * `cost_kind=unavailable` 的 code 单独成节：它们**不是**「环境缺件」，
   在这台机器上没有任何合法补救路径（容器内 `sudo`/`setuid` 也突破不了）。
 * 每一列都注明来源；代码里算不出来的列写 `——`，不编（这一条比表格好看更重要）。
 
 ## 一、signal → cause → fix（按拒绝码）
 
-覆盖面：闭集里的 56 个 code 全部登记，其中 53 个在本机有补救路径（下表），3 个没有（见下一节）。**不做「受限机器上不可能发生」的人工筛选** —— 那需要判断，而判断题不该藏在生成器里；唯一的筛选规则就是 `cost_kind=unavailable`。
+覆盖面：闭集里的 58 个 code 全部登记，其中 55 个在本机有补救路径（下表），3 个没有（见下一节）。**不做「受限机器上不可能发生」的人工筛选** —— 那需要判断，而判断题不该藏在生成器里；唯一的筛选规则就是 `cost_kind=unavailable`。
 
 「观测到什么」这一列只给**触发路由**：数值阈值（`Refusal.threshold`）由各 builder 现算，代码里**没有**按 code 索引的静态阈值表，所以这一列给不出数字 —— 这是缺口，不是省略。
 
@@ -61,8 +61,8 @@
 | `trace_too_many_accesses` | 访问数超过分析上限 | 1 条路由会报它（`dram_bytes_trace`） | 提高 --ks-max-accesses（内存换精度），或缩小被追踪 kernel 的迭代数：超上限时我们拒绝给一个偏小的字节数；命令：`kernoscope --ks-max-accesses 20000000 --ks-memtrace t.txt ...` | 需人工 |
 | `ledger_basis_unavailable` | 账本对拍口径不成立 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 换对拍口径：--ks-ledger-total-mb 走整窗口，--ks-ledger-mb 走 per-launch（后者要求窗口主导性达标）；命令：`kernoscope --ks-ledger-total-mb 512 -- python bench_loop.py` | ≈0 |
 | `zero_baseline` | 基线为 0，相对误差带不适用 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 基线是 0 时相对差无定义（除以 0），所以不能用相对误差带判「变了多少」。要么给出一个非零基线，要么按绝对差值自行判断 —— 我们只把绝对差值报出来，不下方向 | 需人工 |
-| `no_calibration` | 缺少本机实测峰值（未标定） | 2 条路由会报它（`dram_bytes`、`roofline`） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）；命令：`python tools/machine-profile.py --out machine-profile.json` | ≈5min |
-| `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 1 条路由会报它（`roofline`） | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致；命令：`python tools/machine-profile.py --quick` | ≈5min |
+| `no_calibration` | 缺少本机实测峰值（未标定） | 2 条路由会报它（`dram_bytes`、`roofline`） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）；命令：`kernoscope calibrate --out machine-profile.json` | ≈5min |
+| `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 1 条路由会报它（`roofline`） | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致；命令：`kernoscope calibrate --quick` | ≈5min |
 | `no_workload` | 没有给工作量（FLOPs/bytes） | 1 条路由会报它（`roofline`） | 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes；命令：`kernoscope --ks-gemm 4096,4096,4096 -- python app.py` | ≈0 |
 | `no_tokens` | 没有给每次迭代的 token/样本数：算不出单位成本 | 1 条路由会报它（`cost_per_token`） | 给出每次迭代（step）处理的 token 数：推理填一次 forward 的 token 数，训练填一步的 token 数（packing 后的实际数）—— 有了它才有 tokens/s 与单位成本；命令：`kernoscope --ks-tokens 8192 -- python app.py` | ≈0 |
 | `no_price` | 没有给电价或租用价：算不出钱 | 1 条路由会报它（`cost_per_token`） | 给出价格：--ks-price-per-kwh（电费口径）或 --ks-price-per-hour（整机租约口径），两者都给就相加；币种随你给的价格，不做汇率换算；命令：`kernoscope --ks-tokens 8192 --ks-price-per-hour 2.5 -- python app.py` | ≈0 |
@@ -74,6 +74,8 @@
 | `protocol_mismatch` | 两次运行的协议不同，不可比 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比） | ≈0 |
 | `both_refused` | 两侧都被同一个前提挡住，没有数字可比 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 两侧都被同一种原因拒绝（例如都没有标定）：先按该原因的补救办法解除前提，这次比较才有意义 —— 没有数字时 diff 不下任何结论；命令：`kernoscope capabilities --json` | 需人工 |
 | `premise_failed` | 判词的前提之一不成立（数字不可引用） | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 先让前提成立（按该前提对应的 code 处理）：前提不成立时那个数字不能用，把它当结论会得到一个方向性错误；命令：`kernoscope capabilities --json` | 需人工 |
+| `multi_device_aggregate` | 本次采集跨了多张卡：单卡口径的问题答不了 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 按卡分开看：`--devices <id>` 只留一张卡的口径；「两张卡各干了多少」看 Devices section 的分段（那不需要筛选）；命令：`kernoscope --devices 0 ...` | ≈0 |
+| `memcpy_duration_untrusted` | 拷贝 activity 的时长逐行不可信：拒绝求和当传输时间 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 字节仍然可信（逐行相加就是真值）；单次时长只能按 `(copyKind, bytes)` 组取 MAX，或用行间 gap 反推 —— 本报告给的就是 MAX 口径；命令：`kernoscope --ks-sqlite <trace.sqlite>` | ≈0 |
 | `metric_absent` | 请求的指标不存在 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 用 --json 看本次报告里实际存在哪些指标，或用 `kernoscope capabilities --json` 看哪些问题能答（不存在 ≠ 被拒）；命令：`kernoscope capabilities --json` | ≈0 |
 | `legacy_report` | 旧报告没有结构化拒绝信息 | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 报告是结构化拒绝之前生成的（没有 code 字段）：重跑一次采集即可带上；本工具按 legacy 标注，不猜原因 | ≈5s |
 | `internal_unknown` | 未分类的拒绝（属于本工具缺陷） | ——（`route_cmd.FAILURE_HINTS` 里没有登记会报出它的路由） | 未分类的拒绝 —— 这属于本工具的缺陷，请按 issue 模板报告 | 需人工 |

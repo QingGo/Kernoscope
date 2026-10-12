@@ -129,3 +129,78 @@ def test_over_peak_is_a_red_flag():
     assert not ok.near_peak and ok.near_peak_note() == ""
     # 红灯时不再重复出提示（避免同一件事说两遍）
     assert sol.over_peak and not sol.near_peak and sol.near_peak_note() == ""
+
+
+# ---------------------------------------------------------------------------
+# bf16 与 fp16 是两个**不同的分母**（真机实测，RTX 2080 Ti / 2026-10-12）
+# ---------------------------------------------------------------------------
+# 该卡 bf16 走 fp32 路径只有 6.8 TFLOP/s，fp16 张量核 49.4 —— 差 7.3 倍。旧实现把 bf16 映射到
+# `torch.bfloat16` 后再与 `torch.float16` 取 max()，于是 **bf16 的 roofline 分母变成了 49.4**：
+# 利用率低报 7.3 倍，同时"物理上不可能"守卫的上限被抬高 7.3 倍。RTX 4090 上两条目只差 1%
+# （169.0 vs 167.4），所以这个错在主力机上完全看不出来。
+TURING_2080TI_PEAKS = {
+    "gpu": "NVIDIA GeForce RTX 2080 Ti",
+    "measured_dram": {"copy_gbs": 534.6, "read_gbs": 532.4, "write_gbs": 515.1},
+    "measured_matmul_tflops": {
+        "torch.bfloat16": {"tflops": 6.8, "acc_caliber": "bf16 (fp32 accumulate)",
+                           "precision_settings": {}, "method": "torch.matmul"},
+        "torch.float16": {"tflops": 49.4, "acc_caliber": "fp16 (fp32 accumulate)",
+                          "precision_settings": {}, "method": "torch.matmul"},
+        "torch.float32": {"tflops": 11.2, "acc_caliber": "fp32 (fp32 accumulate)",
+                          "precision_settings": {}, "method": "torch.matmul"},
+    },
+}
+
+
+def test_bf16_and_fp16_peaks_are_not_conflated():
+    """bf16 的分母必须是 bf16 的实测值，不能拿 fp16 的顶替。"""
+    from kernoscope.analyze.roofline import MachinePeaks
+
+    bf = MachinePeaks.from_profile(TURING_2080TI_PEAKS, "bf16")
+    assert bf.compute_tflops == pytest.approx(6.8), "bf16 的分母被 fp16 顶替了"
+    fp = MachinePeaks.from_profile(TURING_2080TI_PEAKS, "fp16")
+    assert fp.compute_tflops == pytest.approx(49.4)
+    # 同机任何 dtype 的上限是 49.4 —— 它只服务"物理上不可能"守卫
+    assert bf.ceiling_tflops == pytest.approx(49.4)
+    # 两个数在日志里必须都出现，否则读者以为 roofline 用的是同机上限
+    label = bf.source_label()
+    assert "compute=6.8" in label and "49.4" in label
+
+
+def test_missing_dtype_entry_is_refused_not_substituted():
+    """标定里没有本次 dtype 的条目时：**拒绝**算 compute roof，而不是拿另一个 dtype 顶替。"""
+    from kernoscope.analyze.roofline import MachinePeaks
+
+    only_fp16 = {"gpu": "X", "measured_dram": {"copy_gbs": 900.0},
+                 "measured_matmul_tflops": {"torch.float16": {"tflops": 49.4}}}
+    bf = MachinePeaks.from_profile(only_fp16, "bf16")
+    assert not bf.caliber_ok, "拿 fp16 的峰值顶替 bf16 时必须拒绝"
+    assert "顶替" in bf.caliber_note or "没有 dtype=bf16" in bf.caliber_note
+
+
+def test_over_peak_guard_uses_the_same_machine_ceiling_not_the_dtype_peak():
+    """守卫回答的是"这台机器有没有可能做到"，分母必须取同机最大者。
+
+    否则峰值取小会**误报**：本用例里达成值 20 TFLOPS 高于 bf16 的 6.8，但远低于同机 fp16 的
+    49.4 —— 它是可能的（自定义 kernel 用 fp16 路径做 16 位数学），不该报"物理上不可能"。
+    真正不可能的是超过 49.4。
+    """
+    from kernoscope.analyze.roofline import MachinePeaks
+
+    peaks = MachinePeaks.from_profile(TURING_2080TI_PEAKS, "bf16")
+    # 1 ms 内 2e10 FLOP ⇒ 20 TFLOP/s（在 bf16 的 6.8 与同机上限 49.4 之间）；
+    # 字节取 1e8 ⇒ 100 GB/s，远低于带宽峰值，避免带宽侧把用例带偏。
+    sol = SpeedOfLight(duration_ns=1_000_000.0, flops=2e10, bytes_=1e8, peaks=peaks)
+    assert sol.achieved_tflops == pytest.approx(20.0)
+    assert sol.pct_compute == pytest.approx(294.1, rel=1e-2)      # 相对本 dtype 峰值：远超
+    assert sol.pct_compute_ceiling == pytest.approx(40.5, rel=1e-2)  # 相对同机上限：没超
+    assert not sol.over_peak, "40.5% 的上限不该被报成物理上不可能"
+
+    # 超过同机上限（49.4）才是不可能是：1 ms 内 6e10 FLOP = 60 TFLOP/s
+    sol2 = SpeedOfLight(duration_ns=1_000_000.0, flops=6e10, bytes_=1e8, peaks=peaks)
+    assert sol2.pct_compute_ceiling > 102.0
+    assert sol2.over_peak
+    note = sol2.over_peak_note()
+    assert "同机任何 dtype 的上限" in note
+    # 两个分母不同时必须点名本 dtype 的峰值，否则读者会把 7.3 倍的差当成噪声
+    assert "本次 dtype=bf16" in note and "6.8" in note

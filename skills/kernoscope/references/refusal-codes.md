@@ -2,11 +2,11 @@
 
 # 拒绝码（`refusal.code`）参考
 
-每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；56 个 code 里 37 个带可直接执行的命令、19 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
+每条 `n/a` 都带一个**闭集 code**（判决在 code 里，散文只解释）；58 个 code 里 39 个带可直接执行的命令、19 个只给动作（多为本机走不通的路，故意不给命令免得让人白试）。观测值与门槛只有在**该前提本身可观测**时才给。
 **硬规则：`status=refused` 的判词不得作为行动依据**；先按 remedy 解除前提，
 或换一条口径，再下结论。改 code / 加 code 请改 `src/kernoscope/refusals.py`。
 
-共 56 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
+共 58 个 code（本文件由代码生成，与 `DEFAULT_REMEDIES` 同源）。
 
 | code | 什么意思 | 怎么办 | 命令 | 代价 |
 |---|---|---|---|---|
@@ -50,8 +50,8 @@
 | `trace_too_many_accesses` | 访问数超过分析上限 | 提高 --ks-max-accesses（内存换精度），或缩小被追踪 kernel 的迭代数：超上限时我们拒绝给一个偏小的字节数 | `kernoscope --ks-max-accesses 20000000 --ks-memtrace t.txt ...` | 需人工 |
 | `ledger_basis_unavailable` | 账本对拍口径不成立 | 换对拍口径：--ks-ledger-total-mb 走整窗口，--ks-ledger-mb 走 per-launch（后者要求窗口主导性达标） | `kernoscope --ks-ledger-total-mb 512 -- python bench_loop.py` | ≈0 |
 | `zero_baseline` | 基线为 0，相对误差带不适用 | 基线是 0 时相对差无定义（除以 0），所以不能用相对误差带判「变了多少」。要么给出一个非零基线，要么按绝对差值自行判断 —— 我们只把绝对差值报出来，不下方向 |  | 需人工 |
-| `no_calibration` | 缺少本机实测峰值（未标定） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它） | `python tools/machine-profile.py --out machine-profile.json` | ≈5min |
-| `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致 | `python tools/machine-profile.py --quick` | ≈5min |
+| `no_calibration` | 缺少本机实测峰值（未标定） | 跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它） | `kernoscope calibrate --out machine-profile.json` | ≈5min |
+| `calibration_caliber_mismatch` | 标定口径与本次测量不可比 | 标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）：重跑标定并让口径一致 | `kernoscope calibrate --quick` | ≈5min |
 | `no_workload` | 没有给工作量（FLOPs/bytes） | 给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes | `kernoscope --ks-gemm 4096,4096,4096 -- python app.py` | ≈0 |
 | `no_tokens` | 没有给每次迭代的 token/样本数：算不出单位成本 | 给出每次迭代（step）处理的 token 数：推理填一次 forward 的 token 数，训练填一步的 token 数（packing 后的实际数）—— 有了它才有 tokens/s 与单位成本 | `kernoscope --ks-tokens 8192 -- python app.py` | ≈0 |
 | `no_price` | 没有给电价或租用价：算不出钱 | 给出价格：--ks-price-per-kwh（电费口径）或 --ks-price-per-hour（整机租约口径），两者都给就相加；币种随你给的价格，不做汇率换算 | `kernoscope --ks-tokens 8192 --ks-price-per-hour 2.5 -- python app.py` | ≈0 |
@@ -63,6 +63,8 @@
 | `protocol_mismatch` | 两次运行的协议不同，不可比 | 两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；协议不同时我们拒绝给方向判词（宁可说不可比） |  | ≈0 |
 | `both_refused` | 两侧都被同一个前提挡住，没有数字可比 | 两侧都被同一种原因拒绝（例如都没有标定）：先按该原因的补救办法解除前提，这次比较才有意义 —— 没有数字时 diff 不下任何结论 | `kernoscope capabilities --json` | 需人工 |
 | `premise_failed` | 判词的前提之一不成立（数字不可引用） | 先让前提成立（按该前提对应的 code 处理）：前提不成立时那个数字不能用，把它当结论会得到一个方向性错误 | `kernoscope capabilities --json` | 需人工 |
+| `multi_device_aggregate` | 本次采集跨了多张卡：单卡口径的问题答不了 | 按卡分开看：`--devices <id>` 只留一张卡的口径；「两张卡各干了多少」看 Devices section 的分段（那不需要筛选） | `kernoscope --devices 0 ...` | ≈0 |
+| `memcpy_duration_untrusted` | 拷贝 activity 的时长逐行不可信：拒绝求和当传输时间 | 字节仍然可信（逐行相加就是真值）；单次时长只能按 `(copyKind, bytes)` 组取 MAX，或用行间 gap 反推 —— 本报告给的就是 MAX 口径 | `kernoscope --ks-sqlite <trace.sqlite>` | ≈0 |
 | `metric_absent` | 请求的指标不存在 | 用 --json 看本次报告里实际存在哪些指标，或用 `kernoscope capabilities --json` 看哪些问题能答（不存在 ≠ 被拒） | `kernoscope capabilities --json` | ≈0 |
 | `legacy_report` | 旧报告没有结构化拒绝信息 | 报告是结构化拒绝之前生成的（没有 code 字段）：重跑一次采集即可带上；本工具按 legacy 标注，不猜原因 |  | ≈5s |
 | `internal_unknown` | 未分类的拒绝（属于本工具缺陷） | 未分类的拒绝 —— 这属于本工具的缺陷，请按 issue 模板报告 |  | 需人工 |

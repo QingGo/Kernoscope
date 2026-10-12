@@ -409,3 +409,72 @@ def test_headline_falls_back_to_sweep_without_caliber_probe(monkeypatch):
     assert entry["tflops_protocol"] == "sweep-default"
     assert entry["tflops_is_variant_reading"] is False
     assert entry["tflops"] > 0 and entry["size"] == 4096
+
+
+# ---------------------------------------------------------------------------
+# A-2′/R-127：**装出来的包**也必须能标定
+# ---------------------------------------------------------------------------
+# 真机实测（全新环境，2026-10-12）：wheel 只含 `kernoscope/` 下的文件，`tools/` 不在里面。
+# 于是 pip 装出来的用户被 `doctor` 与拒绝语支到一条**不存在的命令**上：
+#     python tools/machine-profile.py --quick  ->  No such file or directory
+# 而同一台机器上源码 checkout 跑 demo 的标定完全正常。这个洞只在"陌生人的机器"上出现。
+def test_calibrate_subcommand_resolves_the_same_script_the_repo_uses():
+    """`kernoscope calibrate` 必须找到**同一份**实现（源码树优先），不另抄一份。"""
+    from kernoscope import calibrate_cmd
+
+    script = calibrate_cmd.bundled_script()
+    assert script is not None, "连源码树里的 tools/machine-profile.py 都没找到"
+    assert script.resolve() == (TOOLS / "machine-profile.py").resolve()
+
+
+def test_wheel_ships_the_calibration_script_under_the_name_the_code_looks_for():
+    """`tools/` 不进 wheel，所以标定脚本必须**显式**随包发布；两边名字必须对得上。
+
+    名字一旦漂开，这个洞会**静默**回来 —— 源码树里一切正常，只有装出来的包坏。
+    """
+    from kernoscope import calibrate_cmd
+
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    expected = f'"tools/machine-profile.py" = "kernoscope/{calibrate_cmd.BUNDLED_NAME}"'
+    assert expected in text, f"wheel 里没有带上标定脚本（缺 force-include：{expected}）"
+
+
+def test_calibrate_parser_is_the_scripts_own_not_a_copy():
+    """开关表不许重抄：`kernoscope calibrate` 的开关来自脚本自己的解析器。"""
+    from kernoscope import calibrate_cmd
+
+    opts = {o for action in calibrate_cmd.build_parser()._actions
+            for o in action.option_strings}
+    assert {"--quick", "--out", "--no-caliber-probe"} <= opts
+
+
+def test_calibrate_main_tolerates_a_script_that_returns_none(monkeypatch):
+    """真机实测（装出来的包 / 全新环境）：脚本成功路径以前不返回（落到 `None`），
+    于是 `int(None)` 在**标定已经成功、产物已经写好之后**抛 TypeError —— 用户看到 traceback，
+    以为标定失败了。契约：脚本返回 None 视为成功（rc=0）。
+    """
+    from kernoscope import calibrate_cmd
+
+    class _Stub:
+        @staticmethod
+        def main(argv):          # 成功路径：不返回
+            return None
+
+    monkeypatch.setattr(calibrate_cmd, "_load_module", lambda: _Stub)
+    assert calibrate_cmd.calibrate_main(["--quick"]) == 0
+
+    class _Fail:
+        @staticmethod
+        def main(argv):
+            return 2
+
+    monkeypatch.setattr(calibrate_cmd, "_load_module", lambda: _Fail)
+    assert calibrate_cmd.calibrate_main(["--quick"]) == 2
+
+
+def test_machine_profile_main_returns_zero_on_success():
+    """脚本自己的成功路径必须显式 return 0（与上面那条一起守住退出码语义）。"""
+    import inspect
+
+    src = inspect.getsource(_load_module().main)
+    assert "return 0" in src

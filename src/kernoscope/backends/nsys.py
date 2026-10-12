@@ -20,9 +20,21 @@ import tempfile
 from dataclasses import dataclass
 from typing import Sequence
 
-from ..report import DeviceInfo, KernelLaunch
+from ..report import DeviceInfo, KernelLaunch, MemcpyRecord
 
 KERNEL_TABLE = "CUPTI_ACTIVITY_KIND_KERNEL"
+#: 拷贝 activity。**它是"通信/传输账本"的唯一数据源**（真机实测：在这台无 P2P 的机器上，
+#: 卡间传输只能经主机内存中转，每一次都过 PCIe，所以每一次都被它记下来 —— 不需要任何硬件计数器）。
+MEMCPY_TABLE = "CUPTI_ACTIVITY_KIND_MEMCPY"
+
+#: CUPTI 的 `copyKind` → 人话。**只登记有可靠语义的那几个**，其余的按 `kind_<n>` 原样报出，
+#: 不猜（猜一个名字会让下游把它当成已知口径）。
+#: 真机实测（2×2080 Ti，无 P2P）：只出现 HTOD(1) 与 DTOH(2)；**PTOP(10) 一次都没出现** ——
+#: 这正是"这台机器没有 PCIe P2P"的结构性证据（`cudaDeviceCanAccessPeer` 也返回 0）。
+COPY_KIND_NAMES: dict[int, str] = {
+    1: "htod", 2: "dtoh", 3: "htoa", 4: "atoh", 5: "atoa",
+    6: "atod", 7: "dtoa", 8: "dtod", 9: "htoh", 10: "ptop",
+}
 
 
 class NsysError(RuntimeError):
@@ -129,6 +141,59 @@ def has_kernel_table(db: str) -> bool:
     except sqlite3.DatabaseError as e:
         raise NsysError(_unreadable_db_message(db, e)) from e
     return row is not None
+
+
+def has_memcpy_table(db: str) -> bool:
+    """有没有拷贝 activity 表。
+
+    没有它**不等于没有传输** —— 只有 `--trace=cuda` 才采 CUPTI 的拷贝活动；
+    调用方必须把这一点当成"拿不到"，而不是当成"传输为 0"。
+    """
+    try:
+        with sqlite3.connect(db) as con:
+            row = con.execute(
+                "select name from sqlite_master where type='table' and name=?", (MEMCPY_TABLE,)
+            ).fetchone()
+    except sqlite3.DatabaseError as e:
+        raise NsysError(_unreadable_db_message(db, e)) from e
+    return row is not None
+
+
+def parse_memcpys(db: str) -> list[MemcpyRecord]:
+    """读取拷贝 activity（start/end/bytes/copyKind/deviceId/streamId）。
+
+    **口径警告（真机实测，2×2080 Ti / 2026-10-12）**：在这台无 P2P 的机器上，运行时把一次
+    逻辑拷贝拆成多行，且其中约一半的行的 `end-start` **无论多大都报 80–95 µs**
+    （原文一行：`313 | 0 | 7 | 2 | 1073741824 | 6481416834 | 6481497428 | 80594` —— 1 GiB / 80 µs
+    = 13.3 TB/s，物理上不可能）。所以：
+
+      * **`bytes` 可信**（逐行相加 = 真值）；
+      * **`end-start` 不可信**（逐行相加把 5.49 GB/s 变成 3184 GB/s，错约 580 倍）。
+
+    解析层照原样把两样都读出来，**判定交给 `analyze/comm.py`**，那里会把"对时长求和"这条路
+    显式拒绝掉（而不是给一个偏小的数）。
+    """
+    if not os.path.exists(db):
+        raise NsysError(f"sqlite not found: {db}")
+    if not has_memcpy_table(db):
+        raise NsysError(
+            f"{db} has no {MEMCPY_TABLE} table - was the profile collected with --trace=cuda?")
+    q = f"""
+        select start, end, deviceId, streamId, copyKind, bytes, correlationId
+        from {MEMCPY_TABLE}
+        order by start
+    """
+    out: list[MemcpyRecord] = []
+    with sqlite3.connect(db) as con:
+        for row in _rows_or_nsys_error(con, q, db):
+            start, end, dev, stream, kind, nbytes, corr = row
+            out.append(MemcpyRecord(
+                start_ns=int(start), end_ns=int(end), duration_ns=int(end) - int(start),
+                copy_kind=int(kind or 0), bytes=int(nbytes or 0),
+                device_id=int(dev or 0), stream_id=int(stream or 0),
+                correlation_id=int(corr or 0),
+            ))
+    return out
 
 
 def _string_ids(con: sqlite3.Connection) -> dict[int, str]:

@@ -113,7 +113,7 @@ bash bench/ci-parity.sh
 ## 3 发布前检查单（每条都能在本机跑）
 
 ```bash
-uv run python tools/dev_index.py --gates     # 9 条门禁（含 sanitize 与 sdist/wheel 构建）
+uv run python tools/dev_index.py --gates     # 全部门禁；条数以它自己的输出为准（不要写死）
 bash bench/preflight-first-run.sh            # 陌生首跑路径（G1）
 uv run kernoscope doctor                 # 期望 rc=0（诊断完成；"诊断是否完成"是退出码的含义）
 uv run kernoscope capabilities --brief       # 期望 ≤1.2 KB 且带 next[]

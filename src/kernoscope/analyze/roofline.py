@@ -18,14 +18,19 @@ from dataclasses import dataclass
 from typing import Any
 
 ITEMSIZE = {"fp32": 4, "tf32": 4, "fp16": 2, "bf16": 2, "fp8": 1, "int8": 1}
+#: dtype → `measured_matmul_tflops` 里的条目键。
+#:
+#: **bf16 与 fp16 是两条独立条目，不互相顶替**（真机实测，2026-10-12）：RTX 2080 Ti 上
+#: bf16 走 fp32 路径只有 6.8 TFLOP/s，而 fp16 张量核 49.4 —— 差 **7.3 倍**；RTX 4090 上
+#: 两者只差 1%（169.0 vs 167.4），所以这条区别在主力机上一直没暴露。
+#: 旧实现把 bf16 映射到 `torch.bfloat16` 后再和 `torch.float16` 取 `max()`，等于拿 fp16 的
+#: 峰值当 bf16 的 roofline 分母（利用率低报 7.3 倍），同时把守卫上限抬高 7.3 倍。
 DTYPE_KEY = {
-    "fp32": "fp32", "float32": "fp32", "tf32": "fp32",
-    "fp16": "fp16", "float16": "fp16", "half": "fp16",
-    "bf16": "fp16", "bfloat16": "fp16",
-    "fp8": "fp8", "e4m3": "fp8", "e5m2": "fp8",
+    "fp32": "torch.float32", "float32": "torch.float32", "tf32": "torch.float32",
+    "fp16": "torch.float16", "float16": "torch.float16", "half": "torch.float16",
+    "bf16": "torch.bfloat16", "bfloat16": "torch.bfloat16",
+    "fp8": None, "e4m3": None, "e5m2": None,
 }
-# machine-profile.py 里 measured_matmul_tflops 的键
-PROFILE_KEY = {"fp32": "torch.float32", "fp16": "torch.bfloat16", "fp8": None}
 
 
 @dataclass
@@ -35,6 +40,10 @@ class MachinePeaks:
     compute_tflops: float
     bandwidth_gbs: float
     dtype_key: str
+    #: 同一台机器上**任何 dtype** 都不可能超过的实测算力（只给"物理上不可能"守卫用）。
+    #: 与 `compute_tflops`（本次 dtype 的实测峰值，roofline 的诚实分母）**故意分开**：
+    #: 两者在 16 位条目相差悬殊的机器上（Turing）能差 7 倍，混用会同时错两个方向。
+    ceiling_tflops: float = 0.0
     source: str = "machine-profile"
     raw: dict[str, Any] | None = None
     profile_path: str = ""
@@ -51,15 +60,16 @@ class MachinePeaks:
     @staticmethod
     def from_profile(profile: dict[str, Any], dtype: str = "bf16",
                      profile_path: str = "") -> "MachinePeaks":
-        dt = DTYPE_KEY.get(dtype.lower(), "fp16")
-        mm = profile.get("measured_matmul_tflops", {})
-        # 用 .get()：标定文件里可能没有 matmul 数据（只标了带宽），不能直接下标
-        cands = [mm.get(PROFILE_KEY[dt])] if PROFILE_KEY.get(dt) else []
-        if dt == "fp16":  # bf16/fp16 都测过，取更好的那个
-            cands = [mm.get("torch.bfloat16"), mm.get("torch.float16")]
-        usable = [c for c in cands if isinstance(c, dict) and c.get("tflops")]
-        tflops = max((c["tflops"] for c in usable), default=0.0)
-        chosen = max(usable, key=lambda c: c["tflops"]) if usable else None
+        mm = profile.get("measured_matmul_tflops", {}) or {}
+        key = DTYPE_KEY.get(dtype.lower())
+        entry = mm.get(key) if key else None
+        chosen = entry if isinstance(entry, dict) and entry.get("tflops") else None
+        tflops = float(chosen["tflops"]) if chosen else 0.0
+        # 同一台机器上**任何** dtype 都不可能超过实测条目里的最大值。它只服务一件事：
+        # 「达成值 > 峰值」的一致性守卫（R-38 要拦的正是"峰值被取小了"）。
+        # 绝不能拿它当某个 dtype 的 roofline 分母 —— 那是本节开头那条 7.3 倍错的来源。
+        ceiling = max((float(v["tflops"]) for v in mm.values()
+                       if isinstance(v, dict) and v.get("tflops")), default=0.0)
         dram = profile.get("measured_dram", {})
         vals = [v for v in dram.values() if isinstance(v, (int, float))]
         # 默认用 copy 速率：DRAM bound 的 kernel 基本是读写混合，取 max（通常落在 write 峰值）
@@ -69,20 +79,25 @@ class MachinePeaks:
 
         caliber_ok, note = True, ""
         if chosen is None:
-            caliber_ok, note = False, ("标定文件里没有可用的 measured_matmul_tflops 条目："
-                                       "拒绝用它算 compute roof")
+            have = sorted(k for k, v in mm.items() if isinstance(v, dict) and v.get("tflops"))
+            caliber_ok = False
+            note = (f"标定文件里没有 dtype={dtype} 的实测条目（对应键 {key or '无'}）；"
+                    f"现有条目：{', '.join(have) or '无'}。**不拿别的 dtype 的峰值顶替**"
+                    f"（同一台机器上 bf16 与 fp16 实测可差数倍，真机实测 7.3 倍），"
+                    f"所以拒绝用它算 compute roof；重新标定或改用 --ks-dtype 对应的 dtype")
         else:
             missing = [k for k in ("acc_caliber", "precision_settings", "method")
                        if k not in chosen]
             if missing:
                 caliber_ok = False
-                note = (f"标定条目 torch.{dt} 缺少口径字段 {', '.join(missing)}："
+                note = (f"标定条目 {key} 缺少口径字段 {', '.join(missing)}："
                         f"按 R-09 拒绝用它算 roofline 拐点（累加口径不同实测可差 5%，"
                         f"见 tools/machine-profile.py 的 caliber 探针）")
         peaks = MachinePeaks(
             compute_tflops=float(tflops),
             bandwidth_gbs=float(bw),
             dtype_key=dtype,
+            ceiling_tflops=float(ceiling),
             source=str(profile.get("gpu", "machine-profile")),
             raw=profile,
             profile_path=profile_path,
@@ -104,6 +119,7 @@ class MachinePeaks:
     @staticmethod
     def from_spec(compute_tflops: float, bandwidth_gbs: float, dtype: str = "bf16") -> "MachinePeaks":
         return MachinePeaks(compute_tflops, bandwidth_gbs, dtype, source="spec/override",
+                            ceiling_tflops=compute_tflops,
                             caliber_ok=False,
                             caliber_note="峰值来自 --ks-peak-* 覆盖或规格表，不是本机标定："
                                          "不用于拐点判定（R-09）")
@@ -115,9 +131,14 @@ class MachinePeaks:
         cal = f", 累加口径={self.acc_caliber or '未记录'}"
         spread = (f", 口径离散={self.caliber_spread_pct}%"
                   if self.caliber_spread_pct is not None else "")
+        # 两个分母不同时必须都写出来：否则读者以为 roofline 用的是"同机上限"，
+        # 而守卫用的是另一个数（或反过来）—— 真机实测这两者能差 7.3 倍。
+        ceil_txt = (f", 同机任何 dtype 的上限={self.ceiling_tflops:.1f} TFLOP/s（只给一致性守卫用）"
+                    if self.ceiling_tflops
+                    and abs(self.ceiling_tflops - self.compute_tflops) > 0.05 else "")
         return (f"{where}{when}, dtype={self.dtype_key}, "
                 f"bw={self.bandwidth_gbs:.0f} GB/s, compute={self.compute_tflops:.1f} TFLOP/s"
-                f"{cal}{spread}")
+                f"{cal}{spread}{ceil_txt}")
 
 
 def gemm_workload(m: int, n: int, k: int, dtype: str = "bf16") -> tuple[float, float]:
@@ -151,6 +172,19 @@ class SpeedOfLight:
     @property
     def pct_compute(self) -> float:
         return 100.0 * self.achieved_tflops / self.peaks.compute_tflops if self.peaks.compute_tflops else 0.0
+
+    @property
+    def pct_compute_ceiling(self) -> float:
+        """达成值相对**同机任何 dtype 的实测算力上限**的百分比。
+
+        只用于「物理上不可能」守卫，与 `pct_compute` 的分母**故意不同**：
+        `pct_compute` 回答"这次 dtype 用满了吗"（分母 = 本 dtype 实测峰值），
+        守卫回答"这台机器有没有可能做到"（分母 = 所有 dtype 里的最大值）。
+        两者在 16 位相差悬殊的机器上能差数倍（Turing bf16 vs fp16 = 7.3 倍）：
+        拿本 dtype 峰值当守卫上限会**误报**，拿上限当 roofline 分母会**低报利用率**。
+        """
+        c = self.peaks.ceiling_tflops or self.peaks.compute_tflops
+        return 100.0 * self.achieved_tflops / c if c else 0.0
 
     @property
     def pct_memory(self) -> float:
@@ -201,15 +235,16 @@ class SpeedOfLight:
         if not self.peaks.compute_tflops and not self.peaks.bandwidth_gbs:
             return False
         return (not self.over_peak
-                and (self.pct_compute > 100.0 or self.pct_memory > 100.0))
+                and (self.pct_compute_ceiling > 100.0 or self.pct_memory > 100.0))
 
     def near_peak_note(self) -> str:
         """容忍带内的提示（与红灯同一套措辞口径，但明确说"先别当达标证据"）。"""
         if not self.near_peak:
             return ""
         which = []
-        if self.pct_compute > 100.0:
-            which.append(f"算力 {self.achieved_tflops:.1f} TFLOPS = 标定峰值的 {self.pct_compute:.1f}%")
+        if self.pct_compute_ceiling > 100.0:
+            which.append(f"算力 {self.achieved_tflops:.1f} TFLOPS = 标定峰值的 "
+                         f"{self.pct_compute_ceiling:.1f}%")
         if self.pct_memory > 100.0:
             which.append(f"带宽 {self.achieved_gbs:.1f} GB/s = 标定峰值的 {self.pct_memory:.1f}%")
         return ("达成值达到/略超过标定峰值（在标定自身 "
@@ -217,12 +252,21 @@ class SpeedOfLight:
                 + "。这不一定是「达标」：先核对峰值口径（dtype/尺寸）与工作量输入，"
                   "再拿它当结论。")
 
+    def _dtype_peak_aside(self) -> str:
+        """守卫用的是"同机上限"，而 roofline 用的是"本 dtype 峰值" —— 两者不同时点名，
+        否则读者会把 7.3 倍的差当成测量噪声（真机实测：2080 Ti bf16 6.8 / fp16 49.4）。"""
+        cap = self.peaks.ceiling_tflops or self.peaks.compute_tflops
+        if not cap or abs(cap - self.peaks.compute_tflops) <= 0.05:
+            return ""
+        return (f"；本次 dtype={self.peaks.dtype_key} 的实测峰值是 "
+                f"{self.peaks.compute_tflops:.1f} TFLOP/s")
+
     @property
     def over_peak(self) -> bool:
         """达成值是否超过标定峰值（超出容差）。"""
         if not self.peaks.compute_tflops and not self.peaks.bandwidth_gbs:
             return False
-        return self.pct_compute > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT \
+        return self.pct_compute_ceiling > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT \
             or self.pct_memory > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT
 
     def over_peak_note(self) -> str:
@@ -230,9 +274,11 @@ class SpeedOfLight:
         if not self.over_peak:
             return ""
         which = []
-        if self.pct_compute > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT:
+        if self.pct_compute_ceiling > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT:
+            cap = self.peaks.ceiling_tflops or self.peaks.compute_tflops
             which.append(f"算力 {self.achieved_tflops:.1f} TFLOPS = 标定峰值的 "
-                         f"{self.pct_compute:.1f}%（峰值 {self.peaks.compute_tflops:.1f} TFLOPS）")
+                         f"{self.pct_compute_ceiling:.1f}%（同机任何 dtype 的上限 "
+                         f"{cap:.1f} TFLOPS）" + self._dtype_peak_aside())
         if self.pct_memory > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT:
             which.append(f"带宽 {self.achieved_gbs:.1f} GB/s = 标定峰值的 "
                          f"{self.pct_memory:.1f}%（峰值 {self.peaks.bandwidth_gbs:.1f} GB/s）")

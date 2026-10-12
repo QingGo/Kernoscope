@@ -1,6 +1,6 @@
 [project]
 name = "kernoscope"
-version = "0.2.1"
+version = "0.2.2"
 description = "Provenance-honest CUDA kernel profiler for locked-down / multi-tenant GPUs; ncu-compatible CLI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -59,6 +59,10 @@ packages = ["src/kernoscope"]
 # 而它在源码 checkout 之外找不到 skills/ 就等于没有这个功能（I4）。
 [tool.hatch.build.targets.wheel.force-include]
 "skills/kernoscope" = "kernoscope/skills/kernoscope"
+# 标定脚本必须随包发布：pip 装出来的用户**唯一**能做本机标定的路是 `kernoscope calibrate`，
+# 而它按 `tools/machine-profile.py` 找不到文件就等于没有这个功能（A-2′/R-127，全新环境实测）。
+# 实现仍只有 `tools/` 里那一份，这里只是把它放进 wheel。
+"tools/machine-profile.py" = "kernoscope/_machine_profile.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -51,6 +51,19 @@ COUNTER_SECTIONS: dict[str, tuple[RefusalCode, str]] = {
 }
 
 
+#: copyKind → 指标名里用的短标签（与 backends.nsys.COPY_KIND_NAMES 同一套语义）
+COPY_KIND_LABEL = {1: "htod", 2: "dtoh", 3: "htoa", 4: "atoh", 5: "atoa",
+                   6: "atod", 7: "dtoa", 8: "dtod", 9: "htoh", 10: "ptop"}
+
+
+def _human_bytes(n: int) -> str:
+    for unit, div in (("gb", 1 << 30), ("mb", 1 << 20), ("kb", 1 << 10)):
+        if n >= div:
+            v = n / div
+            return f"{v:.0f}{unit}" if abs(v - round(v)) < 1e-9 else f"{v:.1f}{unit}".replace(".", "p")
+    return f"{n}b"
+
+
 def counter_section_reason(name: str) -> str:
     """这个 section 被拒的散文原因（门禁消息与渲染共用）。"""
     entry = COUNTER_SECTIONS.get(name)
@@ -96,6 +109,12 @@ class BuildOptions:
     issue_hist: Any = None  # backends.opcode_hist.OpcodeHist（NVBit 官方 opcode_hist 输出）
     clock_mhz: float = 0.0  # 用于发射槽上限的 SM 时钟（NVML 实测或用户给定）
     sm_count: int = 0
+    #: 本次采集出现过的 deviceId（来自 CUPTI 的 `deviceId` 列）。>1 ⇒ 跨卡，见 build_device_kernel。
+    device_ids: list[int] = field(default_factory=list)
+    #: 按卡分段的原始行（每个 {device_id, launch_count, kernel_ns, kernels}），来自 Report。
+    device_rows: list[dict[str, Any]] = field(default_factory=list)
+    #: 传输/通信账本（analyze.comm.CommLedger）。None = 这次没读到拷贝 activity。
+    comm: Any = None
     device_name: str = ""
     arch: str = "sm_89"
     peak_gbs: float = 0.0
@@ -118,6 +137,41 @@ def build_device_kernel(opt: BuildOptions) -> Section:
     """
     s = Section("DeviceStatistics")
     n = opt.nvml_summary
+    # ---- 跨卡事实（多卡真机实测，2026-10-12）------------------------------------------
+    # 采集跨了多张卡时，按 kernel 名聚合的量（launch 数、时长合计、均值）是**跨卡加总**，
+    # 而 NVML 读数只描述一张卡（`nvidia-smi` 的第一行）。旧行为是**什么都不说**：
+    # 合成双设备轨迹实测，同名 kernel 的时长与 launch 数静默翻倍（31.9 ms/21 次 → 63.7 ms/42 次），
+    # 既无告警也无拒绝 —— 那正是本项目平时会拒绝的口径混用。所以这里显式说出来，
+    # 并把单卡口径的问题**拒绝**掉（不是给个偏小的数）。
+    dev_ids = list(opt.device_ids)
+    if dev_ids:
+        s.add(Metric.derived(
+            "ks__device_count", len(dev_ids), "张",
+            source="CUPTI activity 的 deviceId 列（exact）",
+            note=("本次采集出现过的设备：" + ", ".join(str(d) for d in dev_ids)
+                  + ("。**跨卡**：按 kernel 名聚合的 launch 数与时长是**跨卡加总**，"
+                     "不是单卡口径；NVML 读数（时钟/功耗/显存忙碌/能耗）只描述其中**一张**卡"
+                     "（`nvidia-smi` 的第一行）。要单卡口径用 `--devices <id>`。"
+                     if len(dev_ids) > 1 else
+                     "。单卡采集：按 kernel 名聚合的量就是这张卡的量。"))))
+        for row in opt.device_rows:
+            tag = f"ks__device_{row['device_id']}"
+            s.add(Metric.derived(f"{tag}__launch_count", row["launch_count"], "次",
+                                 source="CUPTI activity（按 deviceId 分段，exact）",
+                                 note="该设备上的 launch 次数；与跨卡合计分开看才知道有没有负载不均"))
+            s.add(Metric.derived(f"{tag}__kernel_ms", round(row["kernel_ns"] / 1e6, 4), "ms",
+                                 source="CUPTI activity（按 deviceId 分段，exact）"))
+            s.add(Metric.derived(f"{tag}__kernels", row["kernels"], "个",
+                                 source="CUPTI activity（按 deviceId 分段，exact）",
+                                 note="该设备上出现过的不同 kernel 数"))
+        if len(dev_ids) > 1:
+            s.add(Metric.unavailable(
+                "est__single_device_kernel_share_pct",
+                "本次采集跨了 " + str(len(dev_ids)) + " 张卡：单卡口径的占比/负载均衡问题"
+                "要按设备分段看，不能对跨卡合计下结论",
+                source="CUPTI activity 的 deviceId 列",
+                code=RefusalCode.MULTI_DEVICE_AGGREGATE,
+                observed={"device_ids": dev_ids}))
     # 锁频状态与**采样**无关（它是驱动查询，不是采样读数），所以放在 `if n:` **外面**：
     # 采样被关掉/一次都没采到时，这条证据照样成立。
     lock = (opt.nvml_env or {}).get("clock_lock") or {}
@@ -251,6 +305,73 @@ def build_device_kernel(opt: BuildOptions) -> Section:
                                  "nvidia-smi/pynvml 不可用，或稳态段短于一个采样周期（200 ms）；"
                                  "没有它就无法给出显存忙碌代理",
                                  source="NVML", code=RefusalCode.NO_NVML_SAMPLES))
+    return s
+
+
+def build_comm_section(opt: BuildOptions) -> Section | None:
+    """通信/传输账本（O1 的核心，也是 O2 分层账本共用的那块硬骨头）。
+
+    这个 section 存在的理由是**把三类量的可信度分开**，而不是给出一个"传输时间"：
+      * 字节 = `exact`（CUPTI 逐行相加）；
+      * 单次时长 = `estimated`，按 `(copyKind, bytes)` 取 MAX（真机上 MAX 恰好捞回诚实那一行）；
+      * **逐行时长求和 = 拒绝**，并把反面证据（求和会得到多少 GB/s）一起报出来。
+    真机实测（2×2080 Ti，无 P2P 的主机中转）：求和 3184 GB/s vs 真值 5.49 GB/s，错约 580 倍。
+    """
+    led = opt.comm
+    if led is None or not getattr(led, "has_any", False):
+        # 没采到拷贝 activity **不等于传输为 0**（只有 --trace=cuda 才采）—— 如实说清。
+        return None
+    s = Section("CommLedger")
+    if led.copies:
+        s.add(Metric.exact(
+            "ks__comm_bytes_total", led.bytes_total, "B",
+            source="CUPTI CUPTI_ACTIVITY_KIND_MEMCPY 的 bytes 逐行相加（exact）",
+            note=(f"共 {led.copies} 条拷贝 activity。**字节可信、时长不可信**："
+                  "同一份 activity 的逐行时长相加会把传输带宽算错数百倍（见本节的拒绝条目）")))
+        for kind, nb in sorted(led.bytes_by_kind.items()):
+            name = COPY_KIND_LABEL.get(int(kind), f"kind_{kind}")
+            s.add(Metric.exact(f"ks__comm_bytes_{name}", int(nb), "B",
+                               source=f"CUPTI copyKind={kind}（{name}）的 bytes 合计"))
+        for dev, nb in sorted(led.bytes_by_device.items()):
+            s.add(Metric.exact(f"ks__device_{dev}__comm_bytes", int(nb), "B",
+                               source="CUPTI MEMCPY 的 deviceId 分段（exact）"))
+        # MAX 口径：单次时长的最佳可得估计
+        for g in led.groups[:4]:
+            if g.bytes < (1 << 20):
+                continue
+            label = COPY_KIND_LABEL.get(int(g.copy_kind), f"kind_{g.copy_kind}")
+            s.add(Metric.estimated(
+                f"est__copy_{label}_{_human_bytes(g.bytes)}_gbs",
+                round(g.achieved_gbs, 2), "GB/s",
+                source=f"CUPTI bytes ÷ 该 (copyKind={g.copy_kind}, bytes={g.bytes}) 组的**最大**时长",
+                note=(f"这一组有 {g.count} 行；取 MAX 而不是求和，是因为同组里既有诚实行也有"
+                      f"报 80–95 µs 的坏行（1 GiB 报 80 µs 等于 13.3 TB/s，物理上不可能）。"
+                      f"MAX = {g.max_duration_ns / 1e6:.3f} ms")))
+        # 反面证据：把"求和"这条路显式拒绝掉，并把错多少一起报出来
+        s.add(Metric.unavailable(
+            "ks__comm_time_sum_ns",
+            "拒绝把拷贝 activity 的逐行时长相加当传输时间：这台机器上会出现数百倍的错",
+            source="CUPTI CUPTI_ACTIVITY_KIND_MEMCPY 的 end-start 逐行求和",
+            code=RefusalCode.MEMCPY_DURATION_UNTRUSTED,
+            observed={"sum_ns": led.duration_sum_ns,
+                      "bytes": led.bytes_total,
+                      "implied_gbs_if_summed": round(led.implied_gbs_if_summed, 1)}))
+    if led.comm_kernel_ns:
+        s.add(Metric.exact(
+            "ks__comm_kernel_ms", round(led.comm_kernel_ns / 1e6, 4), "ms",
+            source="通信 kernel（NCCL 等）的 CUPTI activity 时长（exact）",
+            note=("传输时间在这里是**可靠的**：真机实测 NCCL 的传输全部发生在 kernel 内，"
+                  "每 rank 只有 24 KB 的 bootstrap 拷贝 —— 所以「通信时间」要从 kernel 拿，"
+                  "不要去 memcpy 表里找。识别到的 kernel：" + "、".join(led.comm_kernel_names[:3]))))
+        s.add(Metric.exact(
+            "ks__comm_kernel_share_pct", round(led.comm_kernel_share_pct, 1), "%",
+            source="通信 kernel 时长 ÷ 全部 kernel 时长（exact）",
+            note="占比的分母是**全部 kernel 时间**（跨卡时它是跨卡加总，见 Devices section）"))
+        s.add(Metric.exact(
+            "ks__comm_compute_overlap_pct", round(led.overlap_pct_of_comm, 1), "%",
+            source="通信 kernel 区间 ∩ 计算 kernel 区间（CUPTI 时间戳，exact）",
+            note=("只对**通信 kernel** 算重叠：拷贝那一侧的时长不可信，拿它算重叠等于把"
+                  "数百倍的错引进第二个数。重叠 = 通信时间里同时有计算在跑的比例")))
     return s
 
 

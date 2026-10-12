@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/kernoscope)](https://pypi.org/project/kernoscope/) [![Python](https://img.shields.io/pypi/pyversions/kernoscope)](https://pypi.org/project/kernoscope/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**已发布到 PyPI**（`0.2.1`，alpha）：`uv tool install kernoscope`。**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化清单 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
+**已发布到 PyPI**（`0.2.2`，alpha）：`uv tool install kernoscope`。**先告诉你钱在哪，再证明你改完省了多少。** 在多租户/受限 GPU 上（`ncu` 因权限跑不了）给出「每个数字都标注出处」的性能证据：按实测占比排序的优化清单 + 成本折算，结论可被人与 agent 独立复核。**Alpha：接口会变（见 [CHANGELOG.md](CHANGELOG.md)）。**
 
 它回答：**先改哪里能省多少**（按实测占比排序的优化清单，不需要先标定/先给价格）、哪个 kernel 慢（`exact`）、离 roofline 多远/是不是 DRAM bound（`estimated` 带误差带）、实际达到的 occupancy 与发射槽上界、**每百万 token 花多少钱**；它**不能回答**精确 L2/DRAM 字节、命中率、warp stall 周期细分 —— 与 ncu 同源的硬件计数器只报 `n/a` + 原因 + 替代口径（完整三态见 [COVERAGE.md](COVERAGE.md)）。与 `ncu` **CLI 兼容但数据源不同**（绝不占用它的指标名）；`nsys` 与 `torch.profiler` 是互补关系（见 §4）。
 
@@ -170,10 +170,15 @@ roofline 与「能省多少」都用**本机实测峰值**而非规格表。一�
 | 实测期 SM 时钟 | 3105 MHz | **1815–2625（均值 2356）** |
 
 ```bash
-python tools/machine-profile.py --quick      # 写出 ./machine-profile.json
+kernoscope calibrate --quick                 # 写出 ./machine-profile.json（装出来的包就能跑）
+kernoscope calibrate --out /tmp/mp.json      # 换输出路径
+kernoscope calibrate --no-caliber-probe      # 跳过累加口径探针（省时间；产物缺 caliber_spread_pct）
 kernoscope --ks-calibration machine-profile.json --ks-gemm 4096,4096,4096 --ks-dtype bf16 \
            -k regex:gemm -- python bench.py
 ```
+
+> 在源码 checkout 里开发时，同一份实现的等价调用是
+> `uv run python tools/machine-profile.py --quick`（`kernoscope calibrate` 找的就是它）。
 
 标定产物记录**累加口径**（`acc_caliber` / `precision_settings` / `method`）与
 **口径离散度**（`caliber_spread_pct` / `caliber_distinguishable`）——

@@ -7,6 +7,168 @@
 
 （下一版的改动写在这里。小改动只升末位。）
 
+## 0.2.2 —— 2026-10-13（补丁级：真机验证驱动的口径修复与新能力（通信账本、多卡分段、kernoscope calibrate））
+
+### 修复：设备级超峰的传播链在真机上断掉（第八轮 A-1′ / R-125）
+
+`over_peak` 判词在"超峰只挂在设备级伪 kernel `(device)`"这一分支里，把**设备名**当成了 kernel 的
+`owner_key`（`rep.device.name`）。设备名不是 kernel 身份：`_same_owner` 拿它与真 kernel 名比较，
+两者既非空也不是 `(device)` ⇒ 判"不是同一个 kernel" ⇒ **传播链断掉**，于是"达成值超过本机实测峰值
+（物理上不可能）"留在 `soft / actionable=True`（`soft` 是可以当依据的）。
+
+真机上 `rep.device.name` 必然有值，所以这个洞只在真机出现；而测试夹具当时把 device 设成了 `None`，
+于是整类测试都走另一条分支 —— 修复因此可能只是**测试形状**的。现在两处一起修：
+
+* 设备分支给"没有归属"（`owner_key="(device)"`，走 `_same_owner` 的保守传播判据）；
+* 夹具工厂 `_KRep` 带真机式设备名，并加**类级**断言 `test_report_fixtures_carry_a_real_device_name`
+  盯住工厂本身（谁把设备名去掉，那条立刻红），外加评审的最小复现固化成永久用例。
+
+验收（双向）：修后 `gate --packet <只有 (device) 带 ks__over_peak_warning 的包>
+--require-actionable roofline` → **rc=1**；退回旧写法 → `roofline` 变回 `soft/actionable=True`、
+gate **rc=0（放绿）**。
+
+### 修复：空问题的用法错误走错通路（第八轮 B-4′ / R-130）
+
+`route ""` 原来把 504 B usage 打到 **stdout**、stderr 空、rc=2 ⇒ ① `route "" | ...` 会把 help
+当成路由结果读走；② `--json` 时 stdout 不是 JSON，agent 解析直接炸。现在与 argparse 的用法错误
+同形：usage 与 `error:` 都进 **stderr**，rc=2；`--json` 时 stdout 是显式错误信封
+（`{"error","hint","rc"}`）。
+
+### 新增：会改变口径的数值开关拒绝负值（第八轮 B-5′ / R-131）
+
+实测 `--launch-skip -1` 曾 rc=0 静默接受：用户以为跳过了前 1 次 launch，实际选择语义没变，
+而后续占比/耗时全部建立在另一个集合上。现在 12 个"负值会把结论改掉"的开关由共享校验器拒绝
+（`error:` 到 stderr、rc=2）：`--launch-skip` / `--launch-skip-before-match` / `-c` /
+`--ks-warmup` / `--ks-window-s` / `--ks-flops` / `--ks-bytes` / `--ks-peak-tflops` /
+`--ks-peak-gbps` / `--ks-ledger-mb` / `--ks-ledger-total-mb` / `--ks-tokens`；
+`--ks-gemm` 的负形状在解析点拦（负 FLOPs 会静默变成不可能的比例）。
+**范围有意收窄**：价格/token 为负时结果是显式负数（人一眼看出不对），归噪声，不追全部 20 个开关。
+
+### 文档：`RELEASING.md` 不再写死门禁条数（第八轮 B-6′）
+
+原文"# 9 条门禁"在加到 10 条后就漂了 —— 按 §6.4「不写会漂的手写散文」，改成"全部门禁；
+条数以它自己的输出为准"。
+
+
+
+（下一版的改动写在这里。小改动只升末位。）
+
+### 决策包 schema revision `1.2` → `1.3`（追加式）
+
+按 `packet.py` 的既定约定（追加式、向后兼容 ⇒ 只升 `schema_revision`，改语义才升主版本），
+本轮新增两条拒绝码（`multi_device_aggregate`、`memcpy_duration_untrusted`）与跨卡时
+`kernel_time` 判词多出的 `device_ids` 事实，属于追加式：**读 1.2 包的代码仍然能读 1.3**。
+主版本仍为 1。
+
+### 传输/通信账本：把"字节可信、时长不可信"钉进代码（新 section + 新拒绝码）
+
+真机取证（2×RTX 2080 Ti / 2026-10-12，SYS 拓扑、无 NVLink、无 PCIe P2P ⇒ 卡间传输只能经主机
+内存中转）发现同一张 `CUPTI_ACTIVITY_KIND_MEMCPY` 表里**两种字段的可信度完全不同**：
+
+* `bytes` 可信（逐行相加 = 真值）；
+* `end-start` **不可信**：约一半的行无论多大都报 80–95 µs
+  （原文行 `313 | 0 | 7 | 2 | 1073741824 | ... | 80594` —— 1 GiB / 80 µs = 13.3 TB/s）。
+  逐行相加在 peer.sqlite 上得到约 **3184 GB/s**，实测 5.49 GB/s，**错约 580 倍**。
+
+新 `CommLedger` section（窗口级）按定死的口径给数：
+
+| 指标 | 口径 |
+|---|---|
+| `ks__comm_bytes_total` / `ks__comm_bytes_{htod,dtoh,...}` / `ks__device_<id>__comm_bytes` | `exact` |
+| `est__copy_<kind>_<size>_gbs` | `estimated`，按 `(copyKind, bytes)` 取 **MAX** |
+| `ks__comm_time_sum_ns` | **`unavailable`** + 新拒绝码 `memcpy_duration_untrusted`，并附反面证据 `observed={sum_ns, bytes, implied_gbs_if_summed}` |
+| `ks__comm_kernel_ms` / `ks__comm_kernel_share_pct` | `exact`（通信时间取自通信 **kernel**） |
+| `ks__comm_compute_overlap_pct` | `exact`，通信 kernel 区间 ∩ 计算 kernel 区间 |
+
+真机复现（同一台机上的独立测量）：MAX 口径 HtoD **11.93** / DtoH **13.12** GB/s 对 cudaEvent
+**11.96 / 13.15**（差 <0.3%）；NCCL 轨迹给 **1834.7341 ms / 58.7%**，对 kernel 表 **1834.734 ms /
+58.7%**；同一轨迹的拷贝字节 **48 624 B**（24 KB/rank），证明"通信量去 memcpy 表里找"会得到错答案。
+没采到拷贝 activity 时**不给 section**（缺席 ≠ 传输为 0）。
+
+### 跨卡采集不再静默合计（接口变化：新 JSON 字段 / 新拒绝码 / 新分段指标）
+
+真机实测（2×RTX 2080 Ti / 2026-10-12）：
+
+* **合成双设备轨迹**：不加 `--devices` 时同名 kernel 的时长与 launch 数**静默翻倍**
+  （31.9 ms / 21 次 → 63.7 ms / 42 次），既无告警也无拒绝；
+* **真实双卡 NCCL 轨迹**（2 进程 all_reduce，990 次 launch）：一屏原来一个字都不提，
+  读者会把 `3126.471 ms / 182 次` 当成单卡口径 —— 而它是 `1569.794 + 1556.677`（两张卡之和）。
+
+按本项目的纪律，"跨卡加总"被当成"进程内 kernel 时间合计"报出来正是平时会拒绝的那类口径混用。
+现在它被显式说出来：
+
+* 报告 JSON 多两个字段：`device_ids`（本次出现过的 CUPTI `deviceId`）与 `multi_device`；
+  两者都随 `-i` 回读保留（丢了就等于又变回静默合计）；
+* 一屏的 `kernel_time` 判词在人话末尾点名：**跨了 N 张卡（deviceId …）：上面的次数与时长是
+  跨卡加总**，不是单卡口径（单卡口径用 `--devices <id>`）。这条事实进的是 `facts` —— 包与报告
+  都不存散文，人话只由 `phrase_verdict` 从 `facts` 生成；
+* 设备级 section 新增按卡分段：`ks__device_count`、`ks__device_<id>__launch_count` /
+  `__kernel_ms` / `__kernels`（真实双卡轨迹实测：dev0 495 次 / 1569.794 ms，dev1 495 次 /
+  1556.677 ms —— 谁干得多一眼看得出，不必筛选）；
+* 新拒绝码 **`multi_device_aggregate`**：单卡口径的问题（占比/负载均衡）在跨卡采集上
+  **拒绝作答**（`est__single_device_kernel_share_pct`），而不是给个偏小的数；
+* 单卡采集的行为**一字未变**（无新 fact、无新拒绝、判词与原来逐字相同）。
+
+### 新子命令 `kernoscope calibrate` —— 装出来的包也能做本机标定（A-2′/R-127）
+
+全新环境实测：`tools/` **不进 wheel**，而标定的实现一直在 `tools/machine-profile.py`。于是 pip
+装出来的用户被 `doctor` 与拒绝语支到一条**不存在的命令**上：
+
+    $ python tools/machine-profile.py --quick
+    can't open file '.../tools/machine-profile.py': [Errno 2] No such file or directory
+
+而同一台机器上源码 checkout 跑 demo 的标定完全正常（实测产出 7655 B profile）—— 这个洞**只在
+"陌生人的机器"上出现**，正是本项目最该管的那一格。现在：
+
+* 新子命令 `kernoscope calibrate [--quick] [--out PATH] [--no-caliber-probe]`；
+* 实现**不搬运**：`tools/machine-profile.py` 仍是唯一真源，由 `pyproject.toml` 的 force-include
+  随 wheel 发到 `kernoscope/_machine_profile.py`（与 `skills/` 同一套机制），开关表也从脚本自己的
+  解析器借来（`build_parser()`），不重抄；
+* `doctor` 的建议与两条拒绝语（`no_calibration` / `calibration_caliber_mismatch`）改用新命令，
+  `README.md` 的标定段同步（README 那三条命令同时被文档命令扫描器逐字解析）；
+* 端到端验收（真机，pip 装的 wheel）：`kernoscope calibrate --quick` → rc=0 → 产物喂给
+  `--ks-calibration` 时两个分母都对。
+
+### 修复：标定成功路径 `int(None)` 抛 TypeError（真机实测，装出来的包）
+
+`tools/machine-profile.py` 的 `main()` 成功时不返回（落到 `None`），而新子命令写的是
+`int(mod.main(...))` ⇒ 在**标定已经成功、产物已经写好之后**抛 `TypeError`，用户看到 traceback，
+以为标定失败了。现在脚本侧 `return 0`，调用侧同时容忍 `None`（= 成功）。
+
+### bf16 与 fp16 的峰值不再互相顶替（口径修复；新字段 `peaks.ceiling_tflops`）
+
+真机实测（RTX 2080 Ti / Turing，2026-10-12）：这张卡上 **bf16 走 fp32 路径只有 7.3 TFLOP/s，
+fp16 张量核 52.0** —— 差 **7 倍**。旧实现把 bf16 映射到 `torch.bfloat16` 后又与
+`torch.float16` 取 `max()`，等于让**一个标量同时充当两个角色**：
+
+| 角色 | 应该用哪个分母 | 旧行为 |
+|---|---|---|
+| roofline「占实测峰值多少」 | **本次 dtype** 的实测峰值 | 用了 max（bf16 利用率**低报 7 倍**） |
+| 「物理上不可能」一致性守卫 | **同机任何 dtype** 的上限 | 也用了 max（守卫**松了 7 倍**） |
+
+RTX 4090 上两条目只差 1%（169.0 vs 167.4），所以这个错在主力机上完全看不出来 —— 换一台卡才暴露。
+现在拆成两个量：
+
+* `MachinePeaks.compute_tflops` = **本次 dtype** 的实测峰值（roofline 分母，`est__pct_of_measured_compute_peak`）；
+* `MachinePeaks.ceiling_tflops` = **同机任何 dtype** 的实测上限（只给守卫用，`pct_compute_ceiling`）。
+
+守卫的说明词会同时点名两个数（"同机任何 dtype 的上限 X；本次 dtype=bf16 的实测峰值 Y"），
+`--json` 的 `peaks` 里也同时给出 `compute_tflops` 与 `ceiling_tflops`。
+标定文件里**没有本次 dtype 的条目**时改为**拒绝**算 compute roof 并在 note 里说明"不拿别的
+dtype 顶替"，而不是静默换一个 dtype 的峰值。
+
+### demo 的两个首用 bug（真机实测：第二次跑会失败，且慢 55 倍）
+
+* **demo 不能重跑**：第二次 `bash demo/quickstart.sh` 在第三幕红
+  （`rep-gemm.ksreport.json exists (pass -f to overwrite)`）—— 而脚本自己有一段"复用已有标定"，
+  显然是为重跑设计的。写报告的命令补上 `-f`。
+* **负载的计时循环从不同步**：`DEMO_SECONDS` 量的是 **CPU 入队时间**。2080 Ti 上 3 秒入队了
+  1042 次 8192³ bf16 GEMM（= 166.7 s 的 GPU 积压），`synchronize()` 把这堆等完 ⇒ gemm 场景实跑
+  166.7 s（**慢 55 倍**）、train_step 3 s → 11.2 s、整个 demo **6 分 25 秒且报失败**。
+  改为分批同步（`SYNC_EVERY=4`）后：gemm 3.03 s、train_step 3.01 s、demo **54 s / 48 s**，
+  两次连跑都 `DEMO OK`。快卡上看不出这个坑（4090 上入队与执行同量级）。
+  两条都加了契约测试（`tests/test_demo.py`）并做了变异验证。
+
 ## 0.2.1 —— 2026-10-12（补丁级：真机验证与修复）
 
 ### 发布链自动化（第一步）：`tools/release_bump.py` —— 一处命令、四处同步
@@ -315,10 +477,10 @@
 - `capabilities --brief` 的 `next_layer.bytes` 现在等于**它自己命名的那个命令的真实输出
   字节数**（以前用紧凑序列化算，低估 35%）；新增 `blocked_by_unavailable`。
 - `capabilities --json` 的输出不再多一个换行。
-- 文档命令门禁：**全部**可检命令（当前 65 条）都交给**真实解析器**（11 个子命令各有自己的
+- 文档命令门禁：**全部**可检命令（当前 68 条）都交给**真实解析器**（12 个子命令各有自己的
   `build_parser()`，是 `--help`／门禁／测试共用的唯一真源；续行、`sudo`、`$( )`、
   `python -m kernoscope`、`xargs … kernoscope` 都覆盖，且**不许静默丢弃**）；
-  其中**读者面 11 条**逐字执行并断言结论（比例 11/65，不是"每条都断言"）。
+  其中**读者面 11 条**逐字执行并断言结论（比例 11/68，不是"每条都断言"）。
   注：这三个数字随代码走动，若与 `tests/test_documented_commands.py` 的断言不一致，以测试为准。
 
 ### 访存轨迹口径（NVBit）

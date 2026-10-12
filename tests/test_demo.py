@@ -68,3 +68,47 @@ def test_demo_readme_says_where_the_numbers_come_from():
         assert needle in text, needle
     assert "本机标定" in text, "要说清标定的作用（roofline/能省多少的分母）"
     assert "示例值" in text, "价格是示例值这件事必须写出来"
+
+
+def _timing_loop_body(src: str) -> str:
+    """`t0 = time.time()` 之后那个计时循环的循环体（按缩进切块）。"""
+    lines = src.splitlines()
+    i = next(n for n, l in enumerate(lines) if "t0 = time.time()" in l)
+    j = next(n for n in range(i, len(lines)) if lines[n].lstrip().startswith("while"))
+    indent = len(lines[j]) - len(lines[j].lstrip())
+    body: list[str] = []
+    for l in lines[j + 1:]:
+        if l.strip() and (len(l) - len(l.lstrip())) <= indent:
+            break
+        body.append(l)
+    return "\n".join(body)
+
+
+def test_workload_timing_loop_synchronizes_inside_the_loop():
+    """真机实测（RTX 2080 Ti / 2026-10-12）：计时循环里**没有同步点**时，`time.time()` 量到的是
+    CPU 入队时间，不是 GPU 时间 —— 3 秒里入队 1042 次 8192³ bf16 GEMM（166.7 s 的 GPU 工作），
+    标称 3 s 的 gemm 场景实跑 166.7 s，**慢 55 倍**；train_step 同因 3 s → 11.2 s。
+
+    这个坑在快卡上看不出来（4090 上入队与执行同量级），所以它只能靠契约钉住，不能靠"在主力机上
+    看着还行"。契约：计时循环体内必须有 `torch.cuda.synchronize()`。
+    """
+    for name in ("gemm", "train_step"):
+        src = (DEMO / "workloads" / f"{name}.py").read_text(encoding="utf-8")
+        body = _timing_loop_body(src)
+        assert "torch.cuda.synchronize()" in body, (
+            f"{name}.py 的计时循环里没有同步点：墙钟会退化成入队时间（慢卡上可差 50 倍以上）")
+
+
+def test_demo_can_be_run_twice_in_a_row():
+    """真机实测：第二次 `bash demo/quickstart.sh` 会在第三幕失败 ——
+    `error: .../rep-gemm.ksreport.json exists (pass -f to overwrite)`。
+
+    而脚本自己**故意**复用上一次的标定（"复用已有标定"分支），显然是为重跑设计的：
+    标定可复用、报告却不可覆写，是自相矛盾的。契约：写报告的那条命令必须带 `-f`。
+    """
+    logical = (DEMO / "quickstart.sh").read_text(encoding="utf-8").replace("\\\n", " ")
+    cmds = [c for c in logical.splitlines() if '-o "$OUT/rep-${scene}.json"' in c]
+    assert cmds, "找不到第三幕写报告的调用（本测试要跟着那条命令一起改）"
+    for c in cmds:
+        assert re.search(r"(^|\s)(-f|--force-overwrite)(\s|$)", c), \
+            f"重跑 demo 会因报告已存在而失败，这条命令缺少 -f：{c.strip()}"

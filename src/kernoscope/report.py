@@ -125,6 +125,25 @@ def config_key(l: "KernelLaunch") -> str:
 
 
 @dataclass
+class MemcpyRecord:
+    """一次拷贝 activity（CUPTI `CUPTI_ACTIVITY_KIND_MEMCPY`）。
+
+    **字段的可信度不一样**（真机实测，2×2080 Ti / 2026-10-12，无 P2P 的主机中转路径）：
+    `bytes` 可信；`duration_ns` **不可信**（约一半的行无论多大都报 80–95 µs）。判定见
+    `analyze/comm.py` —— 那里拒绝"对时长求和"，只按 `(copyKind, bytes)` 组取 MAX。
+    """
+
+    start_ns: int
+    end_ns: int
+    duration_ns: int
+    copy_kind: int
+    bytes: int
+    device_id: int
+    stream_id: int
+    correlation_id: int = 0
+
+
+@dataclass
 class KernelReport:
     """一个 kernel（按名字聚合）的报告。"""
 
@@ -198,6 +217,45 @@ class Report:
     schema_version: int = SCHEMA_VERSION
     generated_at: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    #: 本次采集里出现过的 deviceId（CUPTI 的 `deviceId` 列）。
+    #:
+    #: **>1 表示跨卡采集**：所有按 kernel 名聚合的量（launch 数、时长合计、均值）都是**跨卡加总**，
+    #: 不是单卡口径；而 NVML 读数（时钟/功耗/显存忙碌）只描述**一张卡**（`nvidia-smi` 的第一行）。
+    #: 真机实测（2×2080 Ti / 2026-10-12，合成双设备轨迹）：不加 `--devices` 时同名 kernel 的
+    #: 时长与 launch 数会**静默翻倍**（31.9 ms/21 次 → 63.7 ms/42 次），既无告警也无拒绝 ——
+    #: 那正是本项目平时会拒绝的那种口径混用，所以它必须被显式说出来，而不是靠读者猜。
+    #: 存成字段（而不是只做属性）是为了让 `-i` 回读也能保住这个事实。
+    device_ids: list[int] = field(default_factory=list)
+    #: 本次采集里的拷贝 activity（通信/传输账本的输入）。空表示**没采到**，不是"传输为 0"。
+    memcpys: list["MemcpyRecord"] = field(default_factory=list)
+
+    @property
+    def is_multi_device(self) -> bool:
+        return len(self.device_ids) > 1
+
+    def observed_device_ids(self) -> list[int]:
+        """deviceId 集合：优先用记录下来的；老产物没有这个字段时从 launch 现算。"""
+        if self.device_ids:
+            return list(self.device_ids)
+        return sorted({l.device_id for k in self.kernels for l in k.launches})
+
+    def device_breakdown(self) -> list[dict[str, Any]]:
+        """按设备分段：每张卡各自的 launch 数、kernel 时间、出现过的 kernel 数。
+
+        `--devices` 是**筛选**（只留一张卡），这里是**分段**（每张卡是多少）——
+        跨卡运行里读者最需要的是后者：知道两张卡各干了多少活，才知道有没有负载不均。
+        """
+        out: dict[int, dict[str, Any]] = {}
+        for k in self.kernels:
+            for l in k.launches:
+                row = out.setdefault(l.device_id, {"device_id": l.device_id,
+                                                   "launch_count": 0, "kernel_ns": 0,
+                                                   "kernels": set()})
+                row["launch_count"] += 1
+                row["kernel_ns"] += l.duration_ns
+                row["kernels"].add(k.name)
+        return [dict(r, kernels=len(r["kernels"]))
+                for r in sorted(out.values(), key=lambda r: r["device_id"])]
 
     def kernel(self, name: str) -> KernelReport:
         for k in self.kernels:
@@ -247,6 +305,9 @@ class Report:
             "generated_at": self.generated_at or _now(),
             "host": {"platform": platform.platform(), "python": platform.python_version()},
             "device": asdict(self.device),
+            # 跨卡事实必须进 JSON：否则 `-i` 回读后这个口径就丢了（见 device_ids 的注释）
+            "device_ids": list(self.observed_device_ids()),
+            "multi_device": self.is_multi_device,
             "wall_time_ns": self.wall_time_ns,
             "sources": self.sources,
             "meta": self.meta,
@@ -319,6 +380,7 @@ class Report:
             schema_version=d.get("schema_version", SCHEMA_VERSION),
             generated_at=d.get("generated_at", ""),
             meta=d.get("meta", {}),
+            device_ids=[int(x) for x in (d.get("device_ids") or [])],
         )
         for kd in d.get("kernels", []):
             k = KernelReport(kd["name"], kd.get("launch_count", 0))

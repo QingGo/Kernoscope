@@ -38,6 +38,7 @@ from typing import Any, Sequence
 
 from . import __version__
 from .analyze.roofline import MachinePeaks, gemm_workload
+from .analyze.comm import build_ledger
 from .backends import cubin as cubin_backend
 from .backends import nsys as nsys_backend
 from .backends.nvml import Sampler
@@ -46,7 +47,8 @@ from .report import DeviceInfo, KernelLaunch, KernelReport, Report
 from .render import render_csv, render_launch_csv, render_perfetto, render_text
 from .sections import (COUNTER_SECTIONS, KNOWN_COUNTER_METRICS, BuildOptions,
                        build_cost_attribution_section, build_cost_section,
-                       build_device_kernel, build_dram_section, build_kernel_sections,
+                       build_comm_section, build_device_kernel, build_dram_section,
+                       build_kernel_sections,
                        build_telemetry_section,
                        build_prescription_section, counter_section_reason,
                        requested_sections)
@@ -80,6 +82,7 @@ SUBCOMMAND_HELP: dict[str, str] = {
     "mcp": "MCP（stdio）：只给没有 shell 的 agent runtime 用（可选、零常驻）",
     "skill": "把 skill 装进 agent 的上下文（默认只打印计划，`--apply` 才写盘）",
     "issue": "把一次采集打包成可提交的 issue 材料",
+    "calibrate": "测出这台机器的可达峰值（roofline 的分母；装出来的包也能跑）",
 }
 
 
@@ -88,6 +91,31 @@ def _subcommand_help_block() -> str:
     parts = ["子命令（每个都有 --help；`--json` 给机器读）:"]
     parts += [f"  kernoscope {name:<13} # {SUBCOMMAND_HELP[name]}" for name in SUBCOMMAND_HELP]
     return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------
+# 数值开关的负数校验（第八轮 B-5′ / R-131）
+#
+# 为什么只挑这几个：**负值会被静默接受，然后把结论改掉**。例如 `--launch-skip -1` 实测 rc=0 ——
+# 用户以为跳过了前 1 次 launch，实际选择语义没有变化，而后面的占比/耗时全部建立在另一个集合上。
+# 这类错不会报错、也不会看起来奇怪，正是本项目最拦不住的那种。
+#
+# 不追"给全部 20 个数值开关加校验"：价格/token 数为负时结果本身是显式负数（人一眼就看出不对），
+# 属于噪声而不是静默改口径。校验器统一抛 `ArgumentTypeError` ⇒ argparse 打 `error:` 到 stderr、
+# rc=2，与其它用法错误同形。
+# --------------------------------------------------------------------------
+def _nonneg_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"必须 ≥ 0（收到 {value}）：负值会静默改变选择语义")
+    return value
+
+
+def _nonneg_float(text: str) -> float:
+    value = float(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"必须 ≥ 0（收到 {value}）：负值会静默改变口径")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,10 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="kernel 过滤：'regex:<pat>' 或精确名（ncu 兼容）")
     g.add_argument("--kernel-name-base", default="demangled",
                    choices=["demangled", "mangled", "function"], help="(accepted)")
-    g.add_argument("-s", "--launch-skip", type=int, default=0, help="跳过每个 kernel 的前 N 次 launch")
-    g.add_argument("--launch-skip-before-match", type=int, default=0,
+    g.add_argument("-s", "--launch-skip", type=_nonneg_int, default=0, help="跳过每个 kernel 的前 N 次 launch")
+    g.add_argument("--launch-skip-before-match", type=_nonneg_int, default=0,
                    help="匹配开始前先跳过的 launch 数（全局）")
-    g.add_argument("-c", "--launch-count", type=int, default=0,
+    g.add_argument("-c", "--launch-count", type=_nonneg_int, default=0,
                    help="每个 kernel 最多报告的 launch 数（0=全部）")
     g.add_argument("--target-processes", default="all", choices=["all", "application-only"])
     g.add_argument("--devices", default=None,
@@ -162,11 +190,11 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-cubin", action="append", default=[],
                    help="cubin/.so 路径：静态资源与 SASS 混合（可重复）")
     k.add_argument("--ks-calibration", default=None, help="machine-profile.json（本机实测峰值）")
-    k.add_argument("--ks-peak-tflops", type=float, default=None, help="覆盖计算峰值")
-    k.add_argument("--ks-peak-gbps", type=float, default=None, help="覆盖带宽峰值")
+    k.add_argument("--ks-peak-tflops", type=_nonneg_float, default=None, help="覆盖计算峰值")
+    k.add_argument("--ks-peak-gbps", type=_nonneg_float, default=None, help="覆盖带宽峰值")
     k.add_argument("--ks-gemm", default=None, help="GEMM 形状 M,N,K（算 FLOPs/bytes）")
-    k.add_argument("--ks-flops", type=float, default=None, help="每次 launch 的 FLOPs")
-    k.add_argument("--ks-bytes", type=float, default=None, help="每次 launch 搬运字节数")
+    k.add_argument("--ks-flops", type=_nonneg_float, default=None, help="每次 launch 的 FLOPs")
+    k.add_argument("--ks-bytes", type=_nonneg_float, default=None, help="每次 launch 搬运字节数")
     k.add_argument("--ks-dtype", default="bf16", help="精度（影响峰值与 itemsize）")
     k.add_argument("--ks-achieved-occupancy", default=None,
                    help='探针输出的 JSON: {"<kernel>": {"occupancy_pct":.., ...}}')
@@ -175,9 +203,9 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-no-nvml", action="store_true", help="不做设备级采样")
     k.add_argument("--ks-perfetto", default=None, help="Perfetto trace 输出路径（.json）")
     k.add_argument("--ks-sm-count", type=int, default=0, help="覆盖 SM 数量")
-    k.add_argument("--ks-ledger-mb", type=float, default=None,
+    k.add_argument("--ks-ledger-mb", type=_nonneg_float, default=None,
                    help="账本预测的 DRAM 字节数（MB，**每次 launch** 口径）：报告里按同基给出相对误差")
-    k.add_argument("--ks-ledger-total-mb", type=float, default=None,
+    k.add_argument("--ks-ledger-total-mb", type=_nonneg_float, default=None,
                    help="账本预测的整窗口 DRAM 字节数（MB，总量口径）：与整窗口估算对拍")
     k.add_argument("--ks-ledger-range-mb", default=None,
                    help="账本给出的区间 LOW,HIGH（MB）：报告里给出估算落在区间的哪一侧")
@@ -187,9 +215,9 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ks-window", default="auto", choices=["auto", "full"],
                    help="采样窗口：auto=按首个/末个 kernel 活动自动裁到稳态段（默认，"
                         "避免被 import torch / JIT 的 9~10 秒稀释）；full=用整段采样窗")
-    k.add_argument("--ks-warmup", type=float, default=0.0,
+    k.add_argument("--ks-warmup", type=_nonneg_float, default=0.0,
                    help="从首个采样点起再丢掉 N 秒（跳过启动/JIT；与 --ks-window 叠加）")
-    k.add_argument("--ks-window-s", type=float, default=None,
+    k.add_argument("--ks-window-s", type=_nonneg_float, default=None,
                    help="只保留从采样起点算起的 N 秒窗口（成本可预算）")
     k.add_argument("--ks-json-no-launches", action="store_true",
                    help="JSON 里不写逐 launch 数组：报告体积与 iteration 数解耦；"
@@ -221,7 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="本机自检文件（kernoscope selftest 产出）：给判词带上误差带与 MDD，"
                         "diff 才能区分真改进与噪声")
     # ---- 成本账（C1）：把秒换算成钱与量。没给的输入我们拒绝，绝不按"典型值"猜 ----
-    k.add_argument("--ks-tokens", type=float, default=None,
+    k.add_argument("--ks-tokens", type=_nonneg_float, default=None,
                    help="每次迭代(step)处理的 token 数（推理=一次 forward 的 token，"
                         "训练=一步的 token）：给了才有 tokens/s 与 ¥/Mtoken")
     k.add_argument("--ks-price-per-kwh", type=float, default=None,
@@ -404,6 +432,18 @@ def _target_command(program: Sequence[str]) -> list[str]:
     return raw
 
 
+def _parse_memcpys_safe(db: str) -> list[Any]:
+    """读拷贝 activity；读不到就返回空表。
+
+    **空表 = 拿不到，不是传输为 0**：只有 `--trace=cuda` 才采 CUPTI 的拷贝活动。
+    账本缺席绝不能拖垮整次运行，但也绝不能被当成"这次没有卡间传输"（那是两个不同的结论）。
+    """
+    try:
+        return nsys_backend.parse_memcpys(db)
+    except Exception:      # noqa: BLE001 —— 缺表/旧格式/文件已删都退成"缺席"
+        return []
+
+
 def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str, Any], int]:
     """返回 (launches, extra_meta, target_exit_code)。
 
@@ -417,10 +457,12 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
         meta["synthetic"] = True
         return load_synthetic(), meta, 0
     if args.ks_sqlite:
+        meta["_memcpys"] = _parse_memcpys_safe(args.ks_sqlite)
         return nsys_backend.parse_kernels(args.ks_sqlite), meta, 0
     if args.ks_nsys_rep:
         db = nsys_backend.sqlite_from_rep(args.ks_nsys_rep)
         meta["nsys_sqlite"] = db
+        meta["_memcpys"] = _parse_memcpys_safe(db)
         return nsys_backend.parse_kernels(db), meta, 0
 
     cmd = _target_command(args.program)
@@ -480,6 +522,8 @@ def collect(args: argparse.Namespace, log) -> tuple[list[KernelLaunch], dict[str
     meta["nsys_rep"] = rep_path
     meta["nsys_sqlite"] = db
     launches = nsys_backend.parse_kernels(db)
+    # 与 NVTX 归因同一个理由：不带 `-o` 时这份 sqlite 马上会被删掉，账本要**先**读出来。
+    meta["_memcpys"] = _parse_memcpys_safe(db)
     if not keep and not args.export:
         # I8 的 NVTX 阶段归因发生在**报告装配**阶段（更晚），而这份 sqlite 马上就要被删掉。
         # 真机实测（AutoDL 4090 容器）：不带 `-o` 时这条功能 100% 失效，只留一行
@@ -533,7 +577,7 @@ def _collect_or_report(args: argparse.Namespace, log) -> tuple[list[KernelLaunch
 # --------------------------------------------------------------------------
 SUBCOMMANDS: tuple[str, ...] = (
     "doctor", "occupancy", "memtrace", "issue", "capabilities", "selftest", "diff", "route",
-    "skill", "gate", "mcp")
+    "skill", "gate", "mcp", "calibrate")
 
 
 def subcommand_parser(name: str) -> Any:
@@ -544,6 +588,7 @@ def subcommand_parser(name: str) -> Any:
     parse**：`diff` 上挂主命令的 `--packet`、`selftest` 上挂标定路径、`capabilities`
     上一个不存在的短开关，三条都被放行（验收报告第四轮 P1）。
     """
+    from .calibrate_cmd import build_parser as calibrate_parser
     from .capabilities_cmd import build_parser as capabilities_parser
     from .diff_cmd import build_parser as diff_parser
     from .doctor import build_parser as doctor_parser
@@ -560,11 +605,13 @@ def subcommand_parser(name: str) -> Any:
             "memtrace": memtrace_parser, "issue": issue_parser,
             "capabilities": capabilities_parser, "selftest": selftest_parser,
             "diff": diff_parser, "route": route_parser, "skill": skill_parser,
-            "gate": gate_parser, "mcp": mcp_parser}[name]()
+            "gate": gate_parser, "mcp": mcp_parser,
+            "calibrate": calibrate_parser}[name]()
 
 
 def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     """子命令名 → 入口函数（延迟导入：`kernoscope --help` 不该拉起 torch/nsys 那套）。"""
+    from .calibrate_cmd import calibrate_main
     from .capabilities_cmd import capabilities_main
     from .diff_cmd import diff_main
     from .doctor import doctor_main
@@ -580,7 +627,8 @@ def _SUBCOMMAND_ENTRY() -> dict[str, Any]:
     return {"doctor": doctor_main, "occupancy": occupancy_main, "memtrace": memtrace_main,
             "issue": issue_main, "capabilities": capabilities_main,
             "selftest": selftest_main, "diff": diff_main, "route": route_main,
-            "skill": skill_main, "gate": gate_main, "mcp": mcp_main_entry}
+            "skill": skill_main, "gate": gate_main, "mcp": mcp_main_entry,
+            "calibrate": calibrate_main}
 
 
 # --------------------------------------------------------------------------
@@ -874,6 +922,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
     if args.ks_gemm:
         try:
             m, n, k = (int(float(x)) for x in args.ks_gemm.replace("x", ",").split(","))
+            if min(m, n, k) < 0:
+                # 负形状会算出负 FLOPs/负字节，然后静默变成不可能的比例（B-5′）
+                log_error(f"error: --ks-gemm 的三个维度必须 ≥ 0（收到 {m},{n},{k}）")
+                return 2
             workload = gemm_workload(m, n, k, args.ks_dtype)
             workload_note = f"user-provided GEMM {m}x{n}x{k} ({args.ks_dtype})"
         except Exception:
@@ -1146,6 +1198,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
     )
 
     rep = Report(device=device)
+    # 传输/通信账本的输入（内部结构）：既不进报告 meta，也不进协议哈希。
+    rep.memcpys = list(meta.pop("_memcpys", []) or [])
     rep.meta.update(meta)
     # ---- 锁频状态（已批准择中项 ⑥）：进 meta ⇒ 进协议哈希 ⇔ `diff` 会说"不可比" ----
     # 只有**确定未锁**才给处方（`clock_not_locked`）：`unknown`（例如没有 pynvml）不该在每次
@@ -1202,8 +1256,20 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     kr.sections.append(attr_sec)
         rep.kernels.append(kr)
     opt.cost = cost_est
+    # 跨卡事实（多卡真机实测，2026-10-12）：从 launch 的 deviceId 现算。既要进报告
+    # （`-i` 回读后这个口径不能丢），也要喂给设备级 section（那里要按卡分段 + 显式拒绝单卡口径）。
+    rep.device_ids = rep.observed_device_ids()
+    opt.device_ids = list(rep.device_ids)
+    opt.device_rows = rep.device_breakdown()
+    # 传输/通信账本（O1 的核心、O2 共用的硬骨头）。拷贝 activity 的**字节可信、时长不可信**，
+    # 判定全部收在 analyze/comm.py 与 build_comm_section 里（那里把"对时长求和"拒绝掉）。
+    opt.comm = build_ledger(rep.memcpys,
+                            [l for k in rep.kernels for l in k.launches])
     dev_kr = KernelReport("(device)", launch_count=0)
     dev_sections = [build_device_kernel(opt)]
+    comm_sec = build_comm_section(opt)
+    if comm_sec is not None:
+        dev_sections.append(comm_sec)
     tel_sec = build_telemetry_section(opt)          # N7：平台已授权的遥测（可选）
     if tel_sec is not None:
         dev_sections.append(tel_sec)
@@ -1884,6 +1950,12 @@ def _protocol_meta(args: argparse.Namespace, peaks: Any, peak_gbs: float) -> dic
             "bw_gbs": round(float(peak_gbs), 3),
             "compute_tflops": (round(float(peaks.compute_tflops), 3)
                                if peaks is not None and peaks.compute_tflops else None),
+            # 两个分母都要露出来：compute_tflops 是**本次 dtype** 的实测峰值（roofline 分母），
+            # ceiling_tflops 是**同机任何 dtype** 的实测上限（只给"物理上不可能"守卫用）。
+            # 真机实测这两者能差 7.3 倍（RTX 2080 Ti：bf16 6.8 / fp16 49.4），只露一个数
+            # 会让人以为 roofline 用的是同机上限。
+            "ceiling_tflops": (round(float(peaks.ceiling_tflops), 3)
+                               if peaks is not None and peaks.ceiling_tflops else None),
         },
         "calibration": _calibration_identity(args.ks_calibration) if args.ks_calibration else None,
         # R-75：轨迹口径的**同一份轨迹**要能比对 —— 指纹 + 采集方式（完整标记）。

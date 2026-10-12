@@ -476,7 +476,8 @@ def run_doctor(probe_counters: bool = True) -> DoctorReport:
     r.backend_plan = plan
 
     r.advice = [
-        "首次使用先做一次机器标定：`uv run python tools/machine-profile.py --quick`，"
+        "首次使用先做一次机器标定：`kernoscope calibrate --quick`（源码 checkout 里等价于 "
+        "`uv run python tools/machine-profile.py --quick`），"
         "然后加 `--ks-calibration machine-profile.json` 得到可信 roofline"
         "（标定会同时记录累加口径与口径离散度；缺字段时 compute roof 会被拒绝，见 R-09）",
         "报告里出现 `n/a` 属预期：那是需要硬件计数器的指标，"

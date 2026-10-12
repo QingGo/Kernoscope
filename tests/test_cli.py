@@ -550,3 +550,48 @@ def test_plan_declares_the_repeat_run_and_its_output(tmp_path):
     ids = [i.op.id for i in plan.items]
     assert "repeat_runs" in ids, ids
     assert str(tmp_path / "rep.repeat.json") in plan.declared_writes(), plan.declared_writes()
+
+
+# ---------------------------------------------------------------------------
+# 第八轮 B-5′ / R-131：会**静默改变口径**的数值开关必须拒绝负值
+# ---------------------------------------------------------------------------
+# 实测（本轮复现）：`--launch-skip -1` 曾经 rc=0 静默接受 —— 用户以为跳过了第一次 launch，
+# 实际选择语义没变，而后续占比/耗时全部建立在另一个集合上。这类错不报错、看起来也不奇怪。
+# 范围是**有意收窄**的：只覆盖"负值会把结论改掉"的那批；价格/token 为负时结果是显式负数，
+# 人一眼能看出不对，归噪声（追 20 个开关的性价比不成立）。
+_NONNEG_FLAGS = [
+    ("-s", "--launch-skip"), ("--launch-skip-before-match", "-c"), ("--launch-count",),
+    ("--ks-peak-tflops",), ("--ks-peak-gbps",), ("--ks-flops",), ("--ks-bytes",),
+    ("--ks-ledger-mb",), ("--ks-ledger-total-mb",), ("--ks-warmup",),
+    ("--ks-window-s",), ("--ks-tokens",),
+]
+
+
+@pytest.mark.parametrize("flag", [f[0] for f in _NONNEG_FLAGS])
+def test_negative_values_are_rejected_for_caliber_changing_flags(flag, capsys):
+    from kernoscope.cli import build_parser
+
+    with pytest.raises(SystemExit) as e:
+        build_parser().parse_args([flag, "-1"])
+    assert (e.value.code or 0) == 2, f"{flag} 接受了负值"
+    err = capsys.readouterr().err
+    assert "error:" in err and flag in err, err[:200]
+
+
+def test_negative_gemm_shape_is_rejected_not_silently_garbage(capsys):
+    """`--ks-gemm` 的负形状会算出负 FLOPs ⇒ 静默变成不可能的百分比，必须在解析点拦。"""
+    import kernoscope.cli as cli
+
+    # 用 `=` 形式把负值喂进**我们的**解析点：空格形式 `--ks-gemm -8,8,8` 会被 argparse 自己
+    # 当成"选项缺参数"而先拒（rc=2，也是对的，但那测的是 argparse 不是我们的守卫）。
+    rc = cli.main(["--ks-gemm=-8,8,8", "--ks-synthetic", "--screen", "off"])
+    assert rc == 2
+    assert "--ks-gemm" in capsys.readouterr().err
+
+
+def test_valid_values_still_pass():
+    from kernoscope.cli import build_parser
+
+    args = build_parser().parse_args(["--launch-skip", "2", "--ks-window-s", "0.5",
+                                      "--ks-tokens", "4096"])
+    assert args.launch_skip == 2 and args.ks_window_s == 0.5 and args.ks_tokens == 4096.0

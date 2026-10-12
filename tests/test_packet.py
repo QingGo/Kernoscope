@@ -447,7 +447,7 @@ def test_packet_carries_schema_revision_and_actionable():
 
     p = build(_rich_report())
     assert p["schema_version"] == PACKET_SCHEMA_VERSION == 1     # 主版本不动
-    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.2"
+    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.3"
     ids = {v["id"] for v in p["verdicts"]}
     assert ids, "这个报告应当产出判词"
     for v in p["verdicts"]:
@@ -887,10 +887,20 @@ class _KK:
 
 
 class _KRep:
+    """测试用的报告夹具 —— **必须带真机式的设备名**（第八轮 X-25 / A-1′）。
+
+    原先这里是 `self.device = None`，于是这一整类测试都测不到真机路径：判词里凡是"有设备名
+    才走"的分支（例如设备级超峰的归属）在夹具上永远走另一条分支。真机上 `rep.device.name`
+    必然有值 —— 修复因此可能只是**测试形状**的（把夹具喂对就绿），而真机仍然坏。
+    所以设备名落在**共享工厂**里，并由 `test_report_fixtures_carry_a_real_device_name` 守着：
+    谁把它去掉，那条类级断言立刻红。
+    """
+
     def __init__(self, kernels):
         self.kernels = kernels
         self.meta = {}
-        self.device = None
+        self.device = DeviceInfo(name="NVIDIA GeForce RTX 4090",
+                                 compute_capability="8.9", sm_count=128)
         self.wall_time_ns = sum(k.total_ns for k in kernels)
         self.tool_version = "test"
         self.schema_version = 1
@@ -1260,6 +1270,39 @@ def test_conditional_answer_survives_the_packet_budget():
         trimmed = p["cost"].get("trimmed_ids") or []
         assert "facts_primary:cost_per_token" in trimmed, \
             f"facts 没了却查不到留痕：{p['cost'].get('trimmed')} / {trimmed}"
+
+
+def test_report_fixtures_carry_a_real_device_name():
+    """**类级**断言（第八轮 X-25）：报告夹具不许再退回"没有设备"。
+
+    事故形状：修复在"报告没有设备名"时成立，真机上不成立，而测试全绿 —— 因为整类测试
+    都建在 `_KRep` 上，而它当时把 `device` 设成了 `None`。所以这里盯住**工厂**，而不是某一条用例。
+    """
+    rep = _KRep([])
+    assert rep.device is not None, "夹具没有设备对象：整类测试都测不到真机路径"
+    assert str(getattr(rep.device, "name", "") or "").strip(), \
+        "夹具的设备没有名字：有设备名才走的分支在测试里永远不成立"
+
+
+def test_device_level_over_peak_propagates_on_a_real_machine_report():
+    """R-125 / A-1′ 的最小复现，固化成永久用例。
+
+    评审给的复现就是"给报告一个真机式设备名"：此时 `over_peak` 的归属必须是**未知归属**，
+    否则 `_same_owner` 拿设备名与真 kernel 名比较 ⇒ 传播断掉 ⇒ 一个**物理上不可能**的达成率
+    留在 `soft/actionable=True`（而 `soft` 是可以当依据的）。
+    """
+    from kernoscope.packet import build
+
+    dev = _KK("(device)", 1_000_000, [_KSec("SpeedOfLight", [
+        _KM("ks__over_peak_warning", 1.0, "", "derived")])])
+    rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=False)
+    rep.device = DeviceInfo(name="NVIDIA GeForce RTX 4090")
+    rep.kernels.append(dev)
+    by_id = {v["id"]: v for v in build(rep)["verdicts"]}
+    assert by_id["over_peak"]["facts"]["kernel"] == "(device)"
+    assert by_id["roofline"]["status"] == "refused", \
+        f"设备级超峰没有传播（物理上不可能的达成率被放行）：{by_id['roofline']}"
+    assert by_id["roofline"]["actionable"] is False
 
 
 def test_device_level_over_peak_poisons_the_kernel_roofline_conservatively():

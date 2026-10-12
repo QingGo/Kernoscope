@@ -183,3 +183,28 @@ def test_route_never_measures():
     src = inspect.getsource(m)
     for forbidden in ("subprocess", "run_profile", "Sampler(", "sampler."):
         assert forbidden not in src, f"route 里出现了 {forbidden} —— 它必须只输出计划"
+
+
+def test_empty_question_is_a_usage_error_on_stderr(capsys):
+    """第八轮 B-4′：空问题是一条**用法错误**，必须与 argparse 同形。
+
+    旧实现 `build_parser().print_help()` 把 504 B usage 打到 **stdout**、stderr 空、rc=2：
+    ① `route "" | ...` 会把 help 当成路由结果读走；
+    ② `--json` 时 stdout 不是 JSON，agent 解析直接炸（而 agent 是这个入口的主要消费者）。
+    契约：usage 与 `error:` 都进 stderr；`--json` 时 stdout 必须是可解析的 JSON。
+    """
+    import json as _json
+
+    from kernoscope.route_cmd import route_main
+
+    rc = route_main([""])
+    out, err = capsys.readouterr()
+    assert rc == 2
+    assert out == "", f"stdout 不该混入 usage：{out[:80]!r}"
+    assert "usage:" in err and "error:" in err, err[:200]
+
+    rc = route_main(["--json", ""])
+    out, err = capsys.readouterr()
+    assert rc == 2
+    payload = _json.loads(out)                      # 必须是合法 JSON，否则抛
+    assert payload["rc"] == 2 and payload["error"]

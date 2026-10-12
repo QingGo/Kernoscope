@@ -21,6 +21,6 @@ ncu 只能报 `ERR_NVGPUCTRPERM`。Kernoscope 用"换物理观测量"的方式�
     kernoscope --strict -k regex:gemm -- python train.py    # 缺数据即失败，供 CI 卡门
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = ["__version__"]

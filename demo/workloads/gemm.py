@@ -41,12 +41,22 @@ def main() -> None:
         step()
     torch.cuda.synchronize()
 
+    # 计时循环里**必须分批同步**（真机实测，RTX 2080 Ti / 2026-10-12）：`time.time()` 量的是
+    # CPU 入队时间，不是 GPU 时间。原实现只在循环外同步一次，于是 3 秒里入队了 1042 次 8192³
+    # bf16 GEMM（该卡上 bf16 走 fp32 路径，一次 150 ms ⇒ 166.7 s 的 GPU 工作），
+    # `synchronize()` 把这堆积压等完，标称 3 s 的场景实跑 166.7 s —— **慢 55 倍**。
+    # 分批（而不是每次同步）是为了少切碎窗口：一次同步只留一个入队气泡。
+    SYNC_EVERY = 4
+
     t0 = time.time()
     n = 0
-    while time.time() - t0 < SECONDS:
-        step()
-        n += 1
-    torch.cuda.synchronize()
+    while True:
+        for _ in range(SYNC_EVERY):
+            step()
+            n += 1
+        torch.cuda.synchronize()
+        if time.time() - t0 >= SECONDS:
+            break
     elapsed = time.time() - t0
     flops = 2.0 * M * N * K * n
     print(f"[demo] iters={n} elapsed={elapsed:.2f}s 实测 {flops / elapsed / 1e12:.1f} TFLOP/s")

@@ -87,6 +87,8 @@ class RefusalCode(str, Enum):
     PROTOCOL_MISMATCH = "protocol_mismatch"    # 两次运行协议不同，不可比
     BOTH_REFUSED = "both_refused"              # 两次运行都被同一个前提挡住：没有数字可比
     PREMISE_FAILED = "premise_failed"          # 判词自己的前提之一不成立（值因此不能引用）
+    MULTI_DEVICE_AGGREGATE = "multi_device_aggregate"  # 采集跨了多张卡，单卡口径的问题答不了
+    MEMCPY_DURATION_UNTRUSTED = "memcpy_duration_untrusted"  # 拷贝时长逐行不可信，拒绝求和
     METRIC_ABSENT = "metric_absent"            # 请求的指标不在报告/包里
     LEGACY_REPORT = "legacy_report"            # 旧报告没有结构化拒绝信息
     INTERNAL_UNKNOWN = "internal_unknown"      # 兜底：未分类的拒绝（出现即为 bug 信号）
@@ -148,6 +150,8 @@ CODE_TITLES: dict["RefusalCode", str] = {
     RefusalCode.PROTOCOL_MISMATCH: "两次运行的协议不同，不可比",
     RefusalCode.BOTH_REFUSED: "两侧都被同一个前提挡住，没有数字可比",
     RefusalCode.PREMISE_FAILED: "判词的前提之一不成立（数字不可引用）",
+    RefusalCode.MULTI_DEVICE_AGGREGATE: "本次采集跨了多张卡：单卡口径的问题答不了",
+    RefusalCode.MEMCPY_DURATION_UNTRUSTED: "拷贝 activity 的时长逐行不可信：拒绝求和当传输时间",
     RefusalCode.METRIC_ABSENT: "请求的指标不存在",
     RefusalCode.LEGACY_REPORT: "旧报告没有结构化拒绝信息",
     RefusalCode.INTERNAL_UNKNOWN: "未分类的拒绝（属于本工具缺陷）",
@@ -371,12 +375,12 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         then_answers=("ledger_verdict",)),
     RefusalCode.NO_CALIBRATION: Remedy(
         "跑一次本机标定并把结果传进来（roofline 与 DRAM 代理都依赖它）",
-        command="python tools/machine-profile.py --out machine-profile.json", cost_s=300.0,
+        command="kernoscope calibrate --out machine-profile.json", cost_s=300.0,
         then_answers=("dram_bytes", "roofline")),
     RefusalCode.CALIBRATION_CALIBER_MISMATCH: Remedy(
         "标定口径与本次测量不可比（例如 fp32 用 reduced-precision reduction 跑出来的峰值）："
         "重跑标定并让口径一致",
-        command="python tools/machine-profile.py --quick", cost_s=300.0,
+        command="kernoscope calibrate --quick", cost_s=300.0,
         then_answers=("roofline",)),
     RefusalCode.NO_WORKLOAD: Remedy(
         "给出每次 launch 的工作量：--ks-gemm M,N,K 或 --ks-flops/--ks-bytes",
@@ -428,6 +432,14 @@ DEFAULT_REMEDIES: dict[RefusalCode, Remedy] = {
         "两次比较必须同协议：同标定文件、同窗口模式、同工具版本、同 kernel 选择；"
         "协议不同时我们拒绝给方向判词（宁可说不可比）",
         cost_s=0.0),
+    RefusalCode.MEMCPY_DURATION_UNTRUSTED: Remedy(
+        "字节仍然可信（逐行相加就是真值）；单次时长只能按 `(copyKind, bytes)` 组取 MAX，"
+        "或用行间 gap 反推 —— 本报告给的就是 MAX 口径",
+        command="kernoscope --ks-sqlite <trace.sqlite>", cost_s=0.0),
+    RefusalCode.MULTI_DEVICE_AGGREGATE: Remedy(
+        "按卡分开看：`--devices <id>` 只留一张卡的口径；"
+        "「两张卡各干了多少」看 Devices section 的分段（那不需要筛选）",
+        command="kernoscope --devices 0 ...", cost_s=0.0),
     RefusalCode.METRIC_ABSENT: Remedy(
         "用 --json 看本次报告里实际存在哪些指标，或用 `kernoscope capabilities --json` "
         "看哪些问题能答（不存在 ≠ 被拒）",

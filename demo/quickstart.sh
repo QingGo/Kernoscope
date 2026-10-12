@@ -189,7 +189,7 @@ for scene in "${SCENES[@]}"; do
          --screen only -o "$OUT/rep-${scene}.json" \
          --html "$OUT/rep-${scene}.html" \
          --packet "$OUT/packet-${scene}.json" \
-         -- "$PY" "$wf" >"$OUT/onepage-${scene}.txt" 2>"$OUT/run-${scene}.err"
+         -f -- "$PY" "$wf" >"$OUT/onepage-${scene}.txt" 2>"$OUT/run-${scene}.err"
   rc=$?
   if [ "$rc" != "0" ]; then
     bad "场景 ${scene} 失败（rc=${rc}）：见 ${OUT}/run-${scene}.err"

@@ -52,12 +52,20 @@ def main() -> None:
         step()
     torch.cuda.synchronize()
 
+    # 计时循环里**必须分批同步**：`time.time()` 量的是 CPU 入队时间，不是 GPU 时间。
+    # 只在循环外同步时，慢卡上入队的积压会把标称 3 s 的场景拉长数倍
+    # （同目录 gemm.py 在 RTX 2080 Ti 上实测 3 s → 166.7 s；本文件约 3 s → 11.2 s）。
+    SYNC_EVERY = 4
+
     t0 = time.time()
     n = 0
-    while time.time() - t0 < SECONDS:
-        step()
-        n += 1
-    torch.cuda.synchronize()
+    while True:
+        for _ in range(SYNC_EVERY):
+            step()
+            n += 1
+        torch.cuda.synchronize()
+        if time.time() - t0 >= SECONDS:
+            break
     elapsed = time.time() - t0
     print(f"[demo] steps={n} tokens={n * BATCH * SEQ} elapsed={elapsed:.2f}s "
           f"({n / elapsed:.1f} step/s)")

@@ -311,7 +311,21 @@ def route_main(argv: list[str]) -> int:
         return 0
     question = " ".join(args.question).strip()
     if not question:
-        build_parser().print_help()
+        # 第八轮 B-4′：空问题是一条**用法错误**，要与 argparse 的用法错误同形 ——
+        # usage 与 `error:` 都进 **stderr**，rc=2。旧实现 `print_help()` 把 504 B usage 打到
+        # **stdout**、stderr 空，于是：① `route "" | ...` 会把 help 当成路由结果；
+        # ② `--json` 时 stdout 不是 JSON，agent 解析直接炸。
+        # `--json` 下 stdout 必须是可解析的 JSON，所以给一个显式错误信封。
+        if args.json:
+            print(json.dumps({
+                "error": "用法错误：route 需要一个非空的问题",
+                "hint": "kernoscope route <问题>；用 `--list` 列出全部可路由的问题",
+                "rc": 2,
+            }, ensure_ascii=False, indent=2))
+        else:
+            build_parser().print_help(sys.stderr)
+            print("error: route 需要一个非空的问题（想列出全部问题用 `route --list`）",
+                  file=sys.stderr)
         return 2
     env = None
     if args.probe:

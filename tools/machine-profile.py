@@ -387,14 +387,27 @@ def _caliber_name(dt) -> str:
     return "bf16 (fp32 accumulate)"
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def build_parser() -> argparse.ArgumentParser:
+    """标定的开关表（**唯一真源**）。
+
+    抽出来是为了让装出来的包也能按同一套开关调用：`kernoscope calibrate` 借这个解析器
+    暴露 `--help` 与开关校验（见 `src/kernoscope/calibrate_cmd.py`），而不是另抄一份开关表
+    —— 两份开关表一定会漂。
+    """
+    ap = argparse.ArgumentParser(
+        prog="kernoscope calibrate",
+        description="测出这台机器的可达峰值（带宽 + 各 dtype 的 matmul 峰值 + 累加口径），"
+                    "供 `--ks-calibration` 当作 roofline 的分母。")
     ap.add_argument("--quick", action="store_true", help="快速版（小尺寸，约 15s）")
     ap.add_argument("--out", default="machine-profile.json",
                     help="输出 JSON 路径（默认 ./machine-profile.json；含目录时自动创建）")
     ap.add_argument("--no-caliber-probe", action="store_true",
                     help="跳过累加口径探针（省时间；产物将缺 caliber_spread_pct）")
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     _require_torch()
     props = torch.cuda.get_device_properties(0)
@@ -449,7 +462,8 @@ def main():
           "-k regex:<kernel> -- <bench>" % args.out)
     print("口径提示：被测 matmul 的累加口径（fp32/fp16 acc）必须与产物里的 acc_caliber 一致；"
           "标定缺少该字段时 kernoscope 会拒绝用它算 roofline 拐点（R-09）。")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

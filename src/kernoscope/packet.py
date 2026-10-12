@@ -45,7 +45,9 @@ PACKET_SCHEMA_VERSION = 1
 # v1.1（追加式，向后兼容）：加 `actionable` 与 `schema_revision`。主版本不动是因为
 # **读 v1.0 包的代码仍然能读 v1.1**：新字段是"多给一条已经能推出来的结论"，不是改语义。
 # 改了语义才升 PACKET_SCHEMA_VERSION（那时 `from_dict` 要按版本分支，并写进 CHANGELOG）。
-PACKET_SCHEMA_REVISION = "1.2"
+# v1.3（追加式）：加两条拒绝码 `multi_device_aggregate` / `memcpy_duration_untrusted`，
+#   以及 `kernel_time` 判词在跨卡采集时多出的 `device_ids` 事实 —— 读 v1.2 包的代码仍能读 v1.3。
+PACKET_SCHEMA_REVISION = "1.3"
 PACKET_SIZE_BUDGET_BYTES = 4096          # 默认包的尺寸预算（测试守着，防止再长成 150 MB）
 UNMEASURED_EXAMPLES_PER_CODE = 2
 MAX_UNMEASURED_GROUPS = 6                 # 归组之后仍然只默认给前 6 组
@@ -303,6 +305,17 @@ def _prov(rep: Any, name: str) -> str:
     return m.provenance.value if m is not None else ""
 
 
+def _device_ids(rep: Any) -> list[int]:
+    """本次采集出现过的 deviceId（CUPTI 的 `deviceId` 列）。
+
+    真机实测（2×2080 Ti / 2026-10-12，真实双卡 NCCL 轨迹）：990 次 launch 是 495×2、
+    3126.471 ms 是两张卡之和，而一屏原来**一个字都不提**。按本项目的纪律，把跨卡加总
+    当成"进程内 kernel 时间合计"报出来正是平时会拒绝的口径混用，所以它要出现在人话里。
+    """
+    getter = getattr(rep, "observed_device_ids", None)
+    return list(getter()) if callable(getter) else []
+
+
 def _ms(ns: float) -> float:
     return round(ns / 1e6, 3)
 
@@ -330,11 +343,18 @@ def _verdict_kernel_time(rep: Any) -> Verdict | None:
     if wall:
         premises.append(Premise("kernel_time_pct_of_wall",
                                 round(100.0 * total / wall, 1), unit="%"))
+    facts: dict[str, Any] = {"top": top.name, "top_ms": _ms(top.total_ns),
+                             "launches": top.launch_count,
+                             "share_pct": round(share, 1), "total_ms": _ms(total),
+                             "n_kernels": len(kernels)}
+    # 跨卡采集：次数与时长是**跨卡加总**，这个事实必须进 facts —— 人话视图
+    # （`phrase_verdict`）只从 facts 生成，写进 `claim` 等于没写（包不存散文）。
+    dev_ids = _device_ids(rep)
+    if len(dev_ids) > 1:
+        facts["device_ids"] = dev_ids
     return Verdict(
         id="kernel_time", question="哪个 kernel 最耗时、每次跑多久", status=OK,
-        facts={"top": top.name, "top_ms": _ms(top.total_ns), "launches": top.launch_count,
-               "share_pct": round(share, 1), "total_ms": _ms(total),
-               "n_kernels": len(kernels)},
+        facts=facts,
         value=_ms(top.total_ns), unit="ms",
         provenance=_prov(rep, "gpu__time_duration.sum") or "exact", premises=premises,
         metrics=("gpu__time_duration.sum", "ks__launch_time_mean"),
@@ -991,7 +1011,14 @@ def _verdict_over_peak(rep: Any) -> Verdict | None:
         return Verdict(
             id="over_peak", question="达成值是否超过标定峰值（物理上不可能）", status=REFUSED,
             facts={"kernel": "(device)"},
-            owner_key=str(getattr(getattr(rep, "device", None), "name", "") or "(device)"),
+            # R-125（第八轮 A-1′）：这里**必须**给"没有归属"，不能给设备名。
+            # 设备名不是 kernel 身份 —— 把 `RTX 4090` 当 owner 会让 `_same_owner` 拿它与真 kernel 名
+            # （如 `cheap_kernel`）比较，两者既非空也不是 `(device)` ⇒ 判"不是同一个 kernel" ⇒
+            # **传播链断掉**，于是设备级超峰（物理上不可能的达成率）留在 `soft/actionable=True`。
+            # 真机路径上 `rep.device.name` 一定有值，所以这个洞只在真机出现；测试夹具当时用的是
+            # `device = None`，所以它测不到 —— 夹具侧已同步修（`_KRep` 现在带真机式设备名，
+            # 并有类级断言守着，见 `tests/test_packet.py`）。
+            owner_key="(device)",
             premises=[Premise("over_peak", 1.0, None, False)],
             refusal=Refusal(RefusalCode.CALIBRATION_CALIBER_MISMATCH,
                             (m.note if m is not None else "") or "achieved > measured peak"),
@@ -2008,9 +2035,16 @@ def _phrase_verdict_impl(v: dict[str, Any], index: dict[str, dict[str, Any]]) ->
         cond = _conditional_phrase(f)
         return f"{line}；{cond}" if cond else line
     if fid == "kernel_time":
-        return (f"最耗时的是 {f.get('top', '?')}（{f.get('top_ms')} ms / {f.get('launches')} 次，"
+        line = (f"最耗时的是 {f.get('top', '?')}（{f.get('top_ms')} ms / {f.get('launches')} 次，"
                 f"占 kernel 时间 {f.get('share_pct')}%），进程内 kernel 时间合计 "
                 f"{f.get('total_ms')} ms")
+        devs = f.get("device_ids") or []
+        if len(devs) > 1:
+            # 一屏是绝大多数人唯一会读的东西：跨卡加总必须在这里被说出来
+            line += (f"；**跨了 {len(devs)} 张卡（deviceId "
+                     f"{', '.join(str(d) for d in devs)}）：上面的次数与时长是跨卡加总**，"
+                     f"不是单卡口径（单卡口径用 `--devices <id>`）")
+        return line
     if fid == "dram_bytes":
         return f"整窗口 DRAM 约 {_bytes_phrase(v)}（代理口径：NVML 显存忙碌 × 本机实测峰值）"
     if fid == "dram_bytes_per_launch":
