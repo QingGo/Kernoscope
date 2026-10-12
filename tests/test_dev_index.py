@@ -150,7 +150,7 @@ def test_runner_python_prefers_uv_and_falls_back_when_missing(monkeypatch):
 
 
 def test_run_gates_without_uv_never_invokes_uv(monkeypatch):
-    """行为级断言：没有 uv 时，9 条门禁命令里**一条**都不该再提 uv。"""
+    """行为级断言：没有 uv 时，10 条门禁命令里**一条**都不该再提 uv。"""
     import shutil
     import sys
 

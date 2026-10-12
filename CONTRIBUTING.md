@@ -43,6 +43,7 @@ uv run python tools/dev_index.py --gates
 | `tasks` | `uv run python eval/make_tasks.py --check` | ≈0.1 s | 评测任务材料与 packet.build() 同源 |
 | `calib` | `uv run python tools/gen_calibration_excerpt.py --check` | ≈0.1 s | CALIBRATION.md 的产物节选与最新产物同源 |
 | `sanitize` | `uv run python bench/sanitize_artifacts.py bench/artifacts --check` | ≈0.2 s | 入库产物已脱敏 |
+| `release` | `uv run python tools/release_bump.py --check` | ≈1 s | 四处版本号自洽（pyproject / __version__ / README / CHANGELOG） |
 | `build` | `uv build` | ≈1.1 s | sdist + wheel 能生成 |
 
 <!-- dev-index:end -->

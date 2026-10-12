@@ -171,7 +171,7 @@ def test_ci_gate_rejects_a_command_that_only_mentions_the_gates(tmp_path):
 
 #: 期望的门禁清单（顺序无关）。加/删门禁必须同时改这里 —— 这就是"有意变更"的凭据。
 EXPECTED_GATES = frozenset({"pytest", "coverage", "agentrefs", "playbook", "index", "tasks",
-                            "calib", "sanitize", "build"})
+                            "calib", "sanitize", "release", "build"})
 
 
 def test_gate_list_is_exactly_the_expected_one():

@@ -63,6 +63,8 @@ GATES = [
          "CALIBRATION.md 的产物节选与最新产物同源"),
     Gate("sanitize", "uv run python bench/sanitize_artifacts.py bench/artifacts --check", 0.2,
          "入库产物已脱敏"),
+    Gate("release", "uv run python tools/release_bump.py --check", 1.0,
+         "四处版本号自洽（pyproject / __version__ / README / CHANGELOG）"),
     Gate("build", "uv build", 1.1, "sdist + wheel 能生成"),
 ]
 GATE_BY_KEY = {g.key: g for g in GATES}
@@ -266,7 +268,7 @@ def write_block() -> None:
 def _gate_cmd(cmd: str, *, python: str | None = None) -> str:
     """把门禁命令里的 `uv run` 换成给定解释器（**只在没有 uv 时**用）。
 
-    为什么（第七轮 X-2）：9 条门禁全部硬编码 `uv run …`，而**租来的 GPU 机器**（正是 NVBit 冒烟、
+    为什么（第七轮 X-2）：10 条门禁全部硬编码 `uv run …`，而**租来的 GPU 机器**（正是 NVBit 冒烟、
     真 nsys/ncu 用例唯一有分辨力的环境）通常没有 `uv` —— 那时 `--gates` 是 0/9，等于"提交前跑一遍
     门禁"这条工作流在目标机器上不可用。CI 仍然用 `uv run`（不变），这里的回退只影响本机调用。
     `uv build` 没有解释器等价物，回退时改成 `python -m build`（缺 build 就如实失败）。
