@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### 发布链自动化（第一步）：`tools/release_bump.py` —— 一处命令、四处同步
+
+0.2.1 发布时踩到的摩擦：版本号在仓库里有**四处**（`pyproject.toml`、`__init__.py` 的
+`__version__`、README 的"已发布版本"、`CHANGELOG.md` 的版本段），漏一处就有门禁变红
+（那条门禁是对的），我为此刻意来回改了两次。现在：
+
+    python tools/release_bump.py 0.2.1 --title "补丁级：…"   # 四处一起改 + Unreleased 落段
+    python tools/release_bump.py --check                     # CI 可跑：四处是否自洽
+
+并**守住仓库的版本约定**：只允许升末位（patch）；要升中位/首位必须显式 `--allow-minor` /
+`--allow-major`（强迫在 CHANGELOG 里写清为什么）。有 4 条测试钉住（含"幂等"与"dry-run 不落盘"）。
+
 ### bench 产物裁剪：只留可入库的那几份（`bench/prune_artifacts.py`）
 
 `bench/run.sh` 现在在脱敏前先裁剪：真机实测 `--quick` 一次会写出 **1.3 GB**（`.nsys-rep`、
