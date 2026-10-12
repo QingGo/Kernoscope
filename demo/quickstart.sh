@@ -109,7 +109,8 @@ print(find('ncu') or '')
   else
     say "  找到 ncu：${NCU}"
     say "  跑一次最小采集（--set basic，1 次 launch）——这是 ncu 自己的输出："
-    "$NCU" --set basic --launch-count 1 \
+    # 只为**拿到 ncu 的报错**，所以用 0.5 秒的小负载就够（默认 3 秒是给分析的，不必在这里付）
+    DEMO_SECONDS=0.5 "$NCU" --set basic --launch-count 1 \
       -- "$PY" "${ROOT}/demo/workloads/${SCENES[0]}.py" >"$OUT/ncu.out" 2>"$OUT/ncu.err"
     ncu_rc=$?
     say "  ncu rc=${ncu_rc}"
@@ -244,8 +245,10 @@ mkdir -p "$OUT/bin"
 # 正文里写 `` `argv[0]` `` 这种说明文字会被真的当命令执行（真机实测：`argv[0]: command not found`）。
 # 所以正文里不做任何展开，源码树路径改成**运行时**从环境变量读。
 export KS_DEMO_SRC="${ROOT}/src"
-cat > "$OUT/bin/ncu" <<'PYEOF'
-#!/usr/bin/env python
+# shebang 必须写**当前这个解释器的绝对路径**：真机实测 `#!/usr/bin/env python` 会 rc=127
+# （那台容器的 PATH 里没有 `python`，只有 /root/miniconda3/bin/python3）。
+printf '#!%s\n' "$PY" > "$OUT/bin/ncu"
+cat >> "$OUT/bin/ncu" <<'PYEOF'
 """把 Kernoscope 当成 ncu 用（等价于 README §4.1 的 `ln -s $(which kernoscope) ~/bin/ncu`）。
 
 兼容模式按 argv[0] 的基名判断是不是 ncu —— 所以 shim 里显式把它设成 "ncu"。
@@ -262,13 +265,16 @@ raise SystemExit(main())
 PYEOF
 chmod +x "$OUT/bin/ncu"
 say "  ① CLI 兼容：ncu 风格调用（argv[0]=ncu 自动进兼容模式；未知开关会明确报错）"
-"$OUT/bin/ncu" --set basic --screen off -- "$PY" "${ROOT}/demo/workloads/${SCENES[0]}.py" \
+# 用 `--ks-synthetic` 演示**开关兼容**（1 秒内），不重复跑真负载 —— 真负载已经在第三幕跑过了
+"$OUT/bin/ncu" --set basic --ks-synthetic --screen off -- true \
   >"$OUT/ncu-compat.out" 2>"$OUT/ncu-compat.err"
 say "     rc=$? ；报告字节=$(wc -c <"$OUT/ncu-compat.out" | tr -d ' ')"
 grep -iE "兼容|ncu" "$OUT/ncu-compat.err" | head -2 | sed 's/^/     /'
 say "  ② 产物兼容：导出合法 .ncu-rep + 署名（哪些表是同源真值、哪些是替代口径）"
-KS_RUN --ks-calibration "$OUT/machine-profile.json" --export-ncu-rep "$OUT/rep.ncu-rep" \
-       --screen off -- "$PY" "${ROOT}/demo/workloads/${SCENES[0]}.py" >/dev/null 2>"$OUT/export.err"
+# 复用第三幕已经产出的报告（回读模式），而不是把负载再跑一遍：demo 的每一秒都该花在
+# "展示能力"上，不是花在重复采集上（实测：跑一遍真负载 ≈ 9 秒 + nsys ≈ 2 秒）。
+KS_RUN -i "$OUT/rep-${SCENES[0]}.ksreport.json" --export-ncu-rep "$OUT/rep.ncu-rep" \
+       >/dev/null 2>"$OUT/export.err"
 say "     rc=$? ；.ncu-rep=$(wc -c <"$OUT/rep.ncu-rep" 2>/dev/null | tr -d ' ') B"
 head -8 "$OUT/rep.ncu-rep.ATTRIBUTION.txt" 2>/dev/null | sed 's/^/     /'
 say "     提醒：我们写的是**合法** .ncu-rep，但每个量的出处写在署名里 —— 同源真值走 ncu 名下，"
