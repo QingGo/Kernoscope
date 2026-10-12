@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### bench 产物裁剪：只留可入库的那几份（`bench/prune_artifacts.py`）
+
+`bench/run.sh` 现在在脱敏前先裁剪：真机实测 `--quick` 一次会写出 **1.3 GB**（`.nsys-rep`、
+`.sqlite`、几十 MB 的完整报告），而仓库里**已登记的 5 份产物只有 968 K–2.0 M**、且只有
+`.txt/.err/.json/.log/.csv` 与两个无后缀文件 —— 那 5 份就是裁剪规则的**标准答案**：
+`python bench/prune_artifacts.py bench/artifacts/*/ --check` 必须一个文件都不删（有测试钉住）。
+
+保留：登记的文本/JSON/CSV/日志，**包括 `*.packet.json`（决策包，几 KB，是判词形状的证据）**；
+丢弃：`.nsys-rep`/`.sqlite`/`.ncu-rep`/完整报告（`*.ksreport.json`）/`.perfetto.json`/cubin 等中间件，
+外加"单个文件 > 8 MB"的兜底（会打印出来 —— 登记惯例里没有这种体量的文件）。
+
+**下一步（发 0.2.1 需要）**：把那次在 4090 上用 0.2.1 跑出来的产物（现留在已关机的容器盘上）
+裁剪成可入库的一份，登记进 `bench/artifacts/`，再打 tag。
+
 （下一版计划：处方传播链、NVBit 探针真机结论、demo、真机文案修复已在此。**发布 0.2.1 前需要一份
 **由当前版本产生**的 `bench/artifacts/` 产物**：`bench/run.sh --quick` 会写出 ~1.3 GB 原始文件，
 必须先按仓库规矩裁剪/登记再入库 —— `test_doc_artifact_consistency` 会拦住旧版本产物。）

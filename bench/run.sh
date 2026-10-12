@@ -8,6 +8,7 @@
 #
 # 用法（在 **有 GPU 的机器**上，仓库根目录）：
 #   bash bench/run.sh                     # 全量（约 3–6 分钟 GPU 时间）
+#   产物先经 bench/prune_artifacts.py 裁剪（只留可入库的那几份，KB–MB 级），再脱敏。
 #   bash bench/run.sh --quick             # 快速版（更短的稳态循环 / 跳过标定）
 #   OUTDIR=bench/artifacts bash bench/run.sh
 #
@@ -526,6 +527,10 @@ fi
 
 # ------------------------------------------------- 9.5) 脱敏（提交前就该是干净的）
 # 路径规则按**本仓库的位置**生成，所以脚本里不出现任何平台路径。
+# 先裁剪再脱敏：**不裁的话这一次会留下 ~1.3 GB 中间件**（`.nsys-rep`/`.sqlite`/完整报告），
+# 既进不了仓库、也会把产物门禁搅乱（真机实测）。保留规则与"已登记产物到底有什么"一致：
+# 见 bench/prune_artifacts.py（它的 `--check` 拿仓库里已登记的那几份当标准答案）。
+"$PY" bench/prune_artifacts.py "$HOSTDIR" || true
 "$PY" bench/sanitize_artifacts.py "$HOSTDIR" --repo-path "$ROOT" || true
 record sanitize $?
 
