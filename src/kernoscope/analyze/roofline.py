@@ -187,6 +187,20 @@ class SpeedOfLight:
         return 100.0 * self.achieved_tflops / c if c else 0.0
 
     @property
+    def dtype_peak_exceeded(self) -> bool:
+        """达成值是否超过**本次 dtype 的实测峰值**（超过容差）。
+
+        R-138：`over_peak` 用的是**同机任何 dtype 的上限**（避免峰值取小而误报），
+        但被报给读者的 `pct_compute` 用的是**本 dtype 峰值**。两者在 16 位相差悬殊的机器上
+        能差数倍，于是会出现"报 294%、守卫却放绿"的窗口：本 dtype 物理上不可能，而同机上限内可能。
+        这一档不能静默 —— 它意味着**这个 kernel 走的不是本 dtype 的路径**
+        （例如 bf16 请求在 Turing 上实际跑 fp16/fp32 路径），百分比因此不能当达成率读。
+        """
+        if not self.peaks.compute_tflops:
+            return False
+        return self.pct_compute > 100.0 + self.PEAK_EXCEED_TOLERANCE_PCT
+
+    @property
     def pct_memory(self) -> float:
         return 100.0 * self.achieved_gbs / self.peaks.bandwidth_gbs if self.peaks.bandwidth_gbs else 0.0
 

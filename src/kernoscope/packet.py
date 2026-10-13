@@ -47,7 +47,9 @@ PACKET_SCHEMA_VERSION = 1
 # 改了语义才升 PACKET_SCHEMA_VERSION（那时 `from_dict` 要按版本分支，并写进 CHANGELOG）。
 # v1.3（追加式）：加两条拒绝码 `multi_device_aggregate` / `memcpy_duration_untrusted`，
 #   以及 `kernel_time` 判词在跨卡采集时多出的 `device_ids` 事实 —— 读 v1.2 包的代码仍能读 v1.3。
-PACKET_SCHEMA_REVISION = "1.3"
+# v1.4（追加式）：`roofline` 多一条不满足前提 `dtype_peak_exceeded`（达成值超过本 dtype 峰值）；
+#   通信账本把"没采到拷贝活动""NULL 字段""时长 ≤ 0""超过物理上界"都改成显式 `n/a`。
+PACKET_SCHEMA_REVISION = "1.4"
 PACKET_SIZE_BUDGET_BYTES = 4096          # 默认包的尺寸预算（测试守着，防止再长成 150 MB）
 UNMEASURED_EXAMPLES_PER_CODE = 2
 MAX_UNMEASURED_GROUPS = 6                 # 归组之后仍然只默认给前 6 组
@@ -61,6 +63,8 @@ STATUSES = (OK, SOFT, REFUSED)
 # 前提的可读标签是**静态**的（同一 id 每次一样），所以不进包：渲染时查这张表。
 # 前提 id → 它不成立时该报哪个 code（拒绝必须可编程：让人知道去修哪一条）
 PREMISE_CODES: dict[str, RefusalCode] = {
+    # R-138：超过本 dtype 峰值 ⇒ 标定口径与本次测量不可比（这个 kernel 走了别的路径）
+    "dtype_peak_exceeded": RefusalCode.CALIBRATION_CALIBER_MISMATCH,
     "window_coverage_pct": RefusalCode.COVERAGE_TOO_LOW,
     "matched_kernel_kernel_share_pct": RefusalCode.SHARE_TOO_LOW,
     "kernel_time_pct_of_wall": RefusalCode.PREMISE_FAILED,
@@ -74,6 +78,8 @@ PREMISE_CODES: dict[str, RefusalCode] = {
 }
 
 PREMISE_LABELS: dict[str, str] = {
+    # R-138：分母拆成【本 dtype 峰值】与【同机上限】后出现的中间档
+    "dtype_peak_exceeded": "达成值是否超过本次 dtype 的实测峰值（超过则这个百分比不能当达成率读）",
     "kernel_share_of_total": "该 kernel 占全部 kernel 时间的比例",
     "kernel_time_pct_of_wall": "kernel 时间占进程 wall 的比例",
     "window_coverage_pct": "窗口是否被被测负载主导",
@@ -110,7 +116,8 @@ VERDICT_PREMISES: dict[str, tuple[str, ...]] = {
     "dram_bytes_trace": ("trace_vs_nvml_pct",),
     "ledger_verdict": (),          # 继承 `dram_bytes_per_launch` 的前提（见生成器的说明列）
     "occupancy": (),
-    "roofline": (),
+    # R-138：分母拆成【本 dtype 峰值】与【同机上限】后出现的中间档 —— 它是一条**不满足**的前提
+    "roofline": ("dtype_peak_exceeded",),
     "issue_slot": (),
     "l2_locality": (),
     "over_peak": ("over_peak",),
@@ -545,10 +552,19 @@ def _verdict_roofline(rep: Any) -> Verdict | None:
         nxt = "compute bound → 查指令混合与发射槽利用率上界（--ks-instr-hist）"
     else:
         nxt = "先确认工作量输入与标定口径，再看达成率"
+    # R-138：分母拆成【本 dtype 峰值】与【同机上限】之后出现的中间档必须显式成前提 ——
+    # 否则判词会给一个 `294%` 而且 `gate --require-actionable roofline` 放绿。
+    premises = []
+    dtype_warn = (metric_value_in(owner, "ks__dtype_peak_exceeded_warning")
+                  if owner is not None else None)
+    if dtype_warn:
+        premises.append(Premise("dtype_peak_exceeded", 1.0, None, False))
+        bits.append("**达成率超过本 dtype 峰值**：这条比率不能当达成率读（见前提）")
     return Verdict(
         id="roofline", question="离 roofline 多远、compute 还是 memory bound", status=SOFT,
         facts=facts, value=eff, unit="%", provenance="estimated",
         owner_key=_owner_key_for(rep, owner) if owner is not None else "",
+        premises=premises,
         metrics=("est__bound", "est__roofline_efficiency_pct", "est__achieved_gbs"),
         next=nxt, claim="；".join(str(b) for b in bits))
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -43,12 +44,23 @@ END = "<!-- dev-index:end -->"
 # 声明的实测值，用来让 agent 能规划，不是精确基准）。
 # --------------------------------------------------------------------------
 class Gate:
-    def __init__(self, key: str, cmd: str, cost_s: float, what: str):
+    """一条门禁。
+
+    `needs` 是**依赖探针**（任一可用即可；全缺 ⇒ 这条**无法判定**）：形如 `cmd:uv`（PATH 上的
+    可执行文件）或 `py:build`（解释器能 import 的模块）。R-126：缺依赖时旧行为是 FAIL
+    —— 而"这台机器上没有这个工具"与"这条门禁没通过"是**两件事**，前者红会让人去查代码，
+    实际该查环境。所以缺依赖时打印 **SKIP（无法判定）** 并把这条**移出通过/失败的分母**。
+    """
+
+    def __init__(self, key: str, cmd: str, cost_s: float, what: str,
+                 needs: tuple[str, ...] = ()):
         self.key, self.cmd, self.cost_s, self.what = key, cmd, cost_s, what
+        self.needs = needs
 
 
 GATES = [
-    Gate("pytest", "uv run pytest", 12.7, "全量测试"),
+    Gate("pytest", "uv run pytest", 12.7, "全量测试",
+         needs=("cmd:uv", "py:pytest")),
     Gate("coverage", "uv run python tools/gen_coverage.py --check", 0.2,
          "COVERAGE.md 与 capabilities 同源"),
     Gate("agentrefs", "uv run python tools/gen_agent_refs.py --check", 0.2,
@@ -65,7 +77,8 @@ GATES = [
          "入库产物已脱敏"),
     Gate("release", "uv run python tools/release_bump.py --check", 1.0,
          "四处版本号自洽（pyproject / __version__ / README / CHANGELOG）"),
-    Gate("build", "uv build", 1.1, "sdist + wheel 能生成"),
+    Gate("build", "uv build", 1.1, "sdist + wheel 能生成",
+         needs=("cmd:uv", "py:build")),
 ]
 GATE_BY_KEY = {g.key: g for g in GATES}
 
@@ -303,8 +316,32 @@ def shlex_quote(text: str) -> str:
     return shlex.quote(text)
 
 
+def _needs_missing(gate: "Gate", interp: str | None) -> list[str]:
+    """哪些探针不可用（`cmd:x` 走 PATH，`py:x` 走解释器 import）。"""
+    from shutil import which
+
+    out = []
+    for probe in gate.needs:
+        kind, _, name = probe.partition(":")
+        if kind == "cmd":
+            ok = which(name) is not None
+        elif kind == "py":
+            # 用 in-process 的 find_spec：起子进程会让"无 uv 时门禁只调 N 次"的既有断言变味
+            # （tests/test_dev_index.py 数的是 ≥ 每条门禁一次的调用数），而且这里本来就不需要它。
+            try:
+                ok = importlib.util.find_spec(name) is not None
+            except (ImportError, ValueError):
+                ok = False
+        else:
+            ok = True
+        if not ok:
+            out.append(probe)
+    return out
+
+
 def run_gates(python: str | None = None) -> int:
     failed: list[str] = []
+    skipped: list[str] = []
     total = 0.0
     interp = _runner_python(python)
     if interp is not None:
@@ -313,6 +350,14 @@ def run_gates(python: str | None = None) -> int:
               f"—— 缺该模块时先 `pip install build` 或装 uv）")
     for g in GATES:
         import time
+        # R-126：依赖**全缺** ⇒ 这条无法判定（SKIP），不是失败。移出分母，但**必须打印原因** ——
+        # 静默跳过是这个仓库明确禁止的（"静默跳过是没有的"）。
+        missing = _needs_missing(g, interp)
+        if g.needs and len(missing) == len(g.needs):
+            skipped.append(g.key)
+            print(f"[skip] {g.key:<10}    n/a  {g.what}"
+                  f"（缺 {'、'.join(g.needs)}：这台机器上无法判定，不计入通过/失败）")
+            continue
         t0 = time.monotonic()
         cmd = _gate_cmd(g.cmd, python=interp)
         # **不注入 PYTHONPATH**：各生成脚本自己会 `sys.path.insert(0, ROOT/src)`，
@@ -326,7 +371,11 @@ def run_gates(python: str | None = None) -> int:
         if r.returncode != 0:
             failed.append(g.key)
             print((r.stdout + r.stderr).strip()[-1200:])
-    print(f"\n{len(GATES) - len(failed)}/{len(GATES)} 通过，合计 {total:.1f} s")
+    judged = len(GATES) - len(skipped)
+    print(f"\n{judged - len(failed)}/{judged} 通过，合计 {total:.1f} s"
+          + (f"（另有 {len(skipped)} 条跳过：无法判定）" if skipped else ""))
+    if skipped:
+        print("跳过（不计入分母）：" + ", ".join(skipped))
     if failed:
         print("失败：" + ", ".join(failed))
     return 1 if failed else 0

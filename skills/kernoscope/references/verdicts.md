@@ -1,6 +1,6 @@
 <!-- 由 tools/gen_agent_refs.py 生成；改动请改代码后重跑，不要手改本文件 -->
 
-# 判词（`verdicts[]`）参考 · 决策包 schema rev 1.3
+# 判词（`verdicts[]`）参考 · 决策包 schema rev 1.4
 
 决策包里每条判词有 `id` / `status` / `actionable` / `facts` / `premises`（可选 `refusal` / `band` / `mdd` / `next`）。
 **硬规则：只有 `actionable=true` 的判词能当行动依据**（v1.0 的包没有这个字段，
@@ -18,7 +18,7 @@
 | `dram_bytes_trace` | DRAM 字节的第二条口径（访存轨迹 + 缓存模型） | 越低越好 | 轨迹口径 / NVML 口径 | `premise_failed` |
 | `ledger_verdict` | 与你的账本差多少（同口径对拍） | 不判方向（只给差值） | 继承 dram_bytes_per_launch 的前提 | 见 packet 的 `refusals` 表 |
 | `occupancy` | occupancy 上界与实际达到值 | 越高越好 | （无强制前提） | 见 packet 的 `refusals` 表 |
-| `roofline` | 离 roofline 多远、compute 还是 memory bound | 越高越好 | （无强制前提） | 见 packet 的 `refusals` 表 |
+| `roofline` | 离 roofline 多远、compute 还是 memory bound | 越高越好 | 达成值是否超过本次 dtype 的实测峰值（超过则这个百分比不能当达成率读） | `calibration_caliber_mismatch` |
 | `issue_slot` | 发射槽用了多少、瓶颈方向 | 不判方向（只给差值） | （无强制前提） | 见 packet 的 `refusals` 表 |
 | `l2_locality` | L1/L2 命中率与工作集 | 越高越好 | （无强制前提） | 见 packet 的 `refusals` 表 |
 | `over_peak` | 达成值是否超过标定峰值（物理上不可能） | 不判方向（只给差值） | 达成值是否超过本机实测峰值 | `calibration_caliber_mismatch` |

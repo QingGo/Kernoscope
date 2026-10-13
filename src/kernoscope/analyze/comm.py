@@ -40,9 +40,19 @@ class CopyGroup:
     max_duration_ns: int = 0
 
     @property
+    def usable(self) -> bool:
+        """这一组的时长**能不能**用来算带宽。
+
+        R-141：`max_duration_ns <= 0`（时长为 0/负，实测 1 GiB / 0 ns 可达）时，
+        `achieved_gbs` 会算成 0 并把 `0 GB/s [estimated]` 发布出去 —— 那是**没有测量**
+        而不是"测到 0"。这一档必须拒绝，不能发布。
+        """
+        return self.max_duration_ns > 0 and self.bytes > 0
+
+    @property
     def achieved_gbs(self) -> float:
-        """按 MAX 时长算的达成带宽（`estimated`）。"""
-        if self.max_duration_ns <= 0 or self.bytes <= 0:
+        """按 MAX 时长算的达成带宽（`estimated`）。`usable` 为假时返回 0，调用方必须先判它。"""
+        if not self.usable:
             return 0.0
         return self.bytes / (self.max_duration_ns / 1e9) / 1e9
 
@@ -54,7 +64,8 @@ class CommLedger:
     #: 拷贝总字节（`exact`：逐行相加）
     bytes_total: int = 0
     bytes_by_kind: dict[int, int] = field(default_factory=dict)
-    bytes_by_device: dict[int, int] = field(default_factory=dict)
+    #: 设备号 → 字节。键可以是 `None`（deviceId 为 NULL）：不并进 0 号卡（R-140）。
+    bytes_by_device: dict[int | None, int] = field(default_factory=dict)
     copies: int = 0
     #: 按 (copyKind, bytes) 分组的 MAX 口径时长
     groups: list[CopyGroup] = field(default_factory=list)
@@ -67,6 +78,13 @@ class CommLedger:
     #: 通信 kernel 与计算 kernel 的重叠（`exact`，区间求交）
     comm_busy_ns: int = 0
     overlap_ns: int = 0
+    #: R-140：`bytes` 为 NULL 的行数。它们的字节**不计入**任何合计 —— 静默当成 0 会把
+    #: "没读到"说成"搬了 0 字节"，而两个合计都被标成 `exact`。
+    null_bytes_rows: int = 0
+    #: R-140：`deviceId` 为 NULL 的行数。它们单列成 `unknown`，**不并进 0 号卡**。
+    unknown_device_rows: int = 0
+    #: R-141：时长 ≤ 0 的行数（"没有测量" ≠ "测到 0"）。
+    nonpositive_duration_rows: int = 0
 
     @property
     def has_any(self) -> bool:
@@ -94,30 +112,35 @@ def _is_comm_kernel(name: str) -> bool:
     return any(m in low for m in COMM_KERNEL_MARKERS)
 
 
-def _union_len(intervals: Iterable[tuple[int, int]]) -> int:
-    """区间的并集长度（重叠只算一次）。"""
-    total = 0
-    cur_start = cur_end = None
+def _merge(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """把区间按起点排序并合并重叠（半开区间；空区间丢弃）。"""
+    out: list[tuple[int, int]] = []
     for s, e in sorted(intervals):
         if e <= s:
             continue
-        if cur_start is None:
-            cur_start, cur_end = s, e
-        elif s <= cur_end:
-            cur_end = max(cur_end, e)
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
         else:
-            total += cur_end - cur_start
-            cur_start, cur_end = s, e
-    if cur_start is not None:
-        total += cur_end - cur_start
-    return total
+            out.append((s, e))
+    return out
+
+
+def _union_len(intervals: Iterable[tuple[int, int]]) -> int:
+    """区间的并集长度（重叠只算一次）。"""
+    return sum(e - s for s, e in _merge(intervals))
 
 
 def _intersection_len(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> int:
-    """两组区间的交集总长（各自先去重；不依赖拷贝时长，只用于 kernel 区间）。"""
+    """两组区间的交集总长。
+
+    **两边都必须先去重**（R-139）：`comm_busy_ns` 用的是真并集，若这里按重复计数做交集，
+    分子就能大于分母 —— 实测 `comm=[(0,1000),(0,1000)]`（两张卡各一个完全重合的 NCCL kernel）
+    会给出 `ks__comm_compute_overlap_pct = 200%`，而且还标着 `exact`。
+    一个"比例"超过 100% 是没有意义的。所以先各自合并，再求交。
+    """
     i = j = 0
     total = 0
-    a, b = sorted(a), sorted(b)
+    a, b = _merge(a), _merge(b)
     while i < len(a) and j < len(b):
         lo = max(a[i][0], b[j][0])
         hi = min(a[i][1], b[j][1])
@@ -139,18 +162,31 @@ def build_ledger(memcpys: list[Any], kernels: list[Any]) -> CommLedger:
     by_group: dict[tuple[int, int], CopyGroup] = {}
     for m in memcpys:
         led.copies += 1
-        led.bytes_total += int(m.bytes)
-        led.duration_sum_ns += int(m.duration_ns)
+        nbytes = getattr(m, "bytes", None)
+        dur = int(getattr(m, "duration_ns", 0) or 0)
+        dev = getattr(m, "device_id", None)
+        led.duration_sum_ns += dur
+        if dur <= 0:
+            led.nonpositive_duration_rows += 1
+        if dev is None:
+            # R-140：NULL deviceId 不是 0 号卡 —— 并进 0 会把"不知道哪张卡"说成"卡 0"
+            led.unknown_device_rows += 1
+        if nbytes is None:
+            # R-140：NULL 字节**不计入任何合计**（合计标的是 exact，不能把"没读到"当 0 搬）
+            led.null_bytes_rows += 1
+            continue
+        nbytes = int(nbytes)
+        led.bytes_total += nbytes
         led.bytes_by_kind[int(m.copy_kind)] = (
-            led.bytes_by_kind.get(int(m.copy_kind), 0) + int(m.bytes))
-        led.bytes_by_device[int(m.device_id)] = (
-            led.bytes_by_device.get(int(m.device_id), 0) + int(m.bytes))
-        key = (int(m.copy_kind), int(m.bytes))
+            led.bytes_by_kind.get(int(m.copy_kind), 0) + nbytes)
+        led.bytes_by_device[dev if dev is None else int(dev)] = (
+            led.bytes_by_device.get(dev if dev is None else int(dev), 0) + nbytes)
+        key = (int(m.copy_kind), nbytes)
         g = by_group.get(key)
         if g is None:
-            g = by_group[key] = CopyGroup(copy_kind=key[0], bytes=key[1])
+            g = by_group[key] = CopyGroup(copy_kind=key[0], bytes=nbytes)
         g.count += 1
-        g.max_duration_ns = max(g.max_duration_ns, int(m.duration_ns))
+        g.max_duration_ns = max(g.max_duration_ns, dur)
     led.groups = sorted(by_group.values(), key=lambda g: (-g.bytes, g.copy_kind))
 
     comm_iv: list[tuple[int, int]] = []

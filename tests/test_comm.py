@@ -126,10 +126,10 @@ def test_empty_inputs_do_not_invent_a_ledger():
 # ---------------------------------------------------------------------------
 # section 层：拒绝条目必须带上反面证据
 # ---------------------------------------------------------------------------
-def _comm_section(led):
+def _comm_section(led, peak_gbs: float = 911.8):
     from kernoscope.sections import BuildOptions, build_comm_section
 
-    return build_comm_section(BuildOptions(comm=led))
+    return build_comm_section(BuildOptions(comm=led, peak_gbs=peak_gbs))
 
 
 def test_section_refuses_the_summed_duration_and_carries_the_evidence():
@@ -155,6 +155,98 @@ def test_section_reports_bytes_as_exact_and_duration_as_estimated():
     assert est and est[0].provenance.value == "estimated"
 
 
-def test_no_section_when_nothing_was_collected():
-    """没采到拷贝/通信 kernel ⇒ 不给 section（而不是给一堆 0）。"""
-    assert _comm_section(build_ledger([], [])) is None
+def test_nothing_collected_leaves_an_na_with_a_reason_not_a_silent_gap():
+    """R-142：没采到拷贝 activity **不等于传输为 0**（只有 `--trace=cuda` 才采）。
+
+    旧实现直接 `return None`，于是"拿不到"这件事静默消失 —— 违反本项目 B1/R-02
+    （缺席要留 `n/a` + 原因）。现在照样出这一节，只放一条拒绝，并说明两种可能。
+    """
+    sec = _comm_section(build_ledger([], []))
+    assert sec is not None, "整节静默消失了：读者看不到这张表是空的"
+    assert len(sec.metrics) == 1
+    m = sec.metrics[0]
+    assert m.name == "ks__comm_bytes_total"
+    assert m.provenance.value == "unavailable" and m.value is None
+    assert "不能混为一谈" in (m.reason or "") and "0" in (m.reason or "")
+
+
+# ---------------------------------------------------------------------------
+# 第九轮的四条对抗性输入（每条都是真机/评审实测出来的形态）
+# ---------------------------------------------------------------------------
+def test_overlap_can_never_exceed_100_pct():
+    """R-139：`comm_busy` 走真并集、交集却按重复计数 ⇒ 两张卡完全重合时给出 **200%** 且标 exact。
+
+    评审的最小复现是纯函数的：`comm=[(0,1000),(0,1000)]`、`comp=[(0,1000)]`。
+    """
+    from kernoscope.analyze.comm import _intersection_len, _union_len
+
+    comm, comp = [(0, 1000), (0, 1000)], [(0, 1000)]
+    assert _union_len(comm) == 1000
+    assert _intersection_len(comm, comp) == 1000, \
+        f"交集没去重：分子 {_intersection_len(comm, comp)} > 分母 {_union_len(comm)}"
+
+    # 端到端：两张卡各一个完全重合的 NCCL kernel + 同时有计算在跑
+    kernels = [_kernel("ncclDevKernel_AllReduce_a", 1000, start=0),
+               _kernel("ncclDevKernel_AllReduce_b", 1000, start=0),
+               _kernel("sgemm", 1000, start=0)]
+    led = build_ledger([], kernels)
+    assert led.comm_busy_ns == 1000
+    assert led.overlap_ns == 1000
+    assert 0.0 <= led.overlap_pct_of_comm <= 100.0, led.overlap_pct_of_comm
+
+
+def test_all_bad_rows_cannot_publish_a_physically_impossible_bandwidth():
+    """R-137：整组都是坏行时，MAX 口径给出的**正是它自己拒绝的那个数**（13322.9 GB/s）。
+
+    这条是 P0 的核心：工具不能把它自己在紧邻一行称为"物理上不可能"的数字发布出去。
+    """
+    allbad = [_copy(1, 1 << 30, 80_594, corr=i) for i in range(5)]
+    led = build_ledger(allbad, [])
+    assert led.implied_gbs_if_summed == pytest.approx(13322.9, abs=1.0)
+    sec = _comm_section(led, peak_gbs=911.8)
+    est = [m for m in sec.metrics if m.name.startswith("est__copy_htod_")]
+    assert est, sec.metrics
+    assert est[0].provenance.value == "unavailable", "物理上不可能的数被发布出去了"
+    assert est[0].value is None
+    obs = est[0].refusal.observed or {}
+    assert obs.get("achieved_gbs", 0) > 911.8          # 证据随拒绝一起给
+    assert "前提在本组不成立" in (est[0].reason or "")
+
+
+def test_single_row_group_declares_that_max_has_no_control():
+    """R-137 变体：单行组里 MAX 就是那一行 —— note 必须说明"没有第二行可对照"，不许断言前提成立。"""
+    led = build_ledger([_copy(1, 1 << 30, 180_000_000)], [])
+    sec = _comm_section(led, peak_gbs=911.8)
+    note = [m for m in sec.metrics if m.name.startswith("est__copy_htod_")][0].note
+    assert "只有 1 行" in note and "没有第二行可对照" in note
+    assert "既有诚实行也有坏行" not in note, "note 又断言了未经校验的前提"
+
+
+def test_nonpositive_duration_is_refused_not_published_as_zero():
+    """R-141：1 GiB / 0 ns ⇒ 旧实现发布 `0 GB/s [estimated]`。没有测量 ≠ 测到 0。"""
+    led = build_ledger([_copy(1, 1 << 30, 0)], [])
+    assert led.nonpositive_duration_rows == 1
+    sec = _comm_section(led, peak_gbs=911.8)
+    est = [m for m in sec.metrics if m.name.startswith("est__copy_htod_")]
+    assert est and est[0].provenance.value == "unavailable" and est[0].value is None
+    assert "没有可用的时长" in (est[0].reason or "")
+
+
+def test_null_bytes_and_device_are_surfaced_not_coerced_to_zero():
+    """R-140：NULL 字节/设备号不许静默折算成 0（而合计标的是 exact）。"""
+    led = build_ledger([
+        _copy(1, 1 << 20, 90_000, dev=0),
+        MemcpyRecord(start_ns=0, end_ns=90_000, duration_ns=90_000, copy_kind=1,
+                     bytes=None, device_id=1, stream_id=7),
+        MemcpyRecord(start_ns=0, end_ns=90_000, duration_ns=90_000, copy_kind=1,
+                     bytes=1 << 20, device_id=None, stream_id=7),
+    ], [])
+    assert led.null_bytes_rows == 1 and led.unknown_device_rows == 1
+    assert led.bytes_total == 2 << 20, "NULL 字节被当成 0（下界没体现）或漏计"
+    assert None in led.bytes_by_device and 0 in led.bytes_by_device
+    assert led.bytes_by_device[None] == 1 << 20, "deviceId=NULL 被并进了 0 号卡"
+    sec = _comm_section(led)
+    names = {m.name for m in sec.metrics}
+    assert "ks__comm_bytes_null_rows" in names
+    assert "ks__comm_bytes_unknown_device_rows" in names
+    assert "ks__device_unknown__comm_bytes" in names

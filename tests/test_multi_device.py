@@ -99,3 +99,29 @@ def test_headline_finding_is_silent_for_a_single_device():
     text = _phrases(rep)
     assert "最耗时的是" in text
     assert "跨卡加总" not in text
+
+
+def test_import_path_honours_device_filter(tmp_path):
+    """R-143：`-i` 回读时 `--devices` 必须**真的生效**。
+
+    它正是我们自己在拒绝语里给出的补救命令（"按卡分开看：--devices <id>"）——
+    指一条空操作比不给补救更糟。以前过滤只挂在采集路径上，回读路径静默忽略它。
+    """
+    import json
+
+    from kernoscope import cli
+
+    rep = _report([0, 1])
+    src = tmp_path / "in.ksreport.json"
+    src.write_text(json.dumps(rep.to_dict()), encoding="utf-8")
+    out = tmp_path / "out"
+
+    rc = cli.main(["-i", str(src), "--devices", "1", "--screen", "off",
+                   "--set", "basic", "-o", str(out)])
+    assert rc == 0
+    got = json.loads((tmp_path / "out.ksreport.json").read_text(encoding="utf-8"))
+    assert got["device_ids"] == [1], got["device_ids"]
+    assert got["multi_device"] is False
+    assert all(l["device_id"] == 1 for k in got["kernels"] for l in k["launches"])
+    # 跨卡事实跟着重算：过滤完不该还报"跨了 2 张卡"
+    assert got["kernels"][0]["launch_count"] == 1

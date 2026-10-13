@@ -166,7 +166,12 @@ def test_run_gates_without_uv_never_invokes_uv(monkeypatch):
     monkeypatch.setattr(mod.subprocess, "run",
                         lambda cmd, **kw: (seen.append(cmd), _R())[1])
     assert mod.run_gates() == 0
-    assert len(seen) == len(mod.GATES)
+    # R-126：依赖**全缺**的门禁是 **SKIP（无法判定）**，不是 FAIL —— 所以它不在这份调用记录里。
+    # 本用例把 `which` 打桩成"什么都没有"，`build` 的两条探针（cmd:uv / py:build）因此全缺。
+    skipped = [g.key for g in mod.GATES
+               if g.needs and len(mod._needs_missing(g, mod._runner_python(None))) == len(g.needs)]
+    assert "build" in skipped, "build 的依赖探针应当全部不可用 —— 否则这条用例失去意义"
+    assert len(seen) == len(mod.GATES) - len(skipped), (len(seen), skipped)
     offenders = [c for c in seen if c.startswith("uv ")]
     assert not offenders, f"没有 uv 时仍去调 uv：{offenders}"
     import shlex as _shlex

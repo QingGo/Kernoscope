@@ -137,8 +137,11 @@ class MemcpyRecord:
     end_ns: int
     duration_ns: int
     copy_kind: int
-    bytes: int
-    device_id: int
+    #: NULL 表示 **activity 里这个字段是空的**，不是 0（R-140）。合计时不许当 0 折算：
+    #: 那会把"没读到"变成"搬了 0 字节"，而合计标的是 `exact`。
+    bytes: int | None
+    #: NULL 表示**不知道是哪张卡**，不许并进 0 号卡（R-140）。
+    device_id: int | None
     stream_id: int
     correlation_id: int = 0
 
@@ -231,7 +234,13 @@ class Report:
 
     @property
     def is_multi_device(self) -> bool:
-        return len(self.device_ids) > 1
+        """R-133：必须与 `observed_device_ids()` 同源。
+
+        以前直接读 `self.device_ids`：当字段为空（老产物、或 `-i` 回读一份没有该字段的报告）
+        而 launch 里明明跨了两张卡时，这里会答 `False`，与 `observed_device_ids()` 给的
+        `[0, 1]` 自相矛盾 —— 于是"跨卡"这件事又被静默掉了。
+        """
+        return len(self.observed_device_ids()) > 1
 
     def observed_device_ids(self) -> list[int]:
         """deviceId 集合：优先用记录下来的；老产物没有这个字段时从 launch 现算。"""

@@ -523,7 +523,7 @@ CHECKS: Checks = {
 }
 
 
-def render_json(report: "CapabilitiesReport") -> str:
+def render_json(report: "CapabilityReport") -> str:
     """`kernoscope capabilities --json` 的**唯一**渲染器（缩进 + 结尾换行）。
 
     价格标签与真实输出必须同源：各写一份 `json.dumps(...)` 的话，缩进/分隔符一变，

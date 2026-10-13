@@ -33,8 +33,12 @@ DOWNGRADE = "包装逻辑已验；真报告口径未验证"
 #: 降级的两个事实依据（README §4.3 要说清"为什么"）。
 REASONS = ("没有一份真 ncu 报告", "能收集计数器的机器")
 
-#: `ncu` 采出来的报告里不会出现本工具的名字；我们的写入器（含最小报告）都会留痕。
-_OURS = (b"kernoscope",)
+#: `ncu` 采出来的报告里不会出现本工具的**署名标记**；我们的写入器（含最小报告）都会留痕。
+#: R-135：以前是裸词 `b"kernoscope"` —— 它可能出现在任何无辜的字串里（路径、注释、别人报告里的
+#: 文本），于是"这是不是我们写的"会误判。改用写入器自己的常量（唯一真源，见 ncrep/substitute.py）。
+from kernoscope.ncrep.substitute import ATTRIBUTION_JSON_MARK, ATTRIBUTION_MARK  # noqa: E402
+
+_OURS = (ATTRIBUTION_MARK.encode(), ATTRIBUTION_JSON_MARK.encode())
 
 
 def _section(text: str, heading: str) -> str:

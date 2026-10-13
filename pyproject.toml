@@ -1,6 +1,6 @@
 [project]
 name = "kernoscope"
-version = "0.2.2"
+version = "0.2.3"
 description = "Provenance-honest CUDA kernel profiler for locked-down / multi-tenant GPUs; ncu-compatible CLI."
 readme = "README.md"
 requires-python = ">=3.10"

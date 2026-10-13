@@ -319,10 +319,34 @@ def build_comm_section(opt: BuildOptions) -> Section | None:
     """
     led = opt.comm
     if led is None or not getattr(led, "has_any", False):
-        # 没采到拷贝 activity **不等于传输为 0**（只有 --trace=cuda 才采）—— 如实说清。
-        return None
+        # R-142：这里以前直接 `return None`，于是"没采到拷贝 activity"这件事**静默消失**——
+        # 而它恰恰是"拿不到"，不是"传输为 0"（只有 `--trace=cuda` 才采拷贝活动）。
+        # 本项目的 B1/R-02 要求缺席也要留 `n/a` + 原因，所以现在照样出这一节，只放一条拒绝。
+        return Section("CommLedger", metrics=[Metric.unavailable(
+            "ks__comm_bytes_total",
+            "本次没有任何拷贝 activity 记录：要么采集时没开 `--trace=cuda`，"
+            "要么这段窗口里确实没有拷贝 —— **两者不能混为一谈**，所以不给 0",
+            source="CUPTI CUPTI_ACTIVITY_KIND_MEMCPY（本次为空）",
+            code=RefusalCode.MEMCPY_DURATION_UNTRUSTED)])
     s = Section("CommLedger")
     if led.copies:
+        # R-140：NULL 字段必须显式露面，不然"没读到"就被合计吞掉了（而合计标的是 exact）
+        if led.null_bytes_rows:
+            s.add(Metric.unavailable(
+                "ks__comm_bytes_null_rows",
+                f"有 {led.null_bytes_rows} 条拷贝 activity 的 `bytes` 是 NULL："
+                f"它们**不计入**任何字节合计（所以合计是下界，不是全量）",
+                source="CUPTI MEMCPY 的 bytes 列",
+                code=RefusalCode.MEMCPY_DURATION_UNTRUSTED,
+                observed={"null_bytes_rows": led.null_bytes_rows, "copies": led.copies}))
+        if led.unknown_device_rows:
+            s.add(Metric.unavailable(
+                "ks__comm_bytes_unknown_device_rows",
+                f"有 {led.unknown_device_rows} 条拷贝 activity 的 `deviceId` 是 NULL："
+                f"它们单列成 `ks__device_unknown__comm_bytes`，**不并进 0 号卡**",
+                source="CUPTI MEMCPY 的 deviceId 列",
+                code=RefusalCode.MEMCPY_DURATION_UNTRUSTED,
+                observed={"unknown_device_rows": led.unknown_device_rows}))
         s.add(Metric.exact(
             "ks__comm_bytes_total", led.bytes_total, "B",
             source="CUPTI CUPTI_ACTIVITY_KIND_MEMCPY 的 bytes 逐行相加（exact）",
@@ -332,21 +356,59 @@ def build_comm_section(opt: BuildOptions) -> Section | None:
             name = COPY_KIND_LABEL.get(int(kind), f"kind_{kind}")
             s.add(Metric.exact(f"ks__comm_bytes_{name}", int(nb), "B",
                                source=f"CUPTI copyKind={kind}（{name}）的 bytes 合计"))
-        for dev, nb in sorted(led.bytes_by_device.items()):
-            s.add(Metric.exact(f"ks__device_{dev}__comm_bytes", int(nb), "B",
-                               source="CUPTI MEMCPY 的 deviceId 分段（exact）"))
-        # MAX 口径：单次时长的最佳可得估计
+        for dev, nb in sorted(led.bytes_by_device.items(),
+                              key=lambda kv: (-1 if kv[0] is None else kv[0])):
+            tag = "unknown" if dev is None else str(dev)
+            s.add(Metric.exact(f"ks__device_{tag}__comm_bytes", int(nb), "B",
+                               source="CUPTI MEMCPY 的 deviceId 分段（exact）",
+                               note=("deviceId 为 NULL 的那批单列在这里，不并进 0 号卡（R-140）"
+                                     if dev is None else "")))
+        # MAX 口径：单次时长的最佳可得估计。
+        # R-137：MAX 的合理性依赖"组里存在诚实行"这个前提，而它**从未被校验**。
+        # 实测反例：5 行 1 GiB / 各 80 594 ns（全是坏行）⇒ MAX 口径给出 13322.9 GB/s，
+        # 与被它拒绝的 `implied_gbs_if_summed` **数值完全相同**，而 note 还断言"同组里既有
+        # 诚实行也有坏行"。所以这里加物理上界守卫：超过同机实测 DRAM 峰值就**拒绝发布**。
+        bound = float(getattr(opt, "peak_gbs", 0.0) or 0.0)
+        dropped_bad = 0
         for g in led.groups[:4]:
             if g.bytes < (1 << 20):
                 continue
             label = COPY_KIND_LABEL.get(int(g.copy_kind), f"kind_{g.copy_kind}")
+            name = f"est__copy_{label}_{_human_bytes(g.bytes)}_gbs"
+            if not g.usable:
+                # R-141：时长 ≤ 0 ⇒"没有测量"，不是"测到 0 GB/s"
+                s.add(Metric.unavailable(
+                    name, f"这一组的时长 ≤ 0（{g.max_duration_ns} ns）：没有可用的时长，"
+                          f"算不出带宽，也不给 0",
+                    source="CUPTI MEMCPY 的 end-start",
+                    code=RefusalCode.MEMCPY_DURATION_UNTRUSTED,
+                    observed={"max_duration_ns": g.max_duration_ns, "count": g.count,
+                              "bytes": g.bytes}))
+                continue
+            if bound and g.achieved_gbs > bound * 1.02:
+                # 物理上不可能：单次拷贝不可能比这台机器的实测峰值还快 ⇒ MAX 口径的前提不成立
+                dropped_bad += 1
+                s.add(Metric.unavailable(
+                    name, f"这一组算出的带宽 {g.achieved_gbs:.1f} GB/s 超过本机实测峰值 "
+                          f"{bound:.1f} GB/s（物理上不可能）⇒ MAX 口径的前提在本组不成立："
+                          f"整组可能都是报 80–95 µs 的坏行，所以拒绝发布这个数",
+                    source="CUPTI bytes ÷ 该组最大时长，与标定的 DRAM 峰值对拍",
+                    code=RefusalCode.MEMCPY_DURATION_UNTRUSTED,
+                    observed={"achieved_gbs": round(g.achieved_gbs, 1),
+                              "peak_gbs": round(bound, 1), "count": g.count,
+                              "max_duration_ns": g.max_duration_ns}))
+                continue
+            # note 只写**已校验**的事实：组内行数、取的 MAX、以及与上界的比较结果
+            checked = (f"与上界对拍：{g.achieved_gbs:.2f} ≤ 本机实测峰值 {bound:.1f} GB/s ✓"
+                       if bound else "本次没有本机实测峰值可对拍（未标定）")
+            single = ("（本组只有 1 行：MAX 就是那一行，**没有第二行可对照**，"
+                      "所以当那一行本身是坏行时，这个数也会照发 —— 已与上界对拍）"
+                      if g.count == 1 else "")
             s.add(Metric.estimated(
-                f"est__copy_{label}_{_human_bytes(g.bytes)}_gbs",
-                round(g.achieved_gbs, 2), "GB/s",
+                name, round(g.achieved_gbs, 2), "GB/s",
                 source=f"CUPTI bytes ÷ 该 (copyKind={g.copy_kind}, bytes={g.bytes}) 组的**最大**时长",
-                note=(f"这一组有 {g.count} 行；取 MAX 而不是求和，是因为同组里既有诚实行也有"
-                      f"报 80–95 µs 的坏行（1 GiB 报 80 µs 等于 13.3 TB/s，物理上不可能）。"
-                      f"MAX = {g.max_duration_ns / 1e6:.3f} ms")))
+                note=(f"本组 {g.count} 行，取 MAX（不求和：逐行相加会把带宽算错数百倍）。"
+                      f"MAX = {g.max_duration_ns / 1e6:.3f} ms。{checked}{single}")))
         # 反面证据：把"求和"这条路显式拒绝掉，并把错多少一起报出来
         s.add(Metric.unavailable(
             "ks__comm_time_sum_ns",
@@ -877,6 +939,19 @@ def build_kernel_sections(kr, opt: BuildOptions) -> list[Section]:
                                        "%", source=f"{peak_src} {opt.peaks.compute_tflops:.1f} TFLOP/s "
                                                    f"({opt.peaks.dtype_key})",
                                        note=sol.near_peak_note()))
+                if sol.dtype_peak_exceeded and not sol.over_peak:
+                    # R-138：分母拆开后出现的中间档 —— 超过本 dtype 峰值、但还在同机上限内。
+                    # 它**不是**"更漂亮的达成率"，而是"这个 kernel 没走本 dtype 的路径"。
+                    s.add(Metric.derived(
+                        "ks__dtype_peak_exceeded_warning", 1.0, "",
+                        source="达成值 vs 本 dtype 峰值（与同机上限守卫分开）",
+                        note=(f"达成 {sol.achieved_tflops:.1f} TFLOP/s 超过本次 dtype "
+                              f"({opt.peaks.dtype_key}) 的实测峰值 "
+                              f"{opt.peaks.compute_tflops:.1f} TFLOP/s，但仍在同机任何 dtype 的上限 "
+                              f"{opt.peaks.ceiling_tflops or opt.peaks.compute_tflops:.1f} TFLOP/s 之内 ⇒ "
+                              f"**上面那个 {sol.pct_compute:.1f}% 不能当达成率读**：这个 kernel 走的不是 "
+                              f"该 dtype 的路径（例如 bf16 请求在 Turing 上实际跑 fp16/fp32 路径）。"
+                              f"要么按实际路径重新给 --ks-dtype，要么把 FLOPs 口径核对一遍")))
                 s.add(Metric.estimated("est__roofline_ideal_ns", round(max(sol.ideal_ns_compute,
                                                                            sol.ideal_ns_memory), 1),
                                        "ns", source="roofline with measured peaks"))

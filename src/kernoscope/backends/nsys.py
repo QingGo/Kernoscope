@@ -187,10 +187,13 @@ def parse_memcpys(db: str) -> list[MemcpyRecord]:
     with sqlite3.connect(db) as con:
         for row in _rows_or_nsys_error(con, q, db):
             start, end, dev, stream, kind, nbytes, corr = row
+            # R-140：`bytes` / `deviceId` 为 NULL 时**保留 None**，不要 `or 0` ——
+            # 静默折算会把"没读到"说成"0 字节 / 0 号卡"，而下游把合计标成 exact。
             out.append(MemcpyRecord(
                 start_ns=int(start), end_ns=int(end), duration_ns=int(end) - int(start),
-                copy_kind=int(kind or 0), bytes=int(nbytes or 0),
-                device_id=int(dev or 0), stream_id=int(stream or 0),
+                copy_kind=int(kind or 0),
+                bytes=None if nbytes is None else int(nbytes),
+                device_id=None if dev is None else int(dev), stream_id=int(stream or 0),
                 correlation_id=int(corr or 0),
             ))
     return out

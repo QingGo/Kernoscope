@@ -447,7 +447,7 @@ def test_packet_carries_schema_revision_and_actionable():
 
     p = build(_rich_report())
     assert p["schema_version"] == PACKET_SCHEMA_VERSION == 1     # 主版本不动
-    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.3"
+    assert p["schema_revision"] == PACKET_SCHEMA_REVISION == "1.4"
     ids = {v["id"] for v in p["verdicts"]}
     assert ids, "这个报告应当产出判词"
     for v in p["verdicts"]:
@@ -1505,3 +1505,24 @@ def test_over_peak_poisoning_also_invalidates_the_money_prescription():
     assert not [v for v in p["verdicts"] if v.get("unit") == "CNY/h"], p["verdicts"]
     # 而**按实测时长排序**的那一级（`saving_estimate_share`，不需要峰值分母）不受牵连 ——
     # 它与二级互斥（有 prescription 时走二级），所以这里只钉住"它的前提与峰值无关"这条设计。
+
+
+def test_roofline_verdict_carries_the_dtype_peak_premise():
+    """R-138：分母拆成【本 dtype 峰值】与【同机上限】后出现的中间档必须变成**前提**。
+
+    事故形状：报给读者的比率用本 dtype 峰值（能算出 294%），而"物理上不可能"守卫用同机上限
+    （不拦）⇒ 判词给一个物理上不可能的比例，`gate --require-actionable roofline` 却放绿。
+    """
+    from kernoscope.packet import build
+
+    rep = _two_kernel_report(cheap_over_peak=False, top_over_peak=False)
+    for k in rep.kernels:
+        for sec in k.sections:
+            if sec.name == "SpeedOfLight":
+                sec.metrics.append(_KM("ks__dtype_peak_exceeded_warning", 1.0, "", "derived"))
+    by_id = {v["id"]: v for v in build(rep)["verdicts"]}
+    prem = {p["id"]: p for p in by_id["roofline"].get("premises") or []}
+    assert "dtype_peak_exceeded" in prem, by_id["roofline"]
+    assert prem["dtype_peak_exceeded"]["ok"] is False
+    assert by_id["roofline"]["actionable"] is False, \
+        "带不满足前提的 roofline 仍然 actionable ⇒ gate 会放绿"

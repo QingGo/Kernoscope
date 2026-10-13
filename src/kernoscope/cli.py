@@ -432,6 +432,27 @@ def _target_command(program: Sequence[str]) -> list[str]:
     return raw
 
 
+def _device_filter(launches: list[Any], spec: str, *, log_info, log_error) -> tuple[list[Any], int]:
+    """按 `--devices a,b` 过滤 launch 记录。返回 (保留的, rc)；rc≠0 表示这条用法错误。
+
+    R-143：以前这个过滤只挂在**采集路径**上，于是 `-i` 回读时 `--devices` 被**静默忽略** ——
+    而它正是我们自己在拒绝语里给出的补救命令（"按卡分开看：--devices <id>"）。指一条空操作
+    比不给补救更糟，所以抽成共用的一处，两条路径都走它。
+    """
+    try:
+        want = {int(x) for x in str(spec).replace(" ", "").split(",") if x != ""}
+    except ValueError:
+        log_error(f"error: --devices 需要逗号分隔的整数设备号，收到 {spec!r}")
+        return [], 1
+    available = sorted({l.device_id for l in launches})
+    kept = [l for l in launches if l.device_id in want]
+    log_info(f"--devices {sorted(want)}: 保留 {len(kept)}/{len(launches)} 条 launch 记录")
+    if not kept:
+        log_error(f"error: 这些设备上没有 kernel activity（可用 deviceId={available or '无'}）。")
+        return [], 1
+    return kept, 0
+
+
 def _parse_memcpys_safe(db: str) -> list[Any]:
     """读拷贝 activity；读不到就返回空表。
 
@@ -825,6 +846,19 @@ def _main(argv: Sequence[str] | None = None) -> int:
         if args.strict and problems:
             _report_strict(problems)
             return 2
+        if args.devices:
+            # R-143：回读路径同样要应用 `--devices`，否则拒绝语给出的补救命令在这里是空操作。
+            kept, rc_dev = _device_filter(
+                [l for k in rep.kernels for l in k.launches], args.devices,
+                log_info=log, log_error=log_error)
+            if rc_dev:
+                return rc_dev
+            keep = {id(l) for l in kept}
+            for k in rep.kernels:
+                k.launches = [l for l in k.launches if id(l) in keep]
+                k.launch_count = len(k.launches)
+            # 跨卡事实跟着重算，否则过滤完还报"跨了 2 张卡"
+            rep.device_ids = sorted({l.device_id for k in rep.kernels for l in k.launches})
         return _emit(rep, args, compat_mode, logged, packet_ctx={})
 
     if args.list_sets:
@@ -979,18 +1013,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 + (f" [{ref.remedy_or_default.command}]" if ref.remedy_or_default.command else ""))
             return 1
     if args.devices:
-        try:
-            want_dev = {int(x) for x in str(args.devices).replace(" ", "").split(",") if x != ""}
-        except ValueError:
-            log_error(f"error: --devices 需要逗号分隔的整数设备号，收到 {args.devices!r}")
-            return 1
-        before = len(launches)
-        launches = [l for l in launches if l.device_id in want_dev]
-        log(f"--devices {sorted(want_dev)}: 保留 {len(launches)}/{before} 条 launch 记录")
-        if not launches:
-            log_error(f"error: 这些设备上没有 kernel activity（可用 deviceId="
-                f"{sorted({l.device_id for l in launches}) or '无'}）。")
-            return 1
+        launches, rc_dev = _device_filter(launches, args.devices,
+                                         log_info=log, log_error=log_error)
+        if rc_dev:
+            return rc_dev
     matched = select_launches(launches, args.kernel_name, args.launch_skip,
                               args.launch_count, args.launch_skip_before_match)
     kernelless = bool(degraded) and not launches
